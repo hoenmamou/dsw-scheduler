@@ -2,35 +2,14 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-/**
- * DSW Scheduler v5
- * - Shift Start Date/Time + End Date/Time (supports overnight)
- * - AUTO End Date behavior:
- *    * End Date defaults to Start Date
- *    * If End Time < Start Time, End Date auto-bumps to next day
- *    * If End Time >= Start Time, End Date auto-returns to Start Date (unless user manually changed endDate)
- * - Login system (client-side localStorage):
- *    * 3 default admins
- *    * supervisors can login
- *    * each shift stamped with createdBy (userId)
- * - Supervisor-specific totals:
- *    * Total OT hours created by logged-in supervisor (selected week)
- * - Coverage gaps + Print/PDF + Export/Import
- *
- * NOTE: This is still client-side auth (not enterprise secure).
- */
+const LS_KEY = "dsw_scheduler_mvp_v51";
 
-const LS_KEY = "dsw_scheduler_mvp_v5";
-
+/* ------------------ helpers ------------------ */
 function uid(prefix = "id") {
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
 }
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-function toISODate(d) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
+function pad2(n) { return String(n).padStart(2, "0"); }
+function toISODate(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
 function parseISODate(iso) {
   const [y, m, d] = String(iso || "").split("-").map(Number);
   if (!y || !m || !d) return null;
@@ -61,33 +40,8 @@ function minutesToTime(mins) {
   const m = mins % 60;
   return `${pad2(h)}:${pad2(m)}`;
 }
-function minutesToHours(mins) {
-  return mins / 60;
-}
-function fmtHours(h) {
-  return `${Math.round(h * 10) / 10}`;
-}
-function readFileAsText(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result || ""));
-    r.onerror = reject;
-    r.readAsText(file);
-  });
-}
-function downloadJSON(filename, data) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-/** Build a Date from dateISO + timeHH:MM (local time) */
+function minutesToHours(mins) { return mins / 60; }
+function fmtHours(h) { return `${Math.round(h * 10) / 10}`; }
 function dtFrom(dateISO, timeHHMM) {
   const d = parseISODate(dateISO);
   if (!d) return null;
@@ -97,16 +51,9 @@ function dtFrom(dateISO, timeHHMM) {
   out.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
   return out;
 }
-
-/** True overlap between two [start,end) datetime intervals */
 function overlapsDT(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && bStart < aEnd;
 }
-
-/**
- * For a shift that may span multiple days, return day slices:
- * [dateISO, startMin, endMin] where mins are minutes within that day.
- */
 function sliceShiftByDay(startDT, endDT) {
   const slices = [];
   const cur = new Date(startDT);
@@ -129,20 +76,16 @@ function sliceShiftByDay(startDT, endDT) {
     slices.push([dateISO, startMin, endMin]);
     cur.setTime(sliceEnd.getTime());
   }
-
   return slices;
 }
-
-/** Merge intervals and compute uncovered gaps within a window */
 function computeGaps(windowStart, windowEnd, intervals) {
   if (Number.isNaN(windowStart) || Number.isNaN(windowEnd) || windowEnd <= windowStart) return [];
-
   const clipped = intervals
     .map(([s, e]) => [Math.max(windowStart, s), Math.min(windowEnd, e)])
     .filter(([s, e]) => e > s)
     .sort((a, b) => a[0] - b[0]);
 
-  if (clipped.length === 0) return [[windowStart, windowEnd]];
+  if (!clipped.length) return [[windowStart, windowEnd]];
 
   const merged = [];
   for (const [s, e] of clipped) {
@@ -163,33 +106,53 @@ function computeGaps(windowStart, windowEnd, intervals) {
   if (cur < windowEnd) gaps.push([cur, windowEnd]);
   return gaps;
 }
+async function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = reject;
+    r.readAsText(file);
+  });
+}
+function downloadJSON(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
+/* ------------------ defaults ------------------ */
 const DEFAULT_STATE = {
   settings: {
     weekStartsOn: 1,
     overtimeThresholdHours: 40,
     blockOvertime: true,
-    // auth
     requireLogin: true,
   },
-  users: [], // {id, username, pin, role: "admin"|"supervisor", displayName}
+  users: [], // {id, username, pin, role, displayName}
   staff: [],
   clients: [], // {id,name,coverageStart,coverageEnd}
-  shifts: [], // {id,startDate,startTime,endDate,endTime,staffId,clientId,notes, createdBy}
+  shifts: [],  // {id,startDate,startTime,endDate,endTime,staffId,clientId,notes,createdBy}
 };
 
 function ensureDefaultAdmins(state) {
   if (Array.isArray(state.users) && state.users.length > 0) return state;
 
+  // FIXED IDs (no randomness) to avoid hydration issues
   const users = [
     { id: "u_admin1", username: "admin1", pin: "1234", role: "admin", displayName: "Admin 1" },
     { id: "u_admin2", username: "admin2", pin: "2345", role: "admin", displayName: "Admin 2" },
     { id: "u_admin3", username: "admin3", pin: "3456", role: "admin", displayName: "Admin 3" },
   ];
-
   return { ...state, users };
 }
 
+/* ------------------ styles ------------------ */
 const styles = {
   page: { minHeight: "100vh", background: "#0b0c10", color: "#e8e8e8", padding: 16 },
   wrap: { maxWidth: 1200, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12 },
@@ -198,69 +161,16 @@ const styles = {
   sub: { margin: "6px 0 0", fontSize: 13, opacity: 0.85, maxWidth: 900 },
   row: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" },
   card: { background: "#12141a", border: "1px solid rgba(255,255,255,0.10)", borderRadius: 16, padding: 12 },
-  btn: {
-    background: "#1f6feb",
-    border: "1px solid rgba(255,255,255,0.18)",
-    color: "white",
-    padding: "8px 10px",
-    borderRadius: 10,
-    cursor: "pointer",
-    fontWeight: 900,
-    fontSize: 13,
-  },
-  btn2: {
-    background: "transparent",
-    border: "1px solid rgba(255,255,255,0.18)",
-    color: "#e8e8e8",
-    padding: "8px 10px",
-    borderRadius: 10,
-    cursor: "pointer",
-    fontWeight: 900,
-    fontSize: 13,
-  },
-  btnDanger: {
-    background: "#e11d48",
-    border: "1px solid rgba(255,255,255,0.18)",
-    color: "white",
-    padding: "8px 10px",
-    borderRadius: 10,
-    cursor: "pointer",
-    fontWeight: 950,
-    fontSize: 13,
-  },
-  input: {
-    background: "#0f1117",
-    color: "#e8e8e8",
-    border: "1px solid rgba(255,255,255,0.14)",
-    borderRadius: 10,
-    padding: "8px 10px",
-    outline: "none",
-    fontSize: 13,
-  },
-  select: {
-    background: "#0f1117",
-    color: "#e8e8e8",
-    border: "1px solid rgba(255,255,255,0.14)",
-    borderRadius: 10,
-    padding: "8px 10px",
-    outline: "none",
-    fontSize: 13,
-  },
+  btn: { background: "#1f6feb", border: "1px solid rgba(255,255,255,0.18)", color: "white", padding: "8px 10px", borderRadius: 10, cursor: "pointer", fontWeight: 900, fontSize: 13 },
+  btn2: { background: "transparent", border: "1px solid rgba(255,255,255,0.18)", color: "#e8e8e8", padding: "8px 10px", borderRadius: 10, cursor: "pointer", fontWeight: 900, fontSize: 13 },
+  btnDanger: { background: "#e11d48", border: "1px solid rgba(255,255,255,0.18)", color: "white", padding: "8px 10px", borderRadius: 10, cursor: "pointer", fontWeight: 950, fontSize: 13 },
+  input: { background: "#0f1117", color: "#e8e8e8", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 10, padding: "8px 10px", outline: "none", fontSize: 13 },
+  select: { background: "#0f1117", color: "#e8e8e8", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 10, padding: "8px 10px", outline: "none", fontSize: 13 },
   label: { fontSize: 12, opacity: 0.8, marginBottom: 6 },
   badge: (kind) => ({
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "3px 10px",
-    borderRadius: 999,
-    fontSize: 12,
+    display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px", borderRadius: 999, fontSize: 12,
     border: "1px solid rgba(255,255,255,0.16)",
-    background:
-      kind === "ot"
-        ? "rgba(225,29,72,0.20)"
-        : kind === "near"
-          ? "rgba(245,158,11,0.20)"
-          : "rgba(34,197,94,0.15)",
+    background: kind === "ot" ? "rgba(225,29,72,0.20)" : kind === "near" ? "rgba(245,158,11,0.20)" : "rgba(34,197,94,0.15)",
   }),
   grid7: { display: "grid", gridTemplateColumns: "repeat(7, minmax(160px, 1fr))", gap: 10, overflowX: "auto", paddingBottom: 4 },
   dayHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 },
@@ -270,15 +180,7 @@ const styles = {
   shiftTitle: { fontWeight: 950, fontSize: 13, marginBottom: 4 },
   shiftMeta: { fontSize: 12, opacity: 0.86, lineHeight: 1.35 },
   hr: { height: 1, background: "rgba(255,255,255,0.10)", margin: "10px 0" },
-  modalOverlay: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(0,0,0,0.65)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 16,
-  },
+  modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
   modal: { width: "min(860px, 100%)", background: "#12141a", borderRadius: 16, border: "1px solid rgba(255,255,255,0.12)", padding: 14 },
   modalTitle: { fontSize: 18, fontWeight: 980, margin: 0 },
   twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
@@ -307,52 +209,33 @@ function Tabs({ value, onChange, tabs }) {
   );
 }
 
+/* ------------------ Page (only login decisions here) ------------------ */
 export default function Page() {
+  // ✅ Always mount-gate at the very start
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return null;
+
   const [state, setState] = useState(() => {
-    const raw = typeof window !== "undefined" ? localStorage.getItem(LS_KEY) : null;
+    const raw = localStorage.getItem(LS_KEY);
     let base = DEFAULT_STATE;
 
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-
         const clients = Array.isArray(parsed.clients) ? parsed.clients : [];
         const shifts = Array.isArray(parsed.shifts) ? parsed.shifts : [];
-
-        // Backward compat: if old shifts had dateISO/start/end, convert
-        const upgradedShifts = shifts.map((sh) => {
-          if (sh.startDate && sh.startTime && sh.endDate && sh.endTime) return sh;
-          if (sh.dateISO && sh.start && sh.end) {
-            const sMin = parseTimeToMinutes(sh.start);
-            const eMin = parseTimeToMinutes(sh.end);
-            const endDate = (!Number.isNaN(sMin) && !Number.isNaN(eMin) && eMin <= sMin) ? addDaysISO(sh.dateISO, 1) : sh.dateISO;
-            return {
-              id: sh.id || uid("shift"),
-              startDate: sh.dateISO,
-              startTime: sh.start,
-              endDate,
-              endTime: sh.end,
-              staffId: sh.staffId,
-              clientId: sh.clientId,
-              notes: sh.notes || "",
-              createdBy: sh.createdBy || "unknown",
-            };
-          }
-          return { ...sh, createdBy: sh.createdBy || "unknown" };
-        });
-
         base = {
           settings: { ...DEFAULT_STATE.settings, ...(parsed.settings || {}) },
           users: Array.isArray(parsed.users) ? parsed.users : [],
           staff: Array.isArray(parsed.staff) ? parsed.staff : [],
           clients: clients.map((c) => ({ coverageStart: "08:00", coverageEnd: "16:00", ...c })),
-          shifts: upgradedShifts,
+          shifts: shifts.map((sh) => ({ ...sh, createdBy: sh.createdBy || "unknown" })),
         };
       } catch {
         base = DEFAULT_STATE;
       }
     }
-
     return ensureDefaultAdmins(base);
   });
 
@@ -360,101 +243,93 @@ export default function Page() {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
   }, [state]);
 
-  // ---------------------------
-  // Login (client-side)
-  // ---------------------------
-  const [loginUsername, setLoginUsername] = useState("admin1");
-  const [loginPin, setLoginPin] = useState("");
-  const [sessionUserId, setSessionUserId] = useState(() => (typeof window !== "undefined" ? sessionStorage.getItem("dsw_user_id") : null));
-
+  const [sessionUserId, setSessionUserId] = useState(() => sessionStorage.getItem("dsw_user_id"));
   const currentUser = useMemo(() => state.users.find((u) => u.id === sessionUserId) || null, [state.users, sessionUserId]);
-  const isAdmin = currentUser?.role === "admin";
 
-  useEffect(() => {
-    if (!state.settings.requireLogin) {
-      // If login disabled, auto-pick first user
-      if (!sessionUserId && state.users[0]) {
-        sessionStorage.setItem("dsw_user_id", state.users[0].id);
-        setSessionUserId(state.users[0].id);
-      }
-    }
-  }, [state.settings.requireLogin, sessionUserId, state.users]);
-
+  function loginAs(userId) {
+    sessionStorage.setItem("dsw_user_id", userId);
+    setSessionUserId(userId);
+  }
   function logout() {
     sessionStorage.removeItem("dsw_user_id");
     setSessionUserId(null);
-    setLoginPin("");
   }
 
-  function submitLogin() {
-    const u = state.users.find((x) => x.username === loginUsername);
-    if (!u) return alert("User not found.");
-    if (String(loginPin) !== String(u.pin)) return alert("Incorrect PIN.");
-    sessionStorage.setItem("dsw_user_id", u.id);
-    setSessionUserId(u.id);
-    setLoginPin("");
-  }
-
-  // Login screen if required
   if (state.settings.requireLogin && !currentUser) {
-    return (
-      <div style={styles.page}>
-        <div style={{ ...styles.wrap, maxWidth: 520 }}>
-          <div style={styles.card}>
-            <h1 style={styles.h1}>DSW Scheduler</h1>
-            <p style={styles.sub}>
-              Login required. Choose your account and enter your PIN.
-            </p>
+    return <LoginScreen users={state.users} onLogin={loginAs} />;
+  }
 
-            <div style={{ height: 12 }} />
+  return (
+    <SchedulerApp
+      state={state}
+      setState={setState}
+      currentUser={currentUser || state.users[0]}
+      onLogout={logout}
+    />
+  );
+}
 
-            <div style={styles.label}>Account</div>
-            <select
-              style={{ ...styles.select, width: "100%" }}
-              value={loginUsername}
-              onChange={(e) => setLoginUsername(e.target.value)}
-            >
-              {state.users.map((u) => (
-                <option key={u.id} value={u.username}>
-                  {u.displayName || u.username} ({u.role})
-                </option>
-              ))}
-            </select>
+/* ------------------ Login Screen (separate component) ------------------ */
+function LoginScreen({ users, onLogin }) {
+  const [username, setUsername] = useState(users[0]?.username || "admin1");
+  const [pin, setPin] = useState("");
 
-            <div style={{ height: 10 }} />
+  function submit() {
+    const u = users.find((x) => x.username === username);
+    if (!u) return alert("User not found.");
+    if (String(pin) !== String(u.pin)) return alert("Incorrect PIN.");
+    onLogin(u.id);
+  }
 
-            <div style={styles.label}>PIN</div>
-            <input
-              style={{ ...styles.input, width: "100%" }}
-              type="password"
-              value={loginPin}
-              onChange={(e) => setLoginPin(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }}
-              placeholder="Enter PIN"
-            />
+  return (
+    <div style={styles.page}>
+      <div style={{ ...styles.wrap, maxWidth: 520 }}>
+        <div style={styles.card}>
+          <h1 style={styles.h1}>DSW Scheduler</h1>
+          <p style={styles.sub}>Login required. Choose your account and enter your PIN.</p>
 
-            <div style={{ height: 12 }} />
+          <div style={{ height: 12 }} />
 
-            <button style={styles.btn} onClick={submitLogin}>Login</button>
+          <div style={styles.label}>Account</div>
+          <select style={{ ...styles.select, width: "100%" }} value={username} onChange={(e) => setUsername(e.target.value)}>
+            {users.map((u) => (
+              <option key={u.id} value={u.username}>
+                {u.displayName || u.username} ({u.role})
+              </option>
+            ))}
+          </select>
 
-            <div style={{ marginTop: 12, fontSize: 12, opacity: 0.85 }}>
-              Default admins (change these ASAP): admin1/1234, admin2/2345, admin3/3456.
-            </div>
+          <div style={{ height: 10 }} />
+
+          <div style={styles.label}>PIN</div>
+          <input
+            style={{ ...styles.input, width: "100%" }}
+            type="password"
+            value={pin}
+            onChange={(e) => setPin(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            placeholder="Enter PIN"
+          />
+
+          <div style={{ height: 12 }} />
+          <button style={styles.btn} onClick={submit}>Login</button>
+
+          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.85 }}>
+            Default admins (change ASAP): admin1/1234, admin2/2345, admin3/3456.
           </div>
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
-  // ---------------------------
-  // Week + derived data
-  // ---------------------------
+/* ------------------ Main Scheduler App (all hooks live here) ------------------ */
+function SchedulerApp({ state, setState, currentUser, onLogout }) {
+  const isAdmin = currentUser?.role === "admin";
+
   const [tab, setTab] = useState("schedule");
   const [weekAnchorISO, setWeekAnchorISO] = useState(() => toISODate(new Date()));
-  const weekStartISO = useMemo(
-    () => startOfWeekISO(weekAnchorISO, state.settings.weekStartsOn),
-    [weekAnchorISO, state.settings.weekStartsOn]
-  );
+  const weekStartISO = useMemo(() => startOfWeekISO(weekAnchorISO, state.settings.weekStartsOn), [weekAnchorISO, state.settings.weekStartsOn]);
   const weekDays = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysISO(weekStartISO, i)), [weekStartISO]);
 
   const staffById = useMemo(() => new Map(state.staff.map((s) => [s.id, s])), [state.staff]);
@@ -466,7 +341,6 @@ export default function Page() {
     return { start, end };
   }, [weekStartISO]);
 
-  // Shifts that intersect this week
   const weekShifts = useMemo(() => {
     if (!weekRange.start || !weekRange.end) return [];
     return state.shifts.filter((sh) => {
@@ -477,13 +351,8 @@ export default function Page() {
     });
   }, [state.shifts, weekRange]);
 
-  // Shifts created by current user (for supervisor-specific reporting)
-  const weekShiftsMine = useMemo(() => {
-    if (!currentUser) return [];
-    return weekShifts.filter((sh) => sh.createdBy === currentUser.id);
-  }, [weekShifts, currentUser]);
+  const weekShiftsMine = useMemo(() => weekShifts.filter((sh) => sh.createdBy === currentUser.id), [weekShifts, currentUser.id]);
 
-  // Staff weekly hours (option: all shifts vs mine)
   function computeStaffWeekHours(shifts) {
     const mapMins = new Map();
     for (const s of state.staff) mapMins.set(s.id, 0);
@@ -506,10 +375,9 @@ export default function Page() {
     return out;
   }
 
-  const staffWeekHoursAll = useMemo(() => computeStaffWeekHours(weekShifts), [weekShifts, state.staff, weekRange]);
-  const staffWeekHoursMine = useMemo(() => computeStaffWeekHours(weekShiftsMine), [weekShiftsMine, state.staff, weekRange]);
+  const staffWeekHoursAll = useMemo(() => computeStaffWeekHours(weekShifts), [weekShifts]); // eslint-disable-line react-hooks/exhaustive-deps
+  const staffWeekHoursMine = useMemo(() => computeStaffWeekHours(weekShiftsMine), [weekShiftsMine]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Total OT hours created by the current supervisor
   const myTotalOvertimeHours = useMemo(() => {
     const threshold = state.settings.overtimeThresholdHours;
     let total = 0;
@@ -520,31 +388,26 @@ export default function Page() {
     return total;
   }, [staffWeekHoursMine, state.staff, state.settings.overtimeThresholdHours]);
 
-  // Schedule view slices per day (using ALL shifts)
   const shiftsByDay = useMemo(() => {
     const map = new Map();
     for (const d of weekDays) map.set(d, []);
-
     for (const sh of weekShifts) {
       const sdt = dtFrom(sh.startDate, sh.startTime);
       const edt = dtFrom(sh.endDate, sh.endTime);
       if (!sdt || !edt || edt <= sdt) continue;
-
       const slices = sliceShiftByDay(sdt, edt);
       for (const [dateISO, startMin, endMin] of slices) {
         if (!map.has(dateISO)) continue;
         map.get(dateISO).push({ ...sh, _sliceStartMin: startMin, _sliceEndMin: endMin });
       }
     }
-
     for (const [d, arr] of map.entries()) {
       arr.sort((a, b) => (a._sliceStartMin ?? 0) - (b._sliceStartMin ?? 0));
       map.set(d, arr);
     }
     return map;
-  }, [weekShifts, weekDays]);
+  }, [weekDays, weekShifts]);
 
-  // Coverage gaps based on ALL shifts
   const coverageGaps = useMemo(() => {
     const results = [];
     for (const c of state.clients) {
@@ -576,30 +439,20 @@ export default function Page() {
       });
   }, [state.staff, staffWeekHoursAll, state.settings.overtimeThresholdHours]);
 
-  // ---------------------------
-  // Modal: Add/Edit Shift (with Auto End Date behavior)
-  // ---------------------------
+  /* -------- Shift modal + auto end-date behavior -------- */
   const [modalOpen, setModalOpen] = useState(false);
   const [editingShiftId, setEditingShiftId] = useState(null);
-
-  // We track whether the user manually changed End Date, so our auto logic doesn't fight them.
   const [endDateTouched, setEndDateTouched] = useState(false);
 
-  const defaultShiftForm = useMemo(() => {
-    const startDate = weekStartISO;
-    const startTime = "08:00";
-    const endDate = weekStartISO;
-    const endTime = "16:00";
-    return {
-      startDate,
-      startTime,
-      endDate,
-      endTime,
-      staffId: state.staff[0]?.id || "",
-      clientId: state.clients[0]?.id || "",
-      notes: "",
-    };
-  }, [weekStartISO, state.staff, state.clients]);
+  const defaultShiftForm = useMemo(() => ({
+    startDate: weekStartISO,
+    startTime: "08:00",
+    endDate: weekStartISO,
+    endTime: "16:00",
+    staffId: state.staff[0]?.id || "",
+    clientId: state.clients[0]?.id || "",
+    notes: "",
+  }), [weekStartISO, state.staff, state.clients]);
 
   const [shiftForm, setShiftForm] = useState(defaultShiftForm);
 
@@ -609,12 +462,11 @@ export default function Page() {
     setShiftForm({ ...defaultShiftForm, startDate: dateISO, endDate: dateISO });
     setModalOpen(true);
   }
-
   function openEditShift(id) {
     const sh = state.shifts.find((x) => x.id === id);
     if (!sh) return;
     setEditingShiftId(id);
-    setEndDateTouched(true); // treat edit as "touched"
+    setEndDateTouched(true);
     setShiftForm({
       startDate: sh.startDate,
       startTime: sh.startTime,
@@ -626,25 +478,20 @@ export default function Page() {
     });
     setModalOpen(true);
   }
-
   function deleteShift(id) {
     if (!confirm("Delete this shift?")) return;
     setState((p) => ({ ...p, shifts: p.shifts.filter((x) => x.id !== id) }));
   }
 
-  // --- Auto End Date logic
+  // ✅ Auto end date logic
   useEffect(() => {
-    // Only auto-manage endDate if user hasn't manually changed endDate in this create session
     if (endDateTouched) return;
 
     const sMin = parseTimeToMinutes(shiftForm.startTime);
     const eMin = parseTimeToMinutes(shiftForm.endTime);
     if (Number.isNaN(sMin) || Number.isNaN(eMin)) return;
 
-    // Default: endDate = startDate
     let desired = shiftForm.startDate;
-
-    // If end is earlier than start => overnight => endDate = next day
     if (eMin < sMin) desired = addDaysISO(shiftForm.startDate, 1);
 
     if (desired !== shiftForm.endDate) {
@@ -652,7 +499,6 @@ export default function Page() {
     }
   }, [shiftForm.startDate, shiftForm.startTime, shiftForm.endTime, shiftForm.endDate, endDateTouched]);
 
-  // Validation + overlap + OT guard (based on ALL shifts, because you wanted "ensure staff do not go over 40")
   const shiftValidation = useMemo(() => {
     const issues = [];
     const warnings = [];
@@ -668,7 +514,7 @@ export default function Page() {
     if (!sdt || !edt) issues.push("Start/End date & time must be valid.");
     else if (edt <= sdt) issues.push("End must be after Start.");
 
-    // overlap with other shifts for same staff across any datetime
+    // ✅ Conflict check against ALL shifts (so supervisors can't double-book staff)
     if (!issues.length && staffId && sdt && edt) {
       const others = state.shifts.filter((sh) => sh.staffId === staffId && sh.id !== editingShiftId);
       for (const sh of others) {
@@ -676,13 +522,13 @@ export default function Page() {
         const e2 = dtFrom(sh.endDate, sh.endTime);
         if (!s2 || !e2 || e2 <= s2) continue;
         if (overlapsDT(sdt, edt, s2, e2)) {
-          issues.push("This shift overlaps another shift for the same staff.");
+          issues.push("This shift overlaps another shift for the same staff (already scheduled by someone).");
           break;
         }
       }
     }
 
-    // OT guard (for selected week, across ALL shifts)
+    // OT guard (selected week, ALL shifts)
     if (!issues.length && staffId && sdt && edt && weekRange.start && weekRange.end) {
       const currentMins = weekShifts
         .filter((sh) => sh.staffId === staffId && sh.id !== editingShiftId)
@@ -715,7 +561,8 @@ export default function Page() {
 
   function saveShift() {
     if (shiftValidation.issues.length) return;
-    if (!currentUser) return alert("No user session found.");
+
+    const existing = editingShiftId ? state.shifts.find((x) => x.id === editingShiftId) : null;
 
     const payload = {
       id: editingShiftId || uid("shift"),
@@ -726,22 +573,19 @@ export default function Page() {
       staffId: shiftForm.staffId,
       clientId: shiftForm.clientId,
       notes: shiftForm.notes || "",
-      createdBy: editingShiftId
-        ? (state.shifts.find((x) => x.id === editingShiftId)?.createdBy || currentUser.id)
-        : currentUser.id,
+      createdBy: existing?.createdBy || currentUser.id,
     };
 
     setState((p) => ({
       ...p,
       shifts: editingShiftId ? p.shifts.map((x) => (x.id === editingShiftId ? payload : x)) : [payload, ...p.shifts],
     }));
+
     setModalOpen(false);
     setEditingShiftId(null);
   }
 
-  // ---------------------------
-  // Staff/Client CRUD
-  // ---------------------------
+  /* -------- Staff/Clients CRUD -------- */
   const [staffName, setStaffName] = useState("");
   const [clientName, setClientName] = useState("");
   const [clientCoverageStart, setClientCoverageStart] = useState("08:00");
@@ -753,7 +597,6 @@ export default function Page() {
     setState((p) => ({ ...p, staff: [{ id: uid("staff"), name }, ...p.staff] }));
     setStaffName("");
   }
-
   function addClient() {
     const name = clientName.trim();
     if (!name) return;
@@ -763,24 +606,19 @@ export default function Page() {
     }));
     setClientName("");
   }
-
   function updateClientCoverage(id, coverageStart, coverageEnd) {
     setState((p) => ({ ...p, clients: p.clients.map((c) => (c.id === id ? { ...c, coverageStart, coverageEnd } : c)) }));
   }
-
   function deleteStaff(id) {
     if (!confirm("Delete this staff? This will remove their shifts too.")) return;
     setState((p) => ({ ...p, staff: p.staff.filter((s) => s.id !== id), shifts: p.shifts.filter((sh) => sh.staffId !== id) }));
   }
-
   function deleteClient(id) {
     if (!confirm("Delete this client? This will remove related shifts too.")) return;
     setState((p) => ({ ...p, clients: p.clients.filter((c) => c.id !== id), shifts: p.shifts.filter((sh) => sh.clientId !== id) }));
   }
 
-  // ---------------------------
-  // Users (Admin-only management)
-  // ---------------------------
+  /* -------- Users admin -------- */
   const [newUserUsername, setNewUserUsername] = useState("");
   const [newUserDisplayName, setNewUserDisplayName] = useState("");
   const [newUserPin, setNewUserPin] = useState("");
@@ -803,32 +641,26 @@ export default function Page() {
     setNewUserPin("");
     setNewUserRole("supervisor");
   }
-
   function updateUser(id, patch) {
     if (!isAdmin) return;
     setState((p) => ({ ...p, users: p.users.map((u) => (u.id === id ? { ...u, ...patch } : u)) }));
   }
-
   function deleteUser(id) {
     if (!isAdmin) return;
-    if (id === currentUser?.id) return alert("You cannot delete the account you are logged in with.");
-    if (!confirm("Delete this user? (Shifts will remain but 'Created By' may show unknown.)")) return;
+    if (id === currentUser.id) return alert("You can’t delete the account you’re logged in with.");
+    if (!confirm("Delete this user?")) return;
     setState((p) => ({ ...p, users: p.users.filter((u) => u.id !== id) }));
   }
 
-  // ---------------------------
-  // Import/Export/Reset/Print
-  // ---------------------------
+  /* -------- Import/Export/Print -------- */
   const fileInputRef = useRef(null);
 
   async function importJSON(file) {
     try {
       const text = await readFileAsText(file);
       const parsed = JSON.parse(text);
-
       const clients = Array.isArray(parsed.clients) ? parsed.clients : [];
       const shifts = Array.isArray(parsed.shifts) ? parsed.shifts : [];
-
       const next = ensureDefaultAdmins({
         settings: { ...DEFAULT_STATE.settings, ...(parsed.settings || {}) },
         users: Array.isArray(parsed.users) ? parsed.users : [],
@@ -836,7 +668,6 @@ export default function Page() {
         clients: clients.map((c) => ({ coverageStart: "08:00", coverageEnd: "16:00", ...c })),
         shifts: shifts.map((sh) => ({ ...sh, createdBy: sh.createdBy || "unknown" })),
       });
-
       setState(next);
       alert("Import complete.");
     } catch {
@@ -847,13 +678,11 @@ export default function Page() {
   function resetAll() {
     if (!confirm("Reset all data? This cannot be undone.")) return;
     sessionStorage.removeItem("dsw_user_id");
-    setSessionUserId(null);
-    setState(ensureDefaultAdmins(DEFAULT_STATE));
+    localStorage.removeItem(LS_KEY);
+    location.reload();
   }
 
-  function printWeek() {
-    window.print();
-  }
+  function printWeek() { window.print(); }
 
   const printCss = `
     @media print {
@@ -871,9 +700,6 @@ export default function Page() {
     return d ? d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : iso;
   }
 
-  // ---------------------------
-  // UI
-  // ---------------------------
   return (
     <div style={styles.page}>
       <style>{printCss}</style>
@@ -883,13 +709,10 @@ export default function Page() {
           <div>
             <h1 style={styles.h1}>DSW Scheduler</h1>
             <p style={styles.sub}>
-              Logged in as <b>{currentUser?.displayName || currentUser?.username}</b> ({currentUser?.role}).{" "}
-              <span style={{ opacity: 0.85 }}>
-                Your supervisor OT total (selected week): <b>{fmtHours(myTotalOvertimeHours)}</b> hours (based on shifts you created).
-              </span>
+              Logged in as <b>{currentUser.displayName || currentUser.username}</b> ({currentUser.role}).{" "}
+              Your supervisor OT total (selected week): <b>{fmtHours(myTotalOvertimeHours)}</b> hours (based on shifts you created).
             </p>
           </div>
-
           <div style={styles.row}>
             <button style={styles.btn2} onClick={printWeek}>Print / PDF</button>
             <button style={styles.btn2} onClick={() => downloadJSON(`dsw-scheduler_${weekStartISO}.json`, state)}>Export</button>
@@ -905,7 +728,7 @@ export default function Page() {
                 e.target.value = "";
               }}
             />
-            <button style={styles.btn2} onClick={logout}>Logout</button>
+            <button style={styles.btn2} onClick={onLogout}>Logout</button>
             <button style={styles.btnDanger} onClick={resetAll}>Reset</button>
           </div>
         </div>
@@ -920,9 +743,7 @@ export default function Page() {
                 <button style={styles.btn2} onClick={() => setWeekAnchorISO(addDaysISO(weekAnchorISO, -7))}>Prev</button>
                 <button style={styles.btn2} onClick={() => setWeekAnchorISO(addDaysISO(weekAnchorISO, 7))}>Next</button>
               </div>
-              <div style={{ fontSize: 12, opacity: 0.85 }}>
-                Week starting: <b>{weekStartISO}</b>
-              </div>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>Week starting: <b>{weekStartISO}</b></div>
               <div className="no-print" style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
                 Week starts:{" "}
                 <select
@@ -958,18 +779,11 @@ export default function Page() {
                     onChange={(e) =>
                       setState((p) => ({
                         ...p,
-                        settings: {
-                          ...p.settings,
-                          overtimeThresholdHours: Math.max(1, Math.min(120, Number(e.target.value || 40))),
-                        },
+                        settings: { ...p.settings, overtimeThresholdHours: Math.max(1, Math.min(120, Number(e.target.value || 40))) },
                       }))
                     }
                   />
                 </div>
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.85 }}>
-                Threshold: <b>{state.settings.overtimeThresholdHours}h</b> · Guardrail:{" "}
-                <b>{state.settings.blockOvertime ? "Blocking" : "Warning-only"}</b>
               </div>
             </div>
 
@@ -981,12 +795,8 @@ export default function Page() {
                 <span style={styles.badge(weekSummaryAll.some((x) => x.status === "ot") ? "ot" : "ok")}>
                   OT: {weekSummaryAll.filter((x) => x.status === "ot").length}
                 </span>
-                <span style={styles.badge(coverageGaps.length ? "near" : "ok")}>
-                  Gaps: {coverageGaps.length}
-                </span>
-                <span style={styles.badge(myTotalOvertimeHours > 0 ? "near" : "ok")}>
-                  My OT hrs: {fmtHours(myTotalOvertimeHours)}
-                </span>
+                <span style={styles.badge(coverageGaps.length ? "near" : "ok")}>Gaps: {coverageGaps.length}</span>
+                <span style={styles.badge(myTotalOvertimeHours > 0 ? "near" : "ok")}>My OT hrs: {fmtHours(myTotalOvertimeHours)}</span>
               </div>
             </div>
           </div>
@@ -1079,15 +889,14 @@ export default function Page() {
           </div>
         )}
 
-        {/* Coverage Gaps */}
+        {/* Coverage gaps */}
         {tab === "gaps" && (
           <div style={styles.card} className="print-card">
             <div className="print-text" style={{ fontSize: 18, fontWeight: 990 }}>Coverage Gaps</div>
             <div className="print-text" style={{ fontSize: 12, opacity: 0.85 }}>
-              This shows uncovered blocks for each client’s coverage window. It does <b>not</b> fix scheduling errors—Start/End Date+Time does.
+              Uncovered blocks inside each client’s coverage window.
             </div>
             <div style={styles.hr} />
-
             {state.clients.length === 0 ? (
               <div className="print-text" style={{ fontSize: 13, opacity: 0.85 }}>Add clients first.</div>
             ) : coverageGaps.length === 0 ? (
@@ -1119,12 +928,9 @@ export default function Page() {
         {tab === "hours" && (
           <div style={styles.card} className="print-card">
             <div className="print-text" style={{ fontSize: 18, fontWeight: 990 }}>Weekly hours</div>
-            <div className="print-text" style={{ fontSize: 12, opacity: 0.85 }}>
-              Week starting {weekStartISO}. OT is calculated using all shifts.
-            </div>
+            <div className="print-text" style={{ fontSize: 12, opacity: 0.85 }}>Week starting {weekStartISO}</div>
             <div style={styles.hr} />
-
-            {state.staff.length === 0 ? (
+            {weekSummaryAll.length === 0 ? (
               <div className="print-text" style={{ fontSize: 13, opacity: 0.85 }}>Add staff to start tracking hours.</div>
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
@@ -1147,7 +953,6 @@ export default function Page() {
                 ))}
               </div>
             )}
-
             <div style={{ marginTop: 12, fontSize: 13, opacity: 0.9 }} className="print-text">
               <b>Your OT total (shifts you created):</b> {fmtHours(myTotalOvertimeHours)} hours.
             </div>
@@ -1165,7 +970,6 @@ export default function Page() {
                 <button style={styles.btn} onClick={addStaff}>Add Staff</button>
               </div>
             </div>
-
             <div style={styles.card}>
               <div style={{ fontSize: 16, fontWeight: 990, marginBottom: 8 }}>Staff list</div>
               {state.staff.length === 0 ? (
@@ -1193,7 +997,6 @@ export default function Page() {
               <div style={{ fontSize: 16, fontWeight: 990, marginBottom: 8 }}>Add client</div>
               <div style={styles.label}>Name</div>
               <input style={{ ...styles.input, width: "100%" }} value={clientName} onChange={(e) => setClientName(e.target.value)} />
-
               <div style={{ height: 10 }} />
               <div style={styles.label}>Coverage window (used for gap detection)</div>
               <div style={styles.row}>
@@ -1206,12 +1009,10 @@ export default function Page() {
                   <input style={styles.input} type="time" value={clientCoverageEnd} onChange={(e) => setClientCoverageEnd(e.target.value)} />
                 </div>
               </div>
-
               <div style={{ marginTop: 10 }}>
                 <button style={styles.btn} onClick={addClient}>Add Client</button>
               </div>
             </div>
-
             <div style={styles.card}>
               <div style={{ fontSize: 16, fontWeight: 990, marginBottom: 8 }}>Client list</div>
               {state.clients.length === 0 ? (
@@ -1224,7 +1025,6 @@ export default function Page() {
                         <div style={{ fontWeight: 990 }}>{c.name}</div>
                         <button style={styles.btnDanger} onClick={() => deleteClient(c.id)}>Delete</button>
                       </div>
-
                       <div style={{ marginTop: 10 }}>
                         <div style={styles.label}>Coverage window</div>
                         <div style={styles.row}>
@@ -1270,18 +1070,12 @@ export default function Page() {
                     Require login at startup
                   </label>
                 </div>
-                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
-                  This is client-side login (LocalStorage + session). For true security, we’d add real authentication + a database.
-                </div>
               </div>
 
               <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 14, padding: 12 }}>
                 <div style={{ fontWeight: 990 }}>Print / PDF</div>
                 <div style={{ marginTop: 8 }}>
-                  <button style={styles.btn} onClick={printWeek}>Print / Save as PDF</button>
-                </div>
-                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
-                  Tip: Print from Schedule or Coverage Gaps tabs for the cleanest output.
+                  <button style={styles.btn} onClick={() => window.print()}>Print / Save as PDF</button>
                 </div>
               </div>
             </div>
@@ -1293,9 +1087,7 @@ export default function Page() {
             </div>
 
             {!isAdmin ? (
-              <div style={{ fontSize: 13, opacity: 0.85 }}>
-                Only admins can create/edit users. Ask an admin to add supervisor accounts.
-              </div>
+              <div style={{ fontSize: 13, opacity: 0.85 }}>Only admins can create/edit users.</div>
             ) : (
               <>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
@@ -1334,35 +1126,21 @@ export default function Page() {
                           <div style={{ fontWeight: 990 }}>{u.displayName || u.username}</div>
                           <div style={{ fontSize: 12, opacity: 0.85 }}>{u.username} · {u.role}</div>
                         </div>
-                        <div style={styles.row}>
-                          <button style={styles.btnDanger} onClick={() => deleteUser(u.id)}>Delete</button>
-                        </div>
+                        <button style={styles.btnDanger} onClick={() => deleteUser(u.id)}>Delete</button>
                       </div>
 
                       <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
                         <div>
                           <div style={styles.label}>Display name</div>
-                          <input
-                            style={{ ...styles.input, width: "100%" }}
-                            value={u.displayName || ""}
-                            onChange={(e) => updateUser(u.id, { displayName: e.target.value })}
-                          />
+                          <input style={{ ...styles.input, width: "100%" }} value={u.displayName || ""} onChange={(e) => updateUser(u.id, { displayName: e.target.value })} />
                         </div>
                         <div>
                           <div style={styles.label}>PIN</div>
-                          <input
-                            style={{ ...styles.input, width: "100%" }}
-                            value={u.pin || ""}
-                            onChange={(e) => updateUser(u.id, { pin: e.target.value })}
-                          />
+                          <input style={{ ...styles.input, width: "100%" }} value={u.pin || ""} onChange={(e) => updateUser(u.id, { pin: e.target.value })} />
                         </div>
                         <div>
                           <div style={styles.label}>Role</div>
-                          <select
-                            style={{ ...styles.select, width: "100%" }}
-                            value={u.role}
-                            onChange={(e) => updateUser(u.id, { role: e.target.value })}
-                          >
+                          <select style={{ ...styles.select, width: "100%" }} value={u.role} onChange={(e) => updateUser(u.id, { role: e.target.value })}>
                             <option value="supervisor">supervisor</option>
                             <option value="admin">admin</option>
                           </select>
@@ -1402,7 +1180,7 @@ export default function Page() {
                         type="date"
                         value={shiftForm.startDate}
                         onChange={(e) => {
-                          setEndDateTouched(false); // start fresh
+                          setEndDateTouched(false);
                           setShiftForm((p) => ({ ...p, startDate: e.target.value, endDate: e.target.value }));
                         }}
                       />
@@ -1413,10 +1191,7 @@ export default function Page() {
                         style={{ ...styles.input, width: "100%" }}
                         type="time"
                         value={shiftForm.startTime}
-                        onChange={(e) => {
-                          setEndDateTouched(false);
-                          setShiftForm((p) => ({ ...p, startTime: e.target.value }));
-                        }}
+                        onChange={(e) => { setEndDateTouched(false); setShiftForm((p) => ({ ...p, startTime: e.target.value })); }}
                       />
                     </div>
                     <div>
@@ -1425,14 +1200,9 @@ export default function Page() {
                         style={{ ...styles.input, width: "100%" }}
                         type="date"
                         value={shiftForm.endDate}
-                        onChange={(e) => {
-                          setEndDateTouched(true);
-                          setShiftForm((p) => ({ ...p, endDate: e.target.value }));
-                        }}
+                        onChange={(e) => { setEndDateTouched(true); setShiftForm((p) => ({ ...p, endDate: e.target.value })); }}
                       />
-                      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
-                        Auto unless you change it.
-                      </div>
+                      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>Auto unless you change it.</div>
                     </div>
                     <div>
                       <div style={styles.label}>End Time</div>
@@ -1440,14 +1210,9 @@ export default function Page() {
                         style={{ ...styles.input, width: "100%" }}
                         type="time"
                         value={shiftForm.endTime}
-                        onChange={(e) => {
-                          setEndDateTouched(false);
-                          setShiftForm((p) => ({ ...p, endTime: e.target.value }));
-                        }}
+                        onChange={(e) => { setEndDateTouched(false); setShiftForm((p) => ({ ...p, endTime: e.target.value })); }}
                       />
-                      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
-                        If earlier than Start Time → bumps to next day.
-                      </div>
+                      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>If earlier than Start → bumps next day.</div>
                     </div>
                   </div>
 
@@ -1456,25 +1221,16 @@ export default function Page() {
                   <div style={styles.twoCol}>
                     <div>
                       <div style={styles.label}>Staff</div>
-                      <select
-                        style={{ ...styles.select, width: "100%" }}
-                        value={shiftForm.staffId}
-                        onChange={(e) => setShiftForm((p) => ({ ...p, staffId: e.target.value }))}
-                      >
+                      <select style={{ ...styles.select, width: "100%" }} value={shiftForm.staffId} onChange={(e) => setShiftForm((p) => ({ ...p, staffId: e.target.value }))}>
                         <option value="" disabled>Select staff</option>
                         {state.staff.slice().sort((a, b) => a.name.localeCompare(b.name)).map((s) => (
                           <option key={s.id} value={s.id}>{s.name}</option>
                         ))}
                       </select>
                     </div>
-
                     <div>
                       <div style={styles.label}>Client</div>
-                      <select
-                        style={{ ...styles.select, width: "100%" }}
-                        value={shiftForm.clientId}
-                        onChange={(e) => setShiftForm((p) => ({ ...p, clientId: e.target.value }))}
-                      >
+                      <select style={{ ...styles.select, width: "100%" }} value={shiftForm.clientId} onChange={(e) => setShiftForm((p) => ({ ...p, clientId: e.target.value }))}>
                         <option value="" disabled>Select client</option>
                         {state.clients.slice().sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
                           <option key={c.id} value={c.id}>{c.name}</option>
@@ -1484,14 +1240,12 @@ export default function Page() {
                   </div>
 
                   <div style={{ height: 10 }} />
-
                   <div>
                     <div style={styles.label}>Notes (optional)</div>
                     <textarea
                       style={{ ...styles.input, width: "100%", minHeight: 80, resize: "vertical" }}
                       value={shiftForm.notes}
                       onChange={(e) => setShiftForm((p) => ({ ...p, notes: e.target.value }))}
-                      placeholder="Example: overnight coverage, appointment, training"
                     />
                   </div>
 
@@ -1509,7 +1263,7 @@ export default function Page() {
         )}
 
         <div style={{ ...styles.card, fontSize: 13, opacity: 0.9 }} className="print-card">
-          ✅ Overnight scheduling errors are fixed by using Start/End Date+Time. Coverage gaps is only for detecting uncovered client time.
+          ✅ Supervisors can see each other’s shifts, and double-booking is blocked across ALL schedules.
         </div>
       </div>
     </div>
