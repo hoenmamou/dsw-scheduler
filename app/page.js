@@ -180,11 +180,13 @@ const DEFAULT_STATE = {
 
 function ensureDefaultAdmins(state) {
   if (Array.isArray(state.users) && state.users.length > 0) return state;
+
   const users = [
-    { id: uid("user"), username: "admin1", pin: "1234", role: "admin", displayName: "Admin 1" },
-    { id: uid("user"), username: "admin2", pin: "2345", role: "admin", displayName: "Admin 2" },
-    { id: uid("user"), username: "admin3", pin: "3456", role: "admin", displayName: "Admin 3" },
+    { id: "u_admin1", username: "admin1", pin: "1234", role: "admin", displayName: "Admin 1" },
+    { id: "u_admin2", username: "admin2", pin: "2345", role: "admin", displayName: "Admin 2" },
+    { id: "u_admin3", username: "admin3", pin: "3456", role: "admin", displayName: "Admin 3" },
   ];
+
   return { ...state, users };
 }
 
