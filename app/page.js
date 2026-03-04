@@ -189,8 +189,10 @@ const styles = {
   err: { color: "#fb7185", fontSize: 13, marginTop: 6 },
 };
 
-function Tabs({ value, onChange, tabs }) {
-  return (
+if (!Array.isArray(tabs)) return null;
+if (tabs.some((x) => typeof x === "object" && x && !("label" in x))) {
+  console.log("BAD tabs:", tabs);
+}return (
     <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
       {tabs.map((t) => (
         <button
