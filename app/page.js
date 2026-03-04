@@ -187,7 +187,7 @@ const styles = {
   fourCol: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 },
   warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
   err: { color: "#fb7185", fontSize: 13, marginTop: 6 },
- return (function Tabs({ value, onChange, tabs }) {
+  (function Tabs({ value, onChange, tabs }) {
   const safeTabs = Array.isArray(tabs) ? tabs : [];
 
   return (
