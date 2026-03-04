@@ -185,9 +185,10 @@ const styles = {
   modalTitle: { fontSize: 18, fontWeight: 980, margin: 0 },
   twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
   fourCol: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 },
-  warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
-  err: { color: "#fb7185", fontSize: 13, marginTop: 6 },
- function Tabs({ value, onChange, tabs }) {
+ warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
+err: { color: "#fb7185", fontSize: 13, marginTop: 6 },
+};
+function Tabs({ value, onChange, tabs }) {
   const safeTabs = Array.isArray(tabs) ? tabs : [];
 
   return (
@@ -208,7 +209,6 @@ const styles = {
     </div>
   );
 }
-
 
     <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
       {tabs.map((t) => (
