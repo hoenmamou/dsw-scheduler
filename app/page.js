@@ -188,6 +188,8 @@ const styles = {
  warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
 err: { color: "#fb7185", fontSize: 13, marginTop: 6 },
 };
+// ------------------ Tabs ------------------
+// ------------------ Tabs ------------------
 function Tabs({ value, onChange, tabs }) {
   const safeTabs = Array.isArray(tabs) ? tabs : [];
 
@@ -209,25 +211,6 @@ function Tabs({ value, onChange, tabs }) {
     </div>
   );
 }
-
-    <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-      {tabs.map((t) => (
-        <button
-          key={t.value}
-          onClick={() => onChange(t.value)}
-          style={{
-            ...styles.btn2,
-            background: value === t.value ? "rgba(31,111,235,0.18)" : "transparent",
-            borderColor: value === t.value ? "rgba(31,111,235,0.55)" : "rgba(255,255,255,0.18)",
-          }}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 /* ------------------ Page (only login decisions here) ------------------ */
 export default function Page() {
   const [mounted, setMounted] = useState(false);
