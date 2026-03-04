@@ -833,18 +833,15 @@ function SchedulerApp({ state, setState, currentUser, onLogout }) {
           </div>
         </div>
 
-        <Tabs
-          value={tab}
-          onChange={setTab}
-          tabs={[
-            { value: "schedule", label: "Schedule" },
-            { value: "gaps", label: "Coverage Gaps" },
-            { value: "hours", label: "Hours & OT" },
-            { value: "staff", label: "Staff" },
-            { value: "clients", label: "Clients" },
-            { value: "settings", label: "Settings" },
-          ]}
-        />
+       tabs={[
+  { value: "schedule", label: "Schedule" },
+  { value: "gaps", label: "Coverage Gaps" },
+  { value: "hours", label: "Hours & OT" },
+  // keep these if you want supervisors to manage lists:
+  { value: "staff", label: "Staff" },
+  { value: "clients", label: "Clients" },
+  { value: "settings", label: "Settings" },
+]}
 
         {/* Schedule */}
         {tab === "schedule" && (
