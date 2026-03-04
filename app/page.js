@@ -187,7 +187,27 @@ const styles = {
   fourCol: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 },
   warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
   err: { color: "#fb7185", fontSize: 13, marginTop: 6 },
-};
+function Tabs({ value, onChange, tabs }) {
+  const safeTabs = Array.isArray(tabs) ? tabs : [];
+
+  return (
+    <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {safeTabs.map((t) => (
+        <button
+          key={t.value}
+          onClick={() => onChange(t.value)}
+          style={{
+            ...styles.btn2,
+            background: value === t.value ? "rgba(31,111,235,0.18)" : "transparent",
+            borderColor: value === t.value ? "rgba(31,111,235,0.55)" : "rgba(255,255,255,0.18)",
+          }}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 
     <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
