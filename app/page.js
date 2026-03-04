@@ -211,49 +211,81 @@ function Tabs({ value, onChange, tabs }) {
 
 /* ------------------ Page (only login decisions here) ------------------ */
 export default function Page() {
-  // ✅ Always mount-gate at the very start
   const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  if (!mounted) return null;
+  const [hydrated, setHydrated] = useState(false);
 
-  const [state, setState] = useState(() => {
-    const raw = localStorage.getItem(LS_KEY);
-    let base = DEFAULT_STATE;
+  const [state, setState] = useState(() => ensureDefaultAdmins(DEFAULT_STATE));
+  const [sessionUserId, setSessionUserId] = useState(null);
 
-    if (raw) {
-      try {
+  // Mount gate
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Load from storage AFTER mount
+  useEffect(() => {
+    if (!mounted) return;
+
+    // session user
+    try {
+      setSessionUserId(sessionStorage.getItem("dsw_user_id"));
+    } catch {}
+
+    // app state
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) {
         const parsed = JSON.parse(raw);
+
         const clients = Array.isArray(parsed.clients) ? parsed.clients : [];
         const shifts = Array.isArray(parsed.shifts) ? parsed.shifts : [];
-        base = {
+
+        const next = ensureDefaultAdmins({
           settings: { ...DEFAULT_STATE.settings, ...(parsed.settings || {}) },
           users: Array.isArray(parsed.users) ? parsed.users : [],
           staff: Array.isArray(parsed.staff) ? parsed.staff : [],
           clients: clients.map((c) => ({ coverageStart: "08:00", coverageEnd: "16:00", ...c })),
           shifts: shifts.map((sh) => ({ ...sh, createdBy: sh.createdBy || "unknown" })),
-        };
-      } catch {
-        base = DEFAULT_STATE;
+        });
+
+        setState(next);
       }
+    } catch {
+      // ignore parse errors; keep defaults
+    } finally {
+      setHydrated(true);
     }
-    return ensureDefaultAdmins(base);
-  });
+  }, [mounted]);
 
+  // Save to storage ONLY after hydration
   useEffect(() => {
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
-  }, [state]);
+    if (!mounted || !hydrated) return;
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+    } catch {}
+  }, [state, mounted, hydrated]);
 
-  const [sessionUserId, setSessionUserId] = useState(() => sessionStorage.getItem("dsw_user_id"));
-  const currentUser = useMemo(() => state.users.find((u) => u.id === sessionUserId) || null, [state.users, sessionUserId]);
+  const currentUser = useMemo(
+    () => state.users.find((u) => u.id === sessionUserId) || null,
+    [state.users, sessionUserId]
+  );
 
   function loginAs(userId) {
-    sessionStorage.setItem("dsw_user_id", userId);
+    try {
+      sessionStorage.setItem("dsw_user_id", userId);
+    } catch {}
     setSessionUserId(userId);
   }
+
   function logout() {
-    sessionStorage.removeItem("dsw_user_id");
+    try {
+      sessionStorage.removeItem("dsw_user_id");
+    } catch {}
     setSessionUserId(null);
   }
+
+  // If you want a visible loading screen:
+  if (!mounted || !hydrated) return null;
 
   if (state.settings.requireLogin && !currentUser) {
     return <LoginScreen users={state.users} onLogin={loginAs} />;
@@ -268,7 +300,6 @@ export default function Page() {
     />
   );
 }
-
 /* ------------------ Login Screen (separate component) ------------------ */
 function LoginScreen({ users, onLogin }) {
   const [username, setUsername] = useState(users[0]?.username || "admin1");
