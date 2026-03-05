@@ -1,0 +1,19 @@
+/* app/globals.css */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #0b0c10;
+  color: white;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+}
+
+/* Print helpers */
+.no-print { display: block; }
+.print-only { display: none; }
+
+@media print {
+  .no-print { display: none !important; }
+  .print-only { display: block !important; }
+  body { background: white !important; color: black !important; }
+}
