@@ -2011,6 +2011,4 @@ const styles = {
   warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
   th: { textAlign: "left", fontSize: 12, opacity: 0.85, padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
   td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
-};d rgba(255,255,255,0.10)" },
-  td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
 };
