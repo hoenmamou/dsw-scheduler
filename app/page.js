@@ -639,12 +639,20 @@ export default function Page() {
     let alive = true;
 
     async function loadAll() {
-      const [users, staff, clients, shifts] = await Promise.all([
+      let [users, staff, clients, shifts] = await Promise.all([
         sbSelect("users"),
         sbSelect("staff"),
         sbSelect("clients"),
         sbSelect("shifts"),
       ]);
+
+      // If the DB has never been seeded (e.g. fresh localStorage), ensure the default login user exists.
+      if (!users || users.length === 0) {
+        console.warn("No users found in DB — seeding default users for local dev.");
+        users = DEFAULT_DB.users;
+        await sbUpsert("users", users);
+      }
+
       if (!alive) return;
       setState((prev) => ({ ...prev, ...normalizeFromDB({ users, staff, clients, shifts }) }));
     }
@@ -2002,5 +2010,7 @@ const styles = {
   hr: { height: 1, background: "rgba(255,255,255,0.10)", margin: "10px 0" },
   warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
   th: { textAlign: "left", fontSize: 12, opacity: 0.85, padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
+  td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
+};d rgba(255,255,255,0.10)" },
   td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
 };
