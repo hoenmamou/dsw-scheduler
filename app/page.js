@@ -1,7 +1,10 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase, SUPABASE_CONFIGURED } from "../lib/supabaseClient";
+import { supabase } from "../lib/supabaseClient";
+
+// On the client, Next.js replaces env vars at build time.
+const SUPABASE_CONFIGURED = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
 /* =========================
    Notes
@@ -619,7 +622,6 @@ export default function Page() {
 
   const currentUser = useMemo(() => state.users.find((u) => u.id === sessionUserId) || null, [state.users, sessionUserId]);
   const isAdmin = currentUser?.role === "admin";
-  const clientSchedule = builderClientId ? loadClientSchedule(builderClientId) : null;
 
   useEffect(() => setMounted(true), []);
 
@@ -752,6 +754,9 @@ export default function Page() {
   const [builderWeeklyAssignments, setBuilderWeeklyAssignments] = useState({});
   const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
   const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
+  const clientSchedule = useMemo(() => {
+    return builderClientId ? loadClientSchedule(builderClientId) : null;
+  }, [builderClientId]);
 
   // keep startDate aligned with week when week changes
   useEffect(() => {
