@@ -1,14 +1,15 @@
+// app/layout.js
+import "./globals.css";
+
 export const metadata = {
   title: "DSW Scheduler",
-  description: "Supervisor scheduling + 40 hour overtime guard",
+  description: "Dynamic scheduling tool with OT, shared support, gaps, calendar print",
 };
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body style={{ margin: 0, fontFamily: "Arial, sans-serif" }}>
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
