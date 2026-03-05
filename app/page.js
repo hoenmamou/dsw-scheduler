@@ -1792,7 +1792,7 @@ export default function Page() {
         )}
 
         {/* ================= Staff (Admin) ================= */}
-        {tab === "staff" && isAdmin && (
+        {tab === "staff" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Staff</h3>
 
@@ -1825,7 +1825,7 @@ export default function Page() {
         )}
 
         {/* ================= Clients (Admin) ================= */}
-        {tab === "clients" && isAdmin && (
+        {tab === "clients" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Clients (Assign supervisor over case)</h3>
 
@@ -1920,7 +1920,7 @@ export default function Page() {
         )}
 
         {/* ================= Users (Admin) ================= */}
-        {tab === "users" && isAdmin && (
+        {tab === "users" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Users</h3>
 
@@ -1972,7 +1972,7 @@ export default function Page() {
         )}
 
         {/* ================= Settings (Admin) ================= */}
-        {tab === "settings" && isAdmin && (
+        {tab === "settings" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Settings</h3>
 
