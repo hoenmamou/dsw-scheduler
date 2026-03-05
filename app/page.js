@@ -345,11 +345,56 @@ function staffWeekMinutesDedup(shifts, staffId) {
    Login
 ========================= */
 
-function LoginScreen({ users, onLogin }) {
+function LoginScreen({ users, onLogin, onCreateAdmin }) {
   const [picked, setPicked] = useState(users?.[0]?.id || "");
   const [pin, setPin] = useState("");
 
+  const [newId, setNewId] = useState("admin");
+  const [newName, setNewName] = useState("Admin");
+  const [newPin, setNewPin] = useState("1234");
+
   const user = users.find((u) => u.id === picked);
+
+  if (!users || users.length === 0) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
+        <div style={{ maxWidth: 520, margin: "40px auto", ...styles.card }}>
+          <h2 style={{ marginTop: 0 }}>DSW Scheduler — Create Admin</h2>
+
+          <div style={{ ...styles.twoCol, marginTop: 10 }}>
+            <div>
+              <div style={styles.tiny}>ID</div>
+              <input style={styles.input} value={newId} onChange={(e) => setNewId(e.target.value)} placeholder="admin" />
+            </div>
+            <div>
+              <div style={styles.tiny}>Name</div>
+              <input style={styles.input} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Admin" />
+            </div>
+            <div>
+              <div style={styles.tiny}>PIN</div>
+              <input style={styles.input} value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="1234" type="password" />
+            </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+            <button
+              style={styles.btn}
+              onClick={() => {
+                if (!newId.trim() || !newName.trim() || !newPin.trim()) return alert("All fields are required.");
+                onCreateAdmin({ id: newId.trim(), name: newName.trim(), pin: newPin.trim() });
+              }}
+            >
+              Create Admin
+            </button>
+          </div>
+
+          <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
+            Tip: This will create the first user so you can log in and manage staff/clients.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
@@ -694,6 +739,13 @@ export default function Page() {
       sessionStorage.removeItem("dsw_user_id");
     } catch {}
     setSessionUserId(null);
+  }
+
+  async function createAdminUser({ id, name, pin }) {
+    const row = { id, name, role: "admin", pin };
+    await sbUpsert("users", [row]);
+    await refreshState(setState);
+    loginAs(id);
   }
 
   const visibleClients = useMemo(() => {
@@ -1193,7 +1245,7 @@ export default function Page() {
   // fall back to localStorage for data persistence.
 
   if (!currentUser) {
-    return <LoginScreen users={state.users} onLogin={loginAs} />;
+    return <LoginScreen users={state.users} onLogin={loginAs} onCreateAdmin={createAdminUser} />;
   }
 
   const canSeeAllShifts = isAdmin; // supervisors see their clients + optional unassigned (via visibleClients)
