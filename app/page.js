@@ -425,7 +425,10 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
             onClick={() => {
               console.log("Login attempt", { picked, pin, user });
               if (!user) return alert("Pick a user before logging in.");
-              if (String(pin || "") !== String(user.pin || "")) {
+
+              // If the stored user does not have a pin, allow logging in (for existing Supabase rows without pin).
+              const pinMatches = !user.pin || String(pin || "") === String(user.pin || "");
+              if (!pinMatches) {
                 alert("Incorrect PIN.");
                 return;
               }
@@ -666,7 +669,9 @@ export default function Page() {
   }, [weekStart]);
 
   const currentUser = useMemo(() => state.users.find((u) => u.id === sessionUserId) || null, [state.users, sessionUserId]);
-  const isAdmin = currentUser?.role === "admin";
+  const normalizedRole = (currentUser?.role || "").toLowerCase();
+  const isAdmin = normalizedRole.includes("admin");
+  const canSeeAdminUI = isAdmin || normalizedRole.includes("super");
 
   useEffect(() => setMounted(true), []);
 
@@ -1229,7 +1234,7 @@ export default function Page() {
     { value: "staffSchedule", label: "Staff Schedule" },
     { value: "gaps", label: "Coverage Gaps" },
     { value: "hours", label: "Hours & OT" },
-    ...(isAdmin || currentUser?.role === "supervisor"
+    ...(canSeeAdminUI
       ? [
           { value: "staff", label: "Staff" },
           { value: "clients", label: "Clients" },
