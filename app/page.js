@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { supabase, SUPABASE_CONFIGURED } from "../lib/supabaseClient";
 
 /* =========================
    Notes
@@ -121,23 +121,79 @@ function Tabs({ value, onChange, tabs }) {
 ========================= */
 
 async function sbSelect(table) {
-  if (!supabase) throw new Error("Supabase not configured.");
-  const { data, error } = await supabase.from(table).select("*");
-  if (error) throw error;
-  return data || [];
+  // Supabase or localStorage fallback
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { data, error } = await supabase.from(table).select("*");
+    if (error) throw error;
+    return data || [];
+  }
+
+  // localStorage fallback
+  try {
+    const raw = localStorage.getItem("dsw_local_db");
+    const db = raw ? JSON.parse(raw) : DEFAULT_DB;
+    return db[table] || [];
+  } catch (e) {
+    return [];
+  }
 }
 
 async function sbUpsert(table, rows) {
-  if (!supabase) throw new Error("Supabase not configured.");
-  const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
-  if (error) throw error;
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
+    if (error) throw error;
+    return;
+  }
+
+  // localStorage upsert
+  try {
+    const raw = localStorage.getItem("dsw_local_db");
+    const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
+    db[table] = db[table] || [];
+    for (const r of rows) {
+      const idx = db[table].findIndex((x) => x.id === r.id);
+      if (idx >= 0) db[table][idx] = { ...db[table][idx], ...r };
+      else db[table].push(r);
+    }
+    localStorage.setItem("dsw_local_db", JSON.stringify(db));
+    // refresh in-memory state by triggering loadAll externally (caller should reload)
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 async function sbDelete(table, id) {
-  if (!supabase) throw new Error("Supabase not configured.");
-  const { error } = await supabase.from(table).delete().eq("id", id);
-  if (error) throw error;
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { error } = await supabase.from(table).delete().eq("id", id);
+    if (error) throw error;
+    return;
+  }
+
+  try {
+    const raw = localStorage.getItem("dsw_local_db");
+    const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
+    db[table] = (db[table] || []).filter((x) => x.id !== id);
+    localStorage.setItem("dsw_local_db", JSON.stringify(db));
+  } catch (e) {
+    console.error(e);
+  }
 }
+
+// Local data fallback default seed
+const DEFAULT_DB = {
+  users: [
+    { id: "admin", name: "Admin", role: "admin", pin: "1234" },
+    { id: "sup1", name: "Supervisor One", role: "supervisor", pin: "1111" },
+  ],
+  staff: [
+    { id: "st1", name: "Natasha" },
+    { id: "st2", name: "Jordan" },
+  ],
+  clients: [
+    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true },
+  ],
+  shifts: [],
+};
 
 function normalizeFromDB({ users, staff, clients, shifts }) {
   return {
@@ -193,6 +249,24 @@ function toDB(state) {
       shared_group_id: sh.sharedGroupId || "",
     })),
   };
+}
+
+// Refresh in-memory state from DB or localStorage
+async function refreshState(setStateLocal) {
+  try {
+    const [users, staff, clients, shifts] = await Promise.all([
+      sbSelect("users"),
+      sbSelect("staff"),
+      sbSelect("clients"),
+      sbSelect("shifts"),
+    ]);
+    const normalized = normalizeFromDB({ users, staff, clients, shifts });
+    if (typeof setStateLocal === "function") setStateLocal((p) => ({ ...p, ...normalized }));
+    return normalized;
+  } catch (e) {
+    console.error(e);
+    return null;
+  }
 }
 
 /* =========================
@@ -257,13 +331,15 @@ function LoginScreen({ users, onLogin }) {
           <button
             style={styles.btn}
             onClick={() => {
-              if (!user) return;
+              console.log("Login attempt", { picked, pin, user });
+              if (!user) return alert("Pick a user before logging in.");
               if (String(pin || "") !== String(user.pin || "")) {
                 alert("Incorrect PIN.");
                 return;
               }
               onLogin(user.id);
             }}
+            disabled={!user}
           >
             Login
           </button>
@@ -412,9 +488,6 @@ export default function Page() {
   // initial fetch + realtime subscriptions
   useEffect(() => {
     if (!mounted) return;
-
-    if (!supabase) return; // handled by banner
-
     let alive = true;
 
     async function loadAll() {
@@ -430,17 +503,26 @@ export default function Page() {
 
     loadAll().catch((e) => console.error(e));
 
-    const ch1 = supabase.channel("rt_users").on("postgres_changes", { event: "*", schema: "public", table: "users" }, loadAll).subscribe();
-    const ch2 = supabase.channel("rt_staff").on("postgres_changes", { event: "*", schema: "public", table: "staff" }, loadAll).subscribe();
-    const ch3 = supabase.channel("rt_clients").on("postgres_changes", { event: "*", schema: "public", table: "clients" }, loadAll).subscribe();
-    const ch4 = supabase.channel("rt_shifts").on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, loadAll).subscribe();
+    // Setup realtime subscriptions only when Supabase is configured
+    if (SUPABASE_CONFIGURED && supabase) {
+      const ch1 = supabase.channel("rt_users").on("postgres_changes", { event: "*", schema: "public", table: "users" }, loadAll).subscribe();
+      const ch2 = supabase.channel("rt_staff").on("postgres_changes", { event: "*", schema: "public", table: "staff" }, loadAll).subscribe();
+      const ch3 = supabase.channel("rt_clients").on("postgres_changes", { event: "*", schema: "public", table: "clients" }, loadAll).subscribe();
+      const ch4 = supabase.channel("rt_shifts").on("postgres_changes", { event: "*", schema: "public", table: "shifts" }, loadAll).subscribe();
+
+      return () => {
+        alive = false;
+        try {
+          supabase.removeChannel(ch1);
+          supabase.removeChannel(ch2);
+          supabase.removeChannel(ch3);
+          supabase.removeChannel(ch4);
+        } catch (e) {}
+      };
+    }
 
     return () => {
       alive = false;
-      supabase.removeChannel(ch1);
-      supabase.removeChannel(ch2);
-      supabase.removeChannel(ch3);
-      supabase.removeChannel(ch4);
     };
   }, [mounted]);
 
@@ -515,6 +597,11 @@ export default function Page() {
     sharedGroupId: "",
   });
 
+  // 24-Hour Builder UI
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [builderClientId, setBuilderClientId] = useState("");
+  const [builderTemplate, setBuilderTemplate] = useState("2x12");
+
   // keep startDate aligned with week when week changes
   useEffect(() => {
     setShiftDraft((p) => ({ ...p, startDate: weekStart, endDate: weekStart }));
@@ -546,33 +633,75 @@ export default function Page() {
     return `${dateStr}T${timeStr}:00`;
   }
 
+  async function runBuilder() {
+    if (!builderClientId) return alert("Pick a client for the builder.");
+    const client = (state.clients || []).find((c) => c.id === builderClientId);
+    const start = new Date(weekStartDate);
+    const rows = [];
+
+    // Build per day for the selected week
+    for (let d = 0; d < 7; d++) {
+      const day = addDays(start, d);
+      const dateStr = isoLocal(day).slice(0, 10);
+
+      const shiftsDef = builderTemplate === "2x12"
+        ? [ ["07:00","19:00"], ["19:00","07:00"] ]
+        : [ ["07:00","15:00"], ["15:00","23:00"], ["23:00","07:00"] ];
+
+      for (const [sTime, eTime] of shiftsDef) {
+        const sISO = toISO(dateStr, sTime);
+        let eISO = toISO(dateStr, eTime);
+        if (new Date(eISO) <= new Date(sISO)) {
+          const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
+          eISO = `${isoLocal(nd).slice(0,10)}T${eTime}:00`;
+        }
+
+        // pick an available staff
+        const pool = (state.staff || []).filter((s) => s.active !== false);
+        let chosen = null;
+        for (const st of pool) {
+          // check conflicts
+          const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO: sISO, endISO: eISO });
+          if (conflicts.length) continue;
+          // check OT
+          const currentMin = staffWeekMinutesMap[st.id] || 0;
+          const addMin = minutesBetweenISO(sISO, eISO);
+          if (state.settings?.hardStopConflicts && currentMin + addMin > OT_THRESHOLD_MIN) continue;
+          chosen = st; break;
+        }
+
+        if (chosen) {
+          rows.push({ id: uid("sh"), client_id: builderClientId, staff_id: chosen.id, start_iso: sISO, end_iso: eISO, created_by: currentUser?.id || "builder", is_shared: false, shared_group_id: "" });
+        }
+      }
+    }
+
+    if (!rows.length) return alert("Builder did not create any shifts (no available staff).");
+    await sbUpsert("shifts", rows);
+    await refreshState(setState);
+    setBuilderOpen(false);
+    alert(`Builder created ${rows.length} shift rows.`);
+  }
+
   // Cross-supervisor (global) staff conflict check
   async function findStaffConflictsDB({ staffId, startISO, endISO }) {
-    // pull overlapping shifts for that staff
-    const { data, error } = await supabase
-      .from("shifts")
-      .select("*")
-      .eq("staff_id", staffId);
-
-    if (error) throw error;
-    const all = (data || []).map((sh) => ({
+    // Use sbSelect which supports Supabase or local fallback
+    const rows = await sbSelect("shifts");
+    const all = (rows || []).map((sh) => ({
       id: sh.id,
-      staffId: sh.staff_id,
-      clientId: sh.client_id,
-      startISO: new Date(sh.start_iso).toISOString(),
-      endISO: new Date(sh.end_iso).toISOString(),
-      isShared: !!sh.is_shared,
-      sharedGroupId: sh.shared_group_id || "",
+      staffId: sh.staff_id || sh.staffId,
+      clientId: sh.client_id || sh.clientId,
+      startISO: new Date(sh.start_iso || sh.startISO).toISOString(),
+      endISO: new Date(sh.end_iso || sh.endISO).toISOString(),
+      isShared: !!(sh.is_shared || sh.isShared),
+      sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
     }));
 
-    return all.filter((sh) => overlaps(sh.startISO, sh.endISO, startISO, endISO));
+    return all.filter((sh) => sh.staffId === staffId && overlaps(sh.startISO, sh.endISO, startISO, endISO));
   }
 
   async function addShift() {
-    if (!supabase) {
-      alert("Supabase is not configured (missing NEXT_PUBLIC_SUPABASE_URL / ANON KEY).");
-      return;
-    }
+    // Works with Supabase or localStorage fallback via sbUpsert
 
     const { clientId, clientId2, staffId, startDate, startTime, endDate, endTime, isShared } = shiftDraft;
 
@@ -659,14 +788,15 @@ export default function Page() {
     }
 
     await sbUpsert("shifts", rows);
-
-    // reset shared group id for next
+    // refresh UI and reset draft
+    await refreshState(setState);
     setShiftDraft((p) => ({ ...p, isShared: false, clientId2: "", sharedGroupId: "" }));
   }
 
   async function deleteShift(id) {
     if (!confirm("Delete this shift?")) return;
     await sbDelete("shifts", id);
+    await refreshState(setState);
   }
 
   // Coverage gaps (uses visible clients + their coverage windows; supports 24h clients)
@@ -751,25 +881,27 @@ export default function Page() {
   const [userDraft, setUserDraft] = useState({ id: "", name: "", role: "supervisor", pin: "" });
 
   async function saveAllNow() {
-    if (!supabase) return alert("Supabase not configured.");
-    // Manual refresh is enough because we already upsert on actions, but you wanted a Save button.
-    alert("Saved / Synced (Realtime will update all users).");
+    // Manual refresh is enough because we already upsert on actions. Works with local fallback.
+    alert("Saved / Synced (Realtime will update all users when Supabase is configured).");
   }
 
   async function addStaff() {
     const name = staffDraftName.trim();
     if (!name) return;
     await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
+    await refreshState(setState);
     setStaffDraftName("");
   }
 
   async function toggleStaff(id, active) {
     await sbUpsert("staff", [{ id, active: !active }]);
+    await refreshState(setState);
   }
 
   async function removeStaff(id) {
     if (!confirm("Remove staff? (This does not delete their shifts automatically.)")) return;
     await sbDelete("staff", id);
+    await refreshState(setState);
   }
 
   async function saveClient() {
@@ -785,12 +917,20 @@ export default function Page() {
       active: clientDraft.active !== false,
     };
     await sbUpsert("clients", [row]);
+    await refreshState(setState);
     setClientDraft({ id: "", name: "", supervisorId: "", coverageStart: "07:00", coverageEnd: "23:00", is24Hour: false, active: true });
   }
 
   async function deleteClient(id) {
     if (!confirm("Delete this client?")) return;
+    // remove shifts for that client first
+    const shifts = await sbSelect("shifts");
+    const toRemove = (shifts || []).filter((s) => (s.client_id || s.clientId) === id).map((s) => s.id);
+    for (const sid of toRemove) {
+      await sbDelete("shifts", sid);
+    }
     await sbDelete("clients", id);
+    await refreshState(setState);
   }
 
   async function saveUser() {
@@ -799,12 +939,14 @@ export default function Page() {
     }
     const row = { id: userDraft.id.trim(), name: userDraft.name.trim(), role: userDraft.role, pin: userDraft.pin.trim() };
     await sbUpsert("users", [row]);
+    await refreshState(setState);
     setUserDraft({ id: "", name: "", role: "supervisor", pin: "" });
   }
 
   async function deleteUser(id) {
     if (!confirm("Delete this user?")) return;
     await sbDelete("users", id);
+    await refreshState(setState);
   }
 
   // Tabs
@@ -825,22 +967,8 @@ export default function Page() {
 
   if (!mounted) return null;
 
-  if (!supabase) {
-    return (
-      <div style={{ minHeight: "100vh", padding: 20 }}>
-        <div style={{ maxWidth: 900, margin: "30px auto", ...styles.card }}>
-          <h2 style={{ marginTop: 0 }}>Supabase is not configured</h2>
-          <div style={styles.tiny}>
-            Add these environment variables in Vercel (and locally if needed):
-            <br />
-            <b>NEXT_PUBLIC_SUPABASE_URL</b>
-            <br />
-            <b>NEXT_PUBLIC_SUPABASE_ANON_KEY</b>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // If Supabase isn't configured we'll show a banner inside the UI and
+  // fall back to localStorage for data persistence.
 
   if (!currentUser) {
     return <LoginScreen users={state.users} onLogin={loginAs} />;
@@ -851,6 +979,11 @@ export default function Page() {
   return (
     <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 16 }}>
       <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+        {!SUPABASE_CONFIGURED ? (
+          <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
+            <strong>Warning:</strong> Supabase is not configured. The app is using localStorage fallback. To enable cloud sync set <b>NEXT_PUBLIC_SUPABASE_URL</b> and <b>NEXT_PUBLIC_SUPABASE_ANON_KEY</b>.
+          </div>
+        ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 22, fontWeight: 980 }}>DSW Scheduler (Dynamic)</div>
@@ -873,132 +1006,149 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ================= Schedule ================= */}
-        {tab === "schedule" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Add Shift</h3>
+              {/* ================= Schedule ================= */}
+{tab === "schedule" && (
+  <div style={{ marginTop: 12, ...styles.card }}>
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 10,
+        flexWrap: "wrap",
+        alignItems: "center",
+      }}
+    >
+      <h3 style={{ margin: 0 }}>Add Shift</h3>
 
-            <div style={{ marginTop: 10, ...styles.grid4 }}>
-              <div>
-                <div style={styles.tiny}>Client</div>
-                <select style={styles.select} value={shiftDraft.clientId} onChange={(e) => setShiftDraft((p) => ({ ...p, clientId: e.target.value }))}>
-                  <option value="">Select…</option>
-                  {visibleClients.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+      <button style={styles.btn2} onClick={() => setBuilderOpen(true)}>
+        24-Hour Builder
+      </button>
+    </div>
 
-                <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={!!shiftDraft.isShared}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, isShared: e.target.checked }))}
-                  />
-                  Shared Support (1 staff covers 2 clients)
-                </label>
+    <div style={{ marginTop: 10, ...styles.grid4 }}>
+      <div>
+        <div style={styles.tiny}>Client</div>
+        <select
+          style={styles.select}
+          value={shiftDraft.clientId}
+          onChange={(e) =>
+            setShiftDraft((p) => ({ ...p, clientId: e.target.value }))
+          }
+        >
+          <option value="">Select…</option>
+          {visibleClients.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+      </div>
 
-                {shiftDraft.isShared && (
-                  <>
-                    <div style={{ marginTop: 8, ...styles.tiny }}>Second Client</div>
-                    <select
-                      style={styles.select}
-                      value={shiftDraft.clientId2}
-                      onChange={(e) => setShiftDraft((p) => ({ ...p, clientId2: e.target.value }))}
-                    >
-                      <option value="">Select 2nd client…</option>
-                      {(state.clients || []).filter((c) => c.active !== false).map((c) => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
-                      ))}
-                    </select>
+      <div>
+        <div style={styles.tiny}>Staff</div>
+        <select
+          style={styles.select}
+          value={shiftDraft.staffId}
+          onChange={(e) =>
+            setShiftDraft((p) => ({ ...p, staffId: e.target.value }))
+          }
+        >
+          <option value="">Select…</option>
+          {(state.staff || []).map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      </div>
 
-                    <div style={{ marginTop: 8, ...styles.tiny }}>Shared Group ID (optional)</div>
-                    <input
-                      style={styles.input}
-                      value={shiftDraft.sharedGroupId}
-                      onChange={(e) => setShiftDraft((p) => ({ ...p, sharedGroupId: e.target.value }))}
-                      placeholder="Ex: SS-Natasha-Daniel"
-                    />
-                  </>
-                )}
-              </div>
+      <div>
+        <div style={styles.tiny}>Start</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            style={styles.input}
+            type="date"
+            value={shiftDraft.startDate}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, startDate: e.target.value }))
+            }
+          />
+          <input
+            style={styles.input}
+            type="time"
+            value={shiftDraft.startTime}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, startTime: e.target.value }))
+            }
+          />
+        </div>
+      </div>
 
-              <div>
-                <div style={styles.tiny}>Staff</div>
-                <select style={styles.select} value={shiftDraft.staffId} onChange={(e) => setShiftDraft((p) => ({ ...p, staffId: e.target.value }))}>
-                  <option value="">Select…</option>
-                  {(state.staff || []).filter((s) => s.active !== false).map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
+      <div>
+        <div style={styles.tiny}>End</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            style={styles.input}
+            type="date"
+            value={shiftDraft.endDate}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, endDate: e.target.value }))
+            }
+          />
+          <input
+            style={styles.input}
+            type="time"
+            value={shiftDraft.endTime}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, endTime: e.target.value }))
+            }
+          />
+        </div>
+        <div style={styles.tiny}>
+          Auto bump end date if end time is earlier than start.
+        </div>
+      </div>
+    </div>
 
-                {!!shiftDraft.staffId && (
-                  <div style={{ marginTop: 6, ...styles.tiny }}>
-                    Week hours (dedup shared): <b>{fmtHoursFromMin(staffWeekMinutesMap[shiftDraft.staffId] || 0)}</b>
-                  </div>
-                )}
-              </div>
+    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+      <button style={styles.btn} onClick={addShift}>
+        Add Shift
+      </button>
+    </div>
 
-              <div>
-                <div style={styles.tiny}>Start</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input style={styles.input} type="date" value={shiftDraft.startDate} onChange={(e) => setShiftDraft((p) => ({ ...p, startDate: e.target.value }))} />
-                  <input style={styles.input} type="time" value={shiftDraft.startTime} onChange={(e) => setShiftDraft((p) => ({ ...p, startTime: e.target.value }))} />
-                </div>
-              </div>
-
-              <div>
-                <div style={styles.tiny}>End</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input style={styles.input} type="date" value={shiftDraft.endDate} onChange={(e) => setShiftDraft((p) => ({ ...p, endDate: e.target.value }))} />
-                  <input style={styles.input} type="time" value={shiftDraft.endTime} onChange={(e) => setShiftDraft((p) => ({ ...p, endTime: e.target.value }))} />
-                </div>
-                <div style={styles.tiny}>Auto bumps end date if end time is earlier than start.</div>
-              </div>
+    {builderOpen ? (
+      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.6)" }} className="no-print">
+        <div style={{ width: 720, maxWidth: "95%", ...styles.card }}>
+          <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
+          <div style={{ display: "grid", gap: 8 }}>
+            <div>
+              <div style={styles.tiny}>Client</div>
+              <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
+                <option value="">Select…</option>
+                {(state.clients || []).map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
-              <button style={styles.btn} onClick={addShift}>Add Shift</button>
+            <div>
+              <div style={styles.tiny}>Template</div>
+              <select style={styles.select} value={builderTemplate} onChange={(e) => setBuilderTemplate(e.target.value)}>
+                <option value="2x12">2 × 12-hour</option>
+                <option value="3x8">3 × 8-hour</option>
+              </select>
             </div>
 
-            <div style={{ marginTop: 14 }}>
-              <h3 style={{ margin: "8px 0" }}>This Week’s Shifts</h3>
-              <div style={styles.hr} />
-
-              <div style={{ display: "grid", gap: 10 }}>
-                {shiftsInSelectedWeek
-                  .filter((sh) => (canSeeAllShifts ? true : visibleClients.some((c) => c.id === sh.clientId)))
-                  .sort((a, b) => new Date(a.startISO) - new Date(b.startISO))
-                  .map((sh) => {
-                    const c = (state.clients || []).find((x) => x.id === sh.clientId);
-                    const s = (state.staff || []).find((x) => x.id === sh.staffId);
-                    const sup = (state.users || []).find((u) => u.id === (c?.supervisorId || ""));
-                    return (
-                      <div key={sh.id} style={styles.shift}>
-                        <div style={styles.shiftTop}>
-                          <div>
-                            <div style={styles.shiftTitle}>
-                              {c?.name || "Unknown Client"} {sh.isShared ? <span style={{ opacity: 0.8 }}>• Shared</span> : null}
-                            </div>
-                            <div style={styles.shiftMeta}>
-                              Staff: <b>{s?.name || "Unknown"}</b>
-                              <br />
-                              Supervisor: <b>{sup ? sup.name : "Unassigned"}</b>
-                              <br />
-                              {sh.startISO.slice(0, 16).replace("T", " ")} → {sh.endISO.slice(0, 16).replace("T", " ")}
-                              {sh.isShared && sh.sharedGroupId ? <><br />Group: <b>{sh.sharedGroupId}</b></> : null}
-                            </div>
-                          </div>
-
-                          <button style={styles.btn2} onClick={() => deleteShift(sh.id)}>Delete</button>
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button style={styles.btn2} onClick={() => setBuilderOpen(false)}>Cancel</button>
+              <button style={styles.btn} onClick={runBuilder}>Generate</button>
             </div>
           </div>
-        )}
-
+        </div>
+      </div>
+    ) : null}
+  </div>
+)}
         {/* ================= Calendar ================= */}
         {tab === "calendar" && (
           <CalendarWeek
