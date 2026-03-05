@@ -96,6 +96,50 @@ function fmtHoursFromMin(min) {
   return `${(min / 60).toFixed(2)}h`;
 }
 
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
+
+function parseShiftPattern(input) {
+  // Accept newline or comma separated entries like "07:00-15:00"
+  const lines = (input || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .flatMap((l) => l.split(",").map((p) => p.trim()).filter(Boolean));
+
+  const out = [];
+  for (const line of lines) {
+    const m = line.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
+    if (!m) throw new Error(`Invalid shift format: "${line}" (expected HH:MM-HH:MM)`);
+    const [, sh, sm, eh, em] = m;
+    const start = `${String(sh).padStart(2, "0")}:${sm}`;
+    const end = `${String(eh).padStart(2, "0")}:${em}`;
+    out.push({ start, end });
+  }
+  return out;
+}
+
+function loadClientSchedule(clientId) {
+  try {
+    const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map[clientId] || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveClientSchedule(clientId, shifts) {
+  try {
+    const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    map[clientId] = { shifts };
+    localStorage.setItem(CLIENT_SCHEDULE_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
+
 function Tabs({ value, onChange, tabs }) {
   return (
     <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -437,6 +481,100 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts })
   );
 }
 
+function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts }) {
+  const shifts = state.shifts || [];
+  const clients = state.clients || [];
+  const staff = state.staff || [];
+
+  const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
+
+  const monthStart = new Date(monthStartDate);
+  monthStart.setHours(0, 0, 0, 0);
+
+  // Align the month view to a Monday-start calendar grid
+  const firstOfMonth = new Date(monthStart);
+  firstOfMonth.setDate(1);
+  const firstWeekday = firstOfMonth.getDay(); // 0=Sun, 1=Mon
+  const offsetToMon = firstWeekday === 0 ? -6 : 1 - firstWeekday;
+  const gridStart = addDays(firstOfMonth, offsetToMon);
+
+  const days = [...Array(42)].map((_, i) => {
+    const d = addDays(gridStart, i);
+    return { d, dateStr: isoLocal(d).slice(0, 10), inMonth: d.getMonth() === monthStart.getMonth() };
+  });
+
+  const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
+
+  function dayShifts(dateStr) {
+    const dayStart = new Date(`${dateStr}T00:00:00`).toISOString();
+    const dayEnd = new Date(`${dateStr}T23:59:59`).toISOString();
+
+    return shifts
+      .filter((sh) => {
+        if (!canSeeAllShifts && !visibleClientIds.has(sh.clientId)) return false;
+        return overlaps(sh.startISO, sh.endISO, dayStart, dayEnd);
+      })
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ ...styles.card, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 980 }}>Monthly Calendar</div>
+            <div style={styles.tiny}>{monthStart.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>
+          </div>
+          <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
+            Print / Save PDF
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+        {WEEKDAY_NAMES.map((w) => (
+          <div key={w} style={{ ...styles.card, fontWeight: 900, textAlign: "center" }}>
+            {w}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+        {days.map(({ d, dateStr, inMonth }) => (
+          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45 }}>
+            <div style={{ fontWeight: 950, fontSize: 12 }}>
+              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+            </div>
+            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
+              {dayShifts(dateStr).length === 0 ? (
+                <div style={{ opacity: 0.75, fontSize: 10 }}>No shifts</div>
+              ) : (
+                dayShifts(dateStr).map((sh) => (
+                  <div key={sh.id} style={styles.shift}>
+                    <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
+                    <div style={styles.shiftMeta}>
+                      {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
+                      <br />
+                      Staff: <b>{staffName(sh.staffId)}</b>
+                      {sh.isShared ? (
+                        <>
+                          <br />
+                          ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* =========================
    Main App
 ========================= */
@@ -472,8 +610,16 @@ export default function Page() {
   const weekStartDate = useMemo(() => new Date(`${weekStart}T00:00:00`), [weekStart]);
   const weekEndDate = useMemo(() => addDays(weekStartDate, 7), [weekStartDate]);
 
+  const monthStartDate = useMemo(() => {
+    const d = new Date(`${weekStart}T00:00:00`);
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }, [weekStart]);
+
   const currentUser = useMemo(() => state.users.find((u) => u.id === sessionUserId) || null, [state.users, sessionUserId]);
   const isAdmin = currentUser?.role === "admin";
+  const clientSchedule = builderClientId ? loadClientSchedule(builderClientId) : null;
 
   useEffect(() => setMounted(true), []);
 
@@ -601,11 +747,26 @@ export default function Page() {
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderClientId, setBuilderClientId] = useState("");
   const [builderTemplate, setBuilderTemplate] = useState("2x12");
+  const [builderScheduleSource, setBuilderScheduleSource] = useState("template"); // template | client | custom
+  const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-15:00\n15:00-23:00\n23:00-07:00");
+  const [builderWeeklyAssignments, setBuilderWeeklyAssignments] = useState({});
+  const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
+  const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
 
   // keep startDate aligned with week when week changes
   useEffect(() => {
     setShiftDraft((p) => ({ ...p, startDate: weekStart, endDate: weekStart }));
   }, [weekStart]);
+
+  // Load stored client schedule template into the builder when selecting a client
+  useEffect(() => {
+    if (!builderClientId) return;
+    const schedule = loadClientSchedule(builderClientId);
+    if (schedule?.shifts) {
+      setBuilderCustomTemplate(schedule.shifts.map((s) => `${s.start}-${s.end}`).join("\n"));
+      setBuilderScheduleSource((prev) => (prev === "custom" ? "custom" : "client"));
+    }
+  }, [builderClientId]);
 
   // Auto bump endDate if endTime earlier than startTime
   useEffect(() => {
@@ -635,43 +796,89 @@ export default function Page() {
 
   async function runBuilder() {
     if (!builderClientId) return alert("Pick a client for the builder.");
-    const client = (state.clients || []).find((c) => c.id === builderClientId);
     const start = new Date(weekStartDate);
     const rows = [];
 
-    // Build per day for the selected week
-    for (let d = 0; d < 7; d++) {
-      const day = addDays(start, d);
-      const dateStr = isoLocal(day).slice(0, 10);
+    // Determine shift definitions based on selected source
+    let shiftsDef = [];
+    try {
+      if (builderScheduleSource === "client") {
+        if (!clientSchedule?.shifts?.length) return alert("No saved schedule for this client.");
+        shiftsDef = clientSchedule.shifts;
+      } else if (builderScheduleSource === "custom") {
+        shiftsDef = parseShiftPattern(builderCustomTemplate);
+      } else {
+        shiftsDef = builderTemplate === "2x12"
+          ? [ { start: "07:00", end: "19:00" }, { start: "19:00", end: "07:00" } ]
+          : [ { start: "07:00", end: "15:00" }, { start: "15:00", end: "23:00" }, { start: "23:00", end: "07:00" } ];
+      }
+    } catch (e) {
+      return alert(e.message || "Invalid schedule format.");
+    }
 
-      const shiftsDef = builderTemplate === "2x12"
-        ? [ ["07:00","19:00"], ["19:00","07:00"] ]
-        : [ ["07:00","15:00"], ["15:00","23:00"], ["23:00","07:00"] ];
+    // Track per-staff minutes while building to avoid over-assigning
+    const minutesByStaff = { ...staffWeekMinutesMap };
+    const pool = (state.staff || []).filter((s) => s.active !== false);
+    let rotIndex = 0;
 
-      for (const [sTime, eTime] of shiftsDef) {
-        const sISO = toISO(dateStr, sTime);
-        let eISO = toISO(dateStr, eTime);
-        if (new Date(eISO) <= new Date(sISO)) {
-          const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
-          eISO = `${isoLocal(nd).slice(0,10)}T${eTime}:00`;
+    const pickStaffForShift = async (startISO, endISO) => {
+      const weekday = new Date(startISO).getDay();
+      const forcedStaffId = builderWeeklyAssignments[weekday];
+      const addMin = minutesBetweenISO(startISO, endISO);
+
+      const checkCandidate = async (st) => {
+        const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO, endISO });
+        if (conflicts.length) return false;
+        const currentMin = minutesByStaff[st.id] || 0;
+        if (state.settings?.hardStopConflicts && currentMin + addMin > OT_THRESHOLD_MIN) return false;
+        minutesByStaff[st.id] = currentMin + addMin;
+        return true;
+      };
+
+      if (forcedStaffId) {
+        const forced = pool.find((s) => s.id === forcedStaffId);
+        if (forced && (await checkCandidate(forced))) return forced;
+      }
+
+      for (let i = 0; i < pool.length; i++) {
+        const idx = (rotIndex + i) % pool.length;
+        const st = pool[idx];
+        if (await checkCandidate(st)) {
+          rotIndex = idx + 1;
+          return st;
         }
+      }
+      return null;
+    };
 
-        // pick an available staff
-        const pool = (state.staff || []).filter((s) => s.active !== false);
-        let chosen = null;
-        for (const st of pool) {
-          // check conflicts
-          const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO: sISO, endISO: eISO });
-          if (conflicts.length) continue;
-          // check OT
-          const currentMin = staffWeekMinutesMap[st.id] || 0;
-          const addMin = minutesBetweenISO(sISO, eISO);
-          if (state.settings?.hardStopConflicts && currentMin + addMin > OT_THRESHOLD_MIN) continue;
-          chosen = st; break;
-        }
+    // Build for N weeks (1=week, 4=month) using the repeat interval
+    for (let w = 0; w < builderWeeks; w += builderRepeatInterval) {
+      const weekStartForRun = addDays(start, w * 7);
+      for (let d = 0; d < 7; d++) {
+        const day = addDays(weekStartForRun, d);
+        const dateStr = isoLocal(day).slice(0, 10);
 
-        if (chosen) {
-          rows.push({ id: uid("sh"), client_id: builderClientId, staff_id: chosen.id, start_iso: sISO, end_iso: eISO, created_by: currentUser?.id || "builder", is_shared: false, shared_group_id: "" });
+        for (const { start: sTime, end: eTime } of shiftsDef) {
+          const sISO = toISO(dateStr, sTime);
+          let eISO = toISO(dateStr, eTime);
+          if (new Date(eISO) <= new Date(sISO)) {
+            const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
+            eISO = `${isoLocal(nd).slice(0, 10)}T${eTime}:00`;
+          }
+
+          const chosen = await pickStaffForShift(sISO, eISO);
+          if (chosen) {
+            rows.push({
+              id: uid("sh"),
+              client_id: builderClientId,
+              staff_id: chosen.id,
+              start_iso: sISO,
+              end_iso: eISO,
+              created_by: currentUser?.id || "builder",
+              is_shared: false,
+              shared_group_id: "",
+            });
+          }
         }
       }
     }
@@ -952,10 +1159,12 @@ export default function Page() {
   // Tabs
   const tabs = [
     { value: "schedule", label: "Schedule" },
-    { value: "calendar", label: "Calendar / Print" },
+    { value: "calendar", label: "Weekly Calendar" },
+    { value: "month", label: "Monthly Calendar" },
+    { value: "staffSchedule", label: "Staff Schedule" },
     { value: "gaps", label: "Coverage Gaps" },
     { value: "hours", label: "Hours & OT" },
-    ...(isAdmin
+    ...(isAdmin || currentUser?.role === "supervisor"
       ? [
           { value: "staff", label: "Staff" },
           { value: "clients", label: "Clients" },
@@ -1132,16 +1341,201 @@ export default function Page() {
             </div>
 
             <div>
-              <div style={styles.tiny}>Template</div>
-              <select style={styles.select} value={builderTemplate} onChange={(e) => setBuilderTemplate(e.target.value)}>
-                <option value="2x12">2 × 12-hour</option>
-                <option value="3x8">3 × 8-hour</option>
-              </select>
+              <div style={styles.tiny}>Schedule source</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="template"
+                    checked={builderScheduleSource === "template"}
+                    onChange={() => setBuilderScheduleSource("template")}
+                  />
+                  Template
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="client"
+                    checked={builderScheduleSource === "client"}
+                    onChange={() => setBuilderScheduleSource("client")}
+                    disabled={!builderClientId || !clientSchedule?.shifts?.length}
+                  />
+                  Client saved
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="custom"
+                    checked={builderScheduleSource === "custom"}
+                    onChange={() => setBuilderScheduleSource("custom")}
+                  />
+                  Custom
+                </label>
+              </div>
+              {builderScheduleSource === "client" ? (
+                <div style={styles.tiny}>
+                  {clientSchedule?.shifts?.length
+                    ? `Loaded saved schedule (${clientSchedule.shifts.length} shifts).`
+                    : "No saved schedule for this client yet."}
+                </div>
+              ) : null}
+            </div>
+
+            {builderScheduleSource === "template" ? (
+              <div>
+                <div style={styles.tiny}>Template</div>
+                <select style={styles.select} value={builderTemplate} onChange={(e) => setBuilderTemplate(e.target.value)}>
+                  <option value="2x12">2 × 12-hour</option>
+                  <option value="3x8">3 × 8-hour</option>
+                </select>
+              </div>
+            ) : null}
+
+            {builderScheduleSource === "custom" ? (
+              <div>
+                <div style={styles.tiny}>Custom schedule (one per line, e.g. 07:00-15:00)</div>
+                <textarea
+                  style={{ ...styles.input, height: 120, fontFamily: "inherit", resize: "vertical" }}
+                  value={builderCustomTemplate}
+                  onChange={(e) => setBuilderCustomTemplate(e.target.value)}
+                />
+              </div>
+            ) : null}
+
+            <div>
+              <div style={styles.tiny}>Generate horizon</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderWeeks"
+                    value={1}
+                    checked={builderWeeks === 1}
+                    onChange={() => setBuilderWeeks(1)}
+                  />
+                  1 week
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderWeeks"
+                    value={4}
+                    checked={builderWeeks === 4}
+                    onChange={() => setBuilderWeeks(4)}
+                  />
+                  4 weeks
+                </label>
+              </div>
+              <div style={{ marginTop: 8, ...styles.tiny }}>Repeat interval</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={1}
+                    checked={builderRepeatInterval === 1}
+                    onChange={() => setBuilderRepeatInterval(1)}
+                  />
+                  Every week
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={2}
+                    checked={builderRepeatInterval === 2}
+                    onChange={() => setBuilderRepeatInterval(2)}
+                  />
+                  Every 2 weeks
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={4}
+                    checked={builderRepeatInterval === 4}
+                    onChange={() => setBuilderRepeatInterval(4)}
+                  />
+                  Every 4 weeks
+                </label>
+              </div>
+              <div style={styles.tiny}>For example: select 4 weeks + every 2 weeks to schedule Week 1 + Week 3.</div>
+            </div>
+
+            <div>
+              <div style={styles.tiny}>Weekly staff assignment</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(60px, 1fr))", gap: 6 }}>
+                {WEEKDAY_NAMES.map((day, idx) => (
+                  <div key={day} style={{ display: "flex", flexDirection: "column" }}>
+                    <div style={{ fontSize: 11, opacity: 0.7 }}>{day}</div>
+                    <select
+                      style={styles.select}
+                      value={builderWeeklyAssignments[idx] || ""}
+                      onChange={(e) =>
+                        setBuilderWeeklyAssignments((p) => ({
+                          ...p,
+                          [idx]: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">—</option>
+                      {(state.staff || []).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+              <div style={styles.tiny}>Optionally force a specific staff for each day (e.g., Cory on Fridays).</div>
             </div>
 
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button style={styles.btn2} onClick={() => setBuilderOpen(false)}>Cancel</button>
-              <button style={styles.btn} onClick={runBuilder}>Generate</button>
+              <button
+                style={styles.btn2}
+                onClick={() => setBuilderOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                style={styles.btn2}
+                onClick={() => {
+                  if (!builderClientId) return;
+                  try {
+                    let shifts = [];
+                    if (builderScheduleSource === "template") {
+                      shifts = builderTemplate === "2x12"
+                        ? [
+                            { start: "07:00", end: "19:00" },
+                            { start: "19:00", end: "07:00" },
+                          ]
+                        : [
+                            { start: "07:00", end: "15:00" },
+                            { start: "15:00", end: "23:00" },
+                            { start: "23:00", end: "07:00" },
+                          ];
+                    } else if (builderScheduleSource === "custom") {
+                      shifts = parseShiftPattern(builderCustomTemplate);
+                    } else if (builderScheduleSource === "client") {
+                      shifts = clientSchedule?.shifts || [];
+                    }
+                    if (!shifts.length) return alert("No shifts to save.");
+                    saveClientSchedule(builderClientId, shifts);
+                    alert("Saved schedule for this client.");
+                  } catch (e) {
+                    alert(e.message || "Invalid schedule format.");
+                  }
+                }}
+              >
+                Save template
+              </button>
+              <button style={styles.btn} onClick={runBuilder}>
+                Generate
+              </button>
             </div>
           </div>
         </div>
@@ -1157,6 +1551,71 @@ export default function Page() {
             visibleClients={visibleClients}
             canSeeAllShifts={canSeeAllShifts}
           />
+        )}
+
+        {tab === "month" && (
+          <CalendarMonth
+            state={state}
+            monthStartDate={monthStartDate}
+            visibleClients={visibleClients}
+            canSeeAllShifts={canSeeAllShifts}
+          />
+        )}
+
+        {/* ================= Staff Schedule ================= */}
+        {tab === "staffSchedule" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Staff Schedule</h3>
+            <div style={styles.tiny}>Shows upcoming shifts for each staff member in the selected week.</div>
+
+            <div style={{ marginTop: 10, overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Staff</th>
+                    <th style={styles.th}>Shift</th>
+                    <th style={styles.th}>Client</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(state.staff || []).map((st) => {
+                    const shifts = shiftsInSelectedWeek
+                      .filter((sh) => sh.staffId === st.id)
+                      .filter((sh) => (canSeeAllShifts ? true : visibleClients.some((c) => c.id === sh.clientId)))
+                      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+
+                    if (!shifts.length) {
+                      return (
+                        <tr key={st.id}>
+                          <td style={styles.td}><b>{st.name}</b></td>
+                          <td style={{ ...styles.td, opacity: 0.7 }} colSpan={2}>
+                            No shifts this week
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return shifts.map((sh, idx) => {
+                      const client = state.clients.find((c) => c.id === sh.clientId);
+                      return (
+                        <tr key={`${st.id}_${sh.id}`}>
+                          {idx === 0 ? (
+                            <td style={styles.td} rowSpan={shifts.length}>
+                              <b>{st.name}</b>
+                            </td>
+                          ) : null}
+                          <td style={styles.td}>
+                            {sh.startISO.slice(0, 16).replace("T", " ")} → {sh.endISO.slice(0, 16).replace("T", " ")}
+                          </td>
+                          <td style={styles.td}>{client?.name || "(unknown)"}</td>
+                        </tr>
+                      );
+                    });
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
 
         {/* ================= Coverage Gaps ================= */}
@@ -1194,6 +1653,13 @@ export default function Page() {
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Hours & Overtime</h3>
             <div style={styles.tiny}>Shared Support counts once for staff OT, but counts for each client.</div>
+
+            {(currentUser?.role === "supervisor" || isAdmin) &&
+            (state.staff || []).some((st) => (staffWeekMinutesMap[st.id] || 0) >= OT_THRESHOLD_MIN) ? (
+              <div style={styles.warn}>
+                ⚠️ One or more staff have reached 40 hours this week. Review assignments or adjust shifts.
+              </div>
+            ) : null}
 
             <div style={{ marginTop: 10, overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -1362,6 +1828,16 @@ export default function Page() {
                           }
                         >
                           Edit
+                        </button>
+                        <button
+                          style={styles.btn2}
+                          onClick={() => {
+                            setBuilderClientId(c.id);
+                            setBuilderScheduleSource("client");
+                            setBuilderOpen(true);
+                          }}
+                        >
+                          Schedule
                         </button>
                         <button style={styles.btn2} onClick={() => deleteClient(c.id)}>Delete</button>
                       </div>
