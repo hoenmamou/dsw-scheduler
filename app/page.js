@@ -13,203 +13,46 @@ function setSupabaseErrorHandler(fn) {
   supabaseErrorHandler = fn;
 }
 function reportSupabaseError(error) {
-  console.warn("Supabase request failed; falling back to local storage.", error);
-  if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
-}
-
-/* =========================
-   Notes
-   - This version is "dynamic": Supabase is the source of truth.
-   - If Supabase env vars are missing, it will show an error banner.
-========================= */
-
-const DAY_START_MIN = 7 * 60;  // 07:00
-const DAY_END_MIN = 23 * 60;   // 23:00
-const OT_THRESHOLD_MIN = 40 * 60;
-
-function clamp(n, a, b) {
-  return Math.max(a, Math.min(b, n));
-}
-
-function uid(prefix = "id") {
-  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
-
-function isoLocal(date) {
-  const d = new Date(date);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
-}
-
-function addDays(date, n) {
-  const d = new Date(date);
-  d.setDate(d.getDate() + n);
-  return d;
-}
-
-function minutesBetweenISO(aISO, bISO) {
-  const a = new Date(aISO);
-  const b = new Date(bISO);
-  if (isNaN(a) || isNaN(b) || b <= a) return 0;
-  return Math.round((b - a) / 60000);
-}
-
-function overlaps(aStart, aEnd, bStart, bEnd) {
-  return new Date(aStart) < new Date(bEnd) && new Date(bStart) < new Date(aEnd);
-}
-
-/** Day: 07:00–23:00, Night: 23:00–07:00 */
-function splitDayNightMinutes(startISO, endISO) {
-  const start = new Date(startISO);
-  const end = new Date(endISO);
-
-  if (isNaN(start) || isNaN(end) || end <= start) {
-    return { totalMin: 0, dayMin: 0, nightMin: 0 };
-  }
-
-  let totalMin = 0;
-  let dayMin = 0;
-  let nightMin = 0;
-
-  let cursor = new Date(start);
-  while (cursor < end) {
-    const dayStart = new Date(cursor);
-    dayStart.setHours(0, 0, 0, 0);
-
-    const nextDay = new Date(dayStart);
-    nextDay.setDate(nextDay.getDate() + 1);
-
-    const segStart = cursor;
-    const segEnd = end < nextDay ? end : nextDay;
-
-    const segMin = Math.round((segEnd - segStart) / 60000);
-    totalMin += segMin;
-
-    const segStartMin = segStart.getHours() * 60 + segStart.getMinutes();
-    let segEndMin = segEnd.getHours() * 60 + segEnd.getMinutes();
-
-    // if ends exactly at midnight treat as 1440
-    if (segEnd <= nextDay && segEndMin === 0 && segEnd.getHours() === 0 && segEnd.getMinutes() === 0) {
-      segEndMin = 1440;
+  // --- Client Profiles state ---
+  const [selectedClientId, setSelectedClientId] = useState("");
+  // Use profileClients for dropdown and selectors
+  const profileClients = useMemo(() => (canSeeAdminUI ? (state.clients || []) : visibleClients), [canSeeAdminUI, state.clients, visibleClients]);
+  // Memo: selected client object
+  const selectedClient = useMemo(() => (profileClients || []).find(c => c.id === selectedClientId) || null, [profileClients, selectedClientId]);
+  // Memo: all shifts for selected client in selected week
+  const selectedClientShifts = useMemo(() => {
+    if (!selectedClientId) return [];
+    return (state.shifts || [])
+      .filter(sh => sh.clientId === selectedClientId)
+      .filter(sh => {
+        // Only shifts in the selected week
+        const shStart = new Date(sh.startISO);
+        return shStart >= weekStartDate && shStart < weekEndDate;
+      })
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  }, [state.shifts, selectedClientId, weekStartDate, weekEndDate]);
+  // Memo: unique staff assigned to this client in selected week, with total minutes
+  const selectedClientStaffSummary = useMemo(() => {
+    if (!selectedClientShifts.length) return [];
+    const staffMap = {};
+    for (const sh of selectedClientShifts) {
+      if (!sh.staffId) continue;
+      if (!staffMap[sh.staffId]) staffMap[sh.staffId] = { staff: (state.staff || []).find(s => s.id === sh.staffId), min: 0 };
+      staffMap[sh.staffId].min += minutesBetweenISO(sh.startISO, sh.endISO);
     }
-
-    const dayOverlapStart = clamp(segStartMin, DAY_START_MIN, DAY_END_MIN);
-    const dayOverlapEnd = clamp(segEndMin, DAY_START_MIN, DAY_END_MIN);
-    const dayOverlap = Math.max(0, dayOverlapEnd - dayOverlapStart);
-
-    dayMin += dayOverlap;
-    nightMin += (segMin - dayOverlap);
-
-    cursor = segEnd;
-  }
-
-  return { totalMin, dayMin, nightMin };
-}
-
-function fmtHoursFromMin(min) {
-  return `${(min / 60).toFixed(2)}h`;
-}
-
-const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
-
-function parseShiftPattern(input) {
-  // Accept newline or comma separated entries like "07:00-15:00"
-  const lines = (input || "")
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .flatMap((l) => l.split(",").map((p) => p.trim()).filter(Boolean));
-
-  const out = [];
-  for (const line of lines) {
-    const m = line.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
-    if (!m) throw new Error(`Invalid shift format: "${line}" (expected HH:MM-HH:MM)`);
-    const [, sh, sm, eh, em] = m;
-    const start = `${String(sh).padStart(2, "0")}:${sm}`;
-    const end = `${String(eh).padStart(2, "0")}:${em}`;
-    out.push({ start, end });
-  }
-  return out;
-}
-
-function loadClientSchedule(clientId) {
-  try {
-    const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
-    const map = raw ? JSON.parse(raw) : {};
-    return map[clientId] || null;
-  } catch {
-    return null;
-  }
-}
-
-function saveClientSchedule(clientId, shifts) {
-  try {
-    const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
-    const map = raw ? JSON.parse(raw) : {};
-    map[clientId] = { shifts };
-    localStorage.setItem(CLIENT_SCHEDULE_STORAGE_KEY, JSON.stringify(map));
-  } catch {
-    // ignore
-  }
-}
-
-function Tabs({ value, onChange, tabs }) {
-  return (
-    <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-      {tabs.map((t) => (
-        <button
-          key={t.value}
-          onClick={() => onChange(t.value)}
-          style={{
-            ...styles.btn2,
-            background: value === t.value ? "rgba(31,111,235,0.18)" : "transparent",
-            borderColor: value === t.value ? "rgba(31,111,235,0.55)" : "rgba(255,255,255,0.18)",
-          }}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/* =========================
-   Supabase data helpers
-========================= */
-
-async function sbSelect(table) {
-  // Supabase or localStorage fallback
-  if (SUPABASE_CONFIGURED && supabase) {
-    const { data, error } = await supabase.from(table).select("*");
-    if (!error) return data || [];
-    reportSupabaseError(error);
-  }
-
-  // localStorage fallback
-  try {
-    const raw = localStorage.getItem("dsw_local_db");
-    const db = raw ? JSON.parse(raw) : DEFAULT_DB;
-    return db[table] || [];
-  } catch (e) {
-    return [];
-  }
-}
-
-async function sbUpsert(table, rows) {
-  if (SUPABASE_CONFIGURED && supabase) {
-    const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
-    if (!error) return;
-    reportSupabaseError(error);
-  }
-
-  // localStorage upsert
-  try {
-    const raw = localStorage.getItem("dsw_local_db");
-    const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
-    db[table] = db[table] || [];
-    for (const r of rows) {
-      const idx = db[table].findIndex((x) => x.id === r.id);
+    return Object.values(staffMap).sort((a, b) => (a.staff?.name || "").localeCompare(b.staff?.name || ""));
+  }, [selectedClientShifts, state.staff]);
+  // Memo: client weekly hours summary (total, day, night, remaining)
+  const selectedClientWeekHours = useMemo(() => {
+    let totalMin = 0, dayMin = 0, nightMin = 0;
+    for (const sh of selectedClientShifts) {
+      const { totalMin: t, dayMin: d, nightMin: n } = splitDayNightMinutes(sh.startISO, sh.endISO);
+      totalMin += t; dayMin += d; nightMin += n;
+    }
+    const allottedMin = (Number(selectedClient?.weeklyHours) || 0) * 60;
+    const remainingMin = allottedMin - totalMin;
+    return { totalMin, dayMin, nightMin, allottedMin, remainingMin };
+  }, [selectedClientShifts, selectedClient]);
       if (idx >= 0) db[table][idx] = { ...db[table][idx], ...r };
       else db[table].push(r);
     }
@@ -1331,8 +1174,8 @@ export default function Page() {
     { value: "staffSchedule", label: "Staff Schedule" },
     { value: "gaps", label: "Coverage Gaps" },
     { value: "hours", label: "Hours & OT" },
-    // --- Client Profiles tab for users who can see clients ---
-    ...(visibleClients.length > 0 ? [
+    // --- Client Profiles tab for users who can see clients or admin ---
+    ...((canSeeAdminUI || visibleClients.length > 0) ? [
       { value: "clientProfiles", label: "Client Profiles" },
     ] : []),
     ...(canSeeAdminUI
@@ -1544,6 +1387,158 @@ export default function Page() {
         )}
 
   if (!mounted) return null;
+        {/* ================= Client Profiles ================= */}
+        {tab === "clientProfiles" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Client Profiles</h3>
+            <div style={{ marginBottom: 16 }}>
+              <div style={styles.tiny}>Select a client to view their profile:</div>
+              <select
+                style={{ ...styles.select, maxWidth: 320, marginTop: 6 }}
+                value={selectedClientId}
+                onChange={e => setSelectedClientId(e.target.value)}
+              >
+                <option value="">Select…</option>
+                {profileClients.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+            {!selectedClient ? (
+              <div style={{ ...styles.tiny, marginTop: 24 }}>Select a client to view profile</div>
+            ) : (
+              <div style={{ ...styles.card, background: "rgba(255,255,255,0.02)", marginTop: 0 }}>
+                {/* Profile Header */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
+                    <div style={styles.tiny}>
+                      Supervisor: <b>{(state.users || []).find(u => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
+                      Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
+                      24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
+                    </div>
+                    <div style={styles.tiny}>
+                      Coverage: <b>{selectedClient.coverageStart} – {selectedClient.coverageEnd}</b> &nbsp;|&nbsp;
+                      Weekly Allotment: <b>{Number(selectedClient.weeklyHours) || 0}h</b>
+                    </div>
+                    <div style={styles.tiny}>
+                      Week of: <b>{weekStart}</b>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      style={styles.btn2}
+                      onClick={() => {
+                        setTab("schedule");
+                        setShiftDraft(p => ({ ...p, clientId: selectedClient.id }));
+                      }}
+                    >Add Shift for This Client</button>
+                    <button
+                      style={styles.btn2}
+                      onClick={() => {
+                        setTab("schedule");
+                        setBuilderClientId(selectedClient.id);
+                        setBuilderOpen(true);
+                      }}
+                    >Open 24-Hour Builder</button>
+                  </div>
+                </div>
+
+                {/* Hours Summary Bar */}
+                <div style={{ marginTop: 18, marginBottom: 10 }}>
+                  <div style={styles.tiny}>Weekly Hours Summary</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
+                        <div
+                          style={{
+                            height: "100%",
+                            width: `${Math.min(100, selectedClientWeekHours.allottedMin ? Math.round((selectedClientWeekHours.totalMin / selectedClientWeekHours.allottedMin) * 100) : 0)}%`,
+                            background: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 13, minWidth: 120 }}>
+                      {fmtHoursFromMin(selectedClientWeekHours.totalMin)} / {fmtHoursFromMin(selectedClientWeekHours.allottedMin)}
+                    </div>
+                    <div style={{ fontSize: 13, color: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
+                      Rem: {fmtHoursFromMin(selectedClientWeekHours.remainingMin)}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+                    Day: {fmtHoursFromMin(selectedClientWeekHours.dayMin)} &nbsp;|&nbsp; Night: {fmtHoursFromMin(selectedClientWeekHours.nightMin)}
+                  </div>
+                </div>
+
+                {/* Client Schedule Section */}
+                <div style={{ marginTop: 18 }}>
+                  <h4 style={{ margin: "10px 0 6px 0" }}>Client Schedule</h4>
+                  {selectedClientShifts.length === 0 ? (
+                    <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={styles.th}>Date</th>
+                            <th style={styles.th}>Start</th>
+                            <th style={styles.th}>End</th>
+                            <th style={styles.th}>Staff</th>
+                            <th style={styles.th}>Shared</th>
+                            <th style={styles.th}>Group</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedClientShifts.map(sh => {
+                            const staff = (state.staff || []).find(s => s.id === sh.staffId);
+                            return (
+                              <tr key={sh.id}>
+                                <td style={styles.td}>{sh.startISO.slice(0, 10)}</td>
+                                <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
+                                <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
+                                <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
+                                <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
+                                <td style={styles.td}>{sh.sharedGroupId || ""}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Assigned Staff Section */}
+                <div style={{ marginTop: 18 }}>
+                  <h4 style={{ margin: "10px 0 6px 0" }}>Assigned Staff</h4>
+                  {selectedClientStaffSummary.length === 0 ? (
+                    <div style={styles.tiny}>No staff assigned this week.</div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={styles.th}>Staff</th>
+                            <th style={styles.th}>Total Hours</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedClientStaffSummary.map(({ staff, min }) => (
+                            <tr key={staff?.id || "unknown"}>
+                              <td style={styles.td}>{staff?.name || "Unknown"}</td>
+                              <td style={styles.td}>{fmtHoursFromMin(min)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
   // If Supabase isn't configured we'll show a banner inside the UI and
   // fall back to localStorage for data persistence.
