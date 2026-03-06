@@ -13,54 +13,8 @@ function setSupabaseErrorHandler(fn) {
   supabaseErrorHandler = fn;
 }
 function reportSupabaseError(error) {
-  // --- Client Profiles state ---
-  const [selectedClientId, setSelectedClientId] = useState("");
-  // Use profileClients for dropdown and selectors
-  const profileClients = useMemo(() => (canSeeAdminUI ? (state.clients || []) : visibleClients), [canSeeAdminUI, state.clients, visibleClients]);
-  // Memo: selected client object
-  const selectedClient = useMemo(() => (profileClients || []).find(c => c.id === selectedClientId) || null, [profileClients, selectedClientId]);
-  // Memo: all shifts for selected client in selected week
-  const selectedClientShifts = useMemo(() => {
-    if (!selectedClientId) return [];
-    return (state.shifts || [])
-      .filter(sh => sh.clientId === selectedClientId)
-      .filter(sh => {
-        // Only shifts in the selected week
-        const shStart = new Date(sh.startISO);
-        return shStart >= weekStartDate && shStart < weekEndDate;
-      })
-      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-  }, [state.shifts, selectedClientId, weekStartDate, weekEndDate]);
-  // Memo: unique staff assigned to this client in selected week, with total minutes
-  const selectedClientStaffSummary = useMemo(() => {
-    if (!selectedClientShifts.length) return [];
-    const staffMap = {};
-    for (const sh of selectedClientShifts) {
-      if (!sh.staffId) continue;
-      if (!staffMap[sh.staffId]) staffMap[sh.staffId] = { staff: (state.staff || []).find(s => s.id === sh.staffId), min: 0 };
-      staffMap[sh.staffId].min += minutesBetweenISO(sh.startISO, sh.endISO);
-    }
-    return Object.values(staffMap).sort((a, b) => (a.staff?.name || "").localeCompare(b.staff?.name || ""));
-  }, [selectedClientShifts, state.staff]);
-  // Memo: client weekly hours summary (total, day, night, remaining)
-  const selectedClientWeekHours = useMemo(() => {
-    let totalMin = 0, dayMin = 0, nightMin = 0;
-    for (const sh of selectedClientShifts) {
-      const { totalMin: t, dayMin: d, nightMin: n } = splitDayNightMinutes(sh.startISO, sh.endISO);
-      totalMin += t; dayMin += d; nightMin += n;
-    }
-    const allottedMin = (Number(selectedClient?.weeklyHours) || 0) * 60;
-    const remainingMin = allottedMin - totalMin;
-    return { totalMin, dayMin, nightMin, allottedMin, remainingMin };
-  }, [selectedClientShifts, selectedClient]);
-      if (idx >= 0) db[table][idx] = { ...db[table][idx], ...r };
-      else db[table].push(r);
-    }
-    localStorage.setItem("dsw_local_db", JSON.stringify(db));
-    // refresh in-memory state by triggering loadAll externally (caller should reload)
-  } catch (e) {
-    console.error(e);
-  }
+  if (supabaseErrorHandler) supabaseErrorHandler(error);
+  else console.warn("Supabase error:", error);
 }
 
 async function sbDelete(table, id) {
