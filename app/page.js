@@ -1344,11 +1344,15 @@ export default function Page() {
         ]
       : []),
   ];
+
   // --- Client Profiles state ---
   const [selectedClientId, setSelectedClientId] = useState("");
 
+  // Use all clients for the dropdown and selectors
+  const allClients = useMemo(() => (state.clients || []).filter(c => c), [state.clients]);
+
   // Memo: selected client object
-  const selectedClient = useMemo(() => (visibleClients || []).find(c => c.id === selectedClientId) || null, [visibleClients, selectedClientId]);
+  const selectedClient = useMemo(() => (allClients || []).find(c => c.id === selectedClientId) || null, [allClients, selectedClientId]);
 
   // Memo: all shifts for selected client in selected week
   const selectedClientShifts = useMemo(() => {
@@ -1398,7 +1402,7 @@ export default function Page() {
                 onChange={e => setSelectedClientId(e.target.value)}
               >
                 <option value="">Select…</option>
-                {visibleClients.map(c => (
+                {allClients.map(c => (
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </select>
