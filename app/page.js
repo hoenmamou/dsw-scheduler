@@ -6,6 +6,17 @@ import { supabase } from "../lib/supabaseClient";
 // On the client, Next.js replaces env vars at build time.
 const SUPABASE_CONFIGURED = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
+// Supabase errors (auth/RLS) should not break the app. When they happen we
+// fall back to localStorage (and log a warning).
+let supabaseErrorHandler = null;
+function setSupabaseErrorHandler(fn) {
+  supabaseErrorHandler = fn;
+}
+function reportSupabaseError(error) {
+  console.warn("Supabase request failed; falling back to local storage.", error);
+  if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
+}
+
 /* =========================
    Notes
    - This version is "dynamic": Supabase is the source of truth.
@@ -171,8 +182,8 @@ async function sbSelect(table) {
   // Supabase or localStorage fallback
   if (SUPABASE_CONFIGURED && supabase) {
     const { data, error } = await supabase.from(table).select("*");
-    if (error) throw error;
-    return data || [];
+    if (!error) return data || [];
+    reportSupabaseError(error);
   }
 
   // localStorage fallback
@@ -188,8 +199,8 @@ async function sbSelect(table) {
 async function sbUpsert(table, rows) {
   if (SUPABASE_CONFIGURED && supabase) {
     const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
-    if (error) throw error;
-    return;
+    if (!error) return;
+    reportSupabaseError(error);
   }
 
   // localStorage upsert
@@ -212,8 +223,8 @@ async function sbUpsert(table, rows) {
 async function sbDelete(table, id) {
   if (SUPABASE_CONFIGURED && supabase) {
     const { error } = await supabase.from(table).delete().eq("id", id);
-    if (error) throw error;
-    return;
+    if (!error) return;
+    reportSupabaseError(error);
   }
 
   try {
@@ -645,6 +656,9 @@ export default function Page() {
   // session login (local session only)
   const [sessionUserId, setSessionUserId] = useState(null);
 
+  // Supabase error state (used to show a warning banner when auth/RLS fails)
+  const [supabaseError, setSupabaseError] = useState(null);
+
   // UI
   const [tab, setTab] = useState("schedule");
 
@@ -674,6 +688,12 @@ export default function Page() {
   const canSeeAdminUI = isAdmin || normalizedRole.includes("super");
 
   useEffect(() => setMounted(true), []);
+
+  // connect Supabase error handler (to surface failures like 401 / RLS policy failures)
+  useEffect(() => {
+    setSupabaseErrorHandler(setSupabaseError);
+    return () => setSupabaseErrorHandler(null);
+  }, []);
 
   // load session user
   useEffect(() => {
@@ -1268,6 +1288,13 @@ export default function Page() {
         {!SUPABASE_CONFIGURED ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
             <strong>Warning:</strong> Supabase is not configured. The app is using localStorage fallback. To enable cloud sync set <b>NEXT_PUBLIC_SUPABASE_URL</b> and <b>NEXT_PUBLIC_SUPABASE_ANON_KEY</b>.
+          </div>
+        ) : supabaseError ? (
+          <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
+            <strong>Warning:</strong> Supabase requests are failing. The app is using localStorage fallback.
+            <div style={{ marginTop: 6, opacity: 0.85, fontSize: 12 }}>
+              {supabaseError.message || supabaseError.code || "Unknown error"} (check your anon key & table policies)
+            </div>
           </div>
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
