@@ -1164,10 +1164,17 @@ export default function Page() {
 
   async function addStaff() {
     const name = staffDraftName.trim();
-    if (!name) return;
-    await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
-    await refreshState(setState);
-    setStaffDraftName("");
+    console.debug("addStaff", { name, staffDraftName });
+    if (!name) return alert("Staff name is required.");
+
+    try {
+      await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
+      await refreshState(setState);
+      setStaffDraftName("");
+    } catch (err) {
+      console.error("addStaff error", err);
+      alert("Unable to add staff. See console for details.");
+    }
   }
 
   async function toggleStaff(id, active) {
