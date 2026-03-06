@@ -834,6 +834,36 @@ export default function Page() {
     sharedGroupId: "",
   });
 
+  // Auto-suggest staff for shift
+  const suggestedStaff = useMemo(() => {
+    const { clientId, startDate, startTime, endDate, endTime } = shiftDraft;
+    if (!clientId || !startDate || !startTime || !endDate || !endTime) return null;
+    const startISO = toISO(startDate, startTime);
+    const endISO = toISO(endDate, endTime);
+    const candidates = (state.staff || []).filter((s) => s.active !== false);
+    let best = null;
+    let bestScore = Infinity;
+    for (const st of candidates) {
+      // Check for conflicts
+      const hasConflict = (state.shifts || []).some((sh) =>
+        sh.staffId === st.id && overlaps(sh.startISO, sh.endISO, startISO, endISO)
+      );
+      if (hasConflict) continue;
+      // Compute OT after this shift
+      const min = staffWeekMinutesMap[st.id] || 0;
+      const addMin = minutesBetweenISO(startISO, endISO);
+      const afterMin = min + addMin;
+      const ot = Math.max(0, afterMin - OT_THRESHOLD_MIN);
+      // Prefer staff with least OT, then least total minutes
+      const score = ot * 10000 + afterMin;
+      if (score < bestScore) {
+        best = st;
+        bestScore = score;
+      }
+    }
+    return best;
+  }, [shiftDraft, state.staff, state.shifts, staffWeekMinutesMap]);
+
   // 24-Hour Builder UI
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderClientId, setBuilderClientId] = useState("");
@@ -1365,20 +1395,41 @@ export default function Page() {
 
       <div>
         <div style={styles.tiny}>Staff</div>
-        <select
-          style={styles.select}
-          value={shiftDraft.staffId}
-          onChange={(e) =>
-            setShiftDraft((p) => ({ ...p, staffId: e.target.value }))
-          }
-        >
-          <option value="">Select…</option>
-          {(state.staff || []).map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select
+            style={styles.select}
+            value={shiftDraft.staffId}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, staffId: e.target.value }))
+            }
+          >
+            <option value="">Select…</option>
+            {suggestedStaff ? (
+              <option value={suggestedStaff.id}>
+                ⭐ Suggested: {suggestedStaff.name}
+              </option>
+            ) : null}
+            {(state.staff || []).filter((s) => !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          {suggestedStaff && shiftDraft.staffId !== suggestedStaff.id ? (
+            <button
+              style={{ ...styles.btn2, padding: "2px 8px", fontSize: 13 }}
+              type="button"
+              onClick={() => setShiftDraft((p) => ({ ...p, staffId: suggestedStaff.id }))}
+            >
+              Suggest
+            </button>
+          ) : null}
+        </div>
+        {suggestedStaff ? (
+          <div style={{ fontSize: 12, color: "#4cc9f0", marginTop: 2 }}>
+            Best match: {suggestedStaff.name} (no conflict, lowest OT)
+          </div>
+        ) : null}
       </div>
 
       <div>
