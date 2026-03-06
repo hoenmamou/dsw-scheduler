@@ -2248,7 +2248,7 @@ const styles = {
     return { totalMin, dayMin, nightMin };
   }, [clientProfileShifts]);
 
-  // ...existing code...
+  // ...rest of the Page component logic...
 
   return (
     <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 16 }}>
