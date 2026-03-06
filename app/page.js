@@ -467,7 +467,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
    Calendar (print/PDF)
 ========================= */
 
-function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts }) {
+function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, setTab, setShiftDraft, deleteShift }) {
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
@@ -1745,6 +1745,9 @@ export default function Page() {
             weekStartDate={weekStartDate}
             visibleClients={visibleClients}
             canSeeAllShifts={canSeeAllShifts}
+            setTab={setTab}
+            setShiftDraft={setShiftDraft}
+            deleteShift={deleteShift}
           />
         )}
 
