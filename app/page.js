@@ -10,7 +10,56 @@ const SUPABASE_CONFIGURED = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.e
 // fall back to localStorage (and log a warning).
 let supabaseErrorHandler = null;
 
-
+// ====== Helper functions and constants ======
+function isoLocal(date) {
+  const d = new Date(date);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+}
+function addDays(date, n) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
+}
+function overlaps(startA, endA, startB, endB) {
+  return startA < endB && endA > startB;
+}
+function minutesBetweenISO(start, end) {
+  return Math.max(0, (new Date(end) - new Date(start)) / 60000);
+}
+function splitDayNightMinutes(startISO, endISO) {
+  const start = new Date(startISO);
+  const end = new Date(endISO);
+  let totalMin = 0, dayMin = 0, nightMin = 0;
+  let t = new Date(start);
+  while (t < end) {
+    const hour = t.getHours();
+    const next = new Date(t);
+    next.setMinutes(next.getMinutes() + 1);
+    totalMin++;
+    if (hour >= DAY_START_MIN / 60 && hour < DAY_END_MIN / 60) dayMin++;
+    else nightMin++;
+    t = next;
+  }
+  return { totalMin, dayMin, nightMin };
+}
+function fmtHoursFromMin(min) {
+  if (min == null) return "0h";
+  const h = Math.floor(Math.abs(min) / 60);
+  const m = Math.abs(min) % 60;
+  return `${min < 0 ? "-" : ""}${h}h${m ? ` ${m}m` : ""}`;
+}
+function uid(prefix = "") {
+  return prefix + Math.random().toString(36).slice(2, 10);
+}
+function clamp(val, min, max) {
+  return Math.max(min, Math.min(max, val));
+}
+const DAY_START_MIN = 7 * 60;
+const DAY_END_MIN = 23 * 60;
+const OT_THRESHOLD_MIN = 40 * 60;
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// ====== End helpers ======
 
 /* =========================
    Calendar (print/PDF)
@@ -57,182 +106,6 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
           <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
             Print / Save PDF
           </button>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(180px, 1fr))", gap: 10, overflowX: "auto" }}>
-        {days.map(({ d, dateStr }) => (
-          <div key={dateStr} style={styles.card}>
-            <div style={{ fontWeight: 950 }}>
-              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
-            </div>
-
-            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-              {dayShifts(dateStr).length === 0 ? (
-                <div style={{ opacity: 0.75, fontSize: 12 }}>No shifts</div>
-              ) : (
-                dayShifts(dateStr).map((sh) => (
-                  <div key={sh.id} style={styles.shift}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div>
-                        <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
-                        <div style={styles.shiftMeta}>
-                          {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
-                          <br />
-                          Staff: <b>{staffName(sh.staffId)}</b>
-                          {sh.isShared ? (
-                            <>
-                              <br />
-                              ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
-                            </>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button
-                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px" }}
-                          title="Edit shift"
-                          onClick={() => {
-                            // Load shift into draft for editing
-                            setTab && setTab("schedule");
-                            setShiftDraft && setShiftDraft({
-                              clientId: sh.clientId,
-                              staffId: sh.staffId,
-                              startDate: sh.startISO.slice(0, 10),
-                              startTime: sh.startISO.slice(11, 16),
-                              endDate: sh.endISO.slice(0, 10),
-                              endTime: sh.endISO.slice(11, 16),
-                              isShared: !!sh.isShared,
-                              clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
-                              sharedGroupId: sh.sharedGroupId || "",
-                            });
-                          }}
-                        >Edit</button>
-                        <button
-                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px", color: "#ff8b8b" }}
-                          title="Delete shift"
-                          onClick={() => {
-                            if (typeof window !== "undefined" && window.confirm("Delete this shift?")) {
-                              if (typeof deleteShift === "function") deleteShift(sh.id);
-                            }
-                          }}
-                        >Delete</button>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts }) {
-  const shifts = state.shifts || [];
-  const clients = state.clients || [];
-  const staff = state.staff || [];
-
-  const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
-  const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
-
-  const monthStart = new Date(monthStartDate);
-  monthStart.setHours(0, 0, 0, 0);
-
-  // Align the month view to a Monday-start calendar grid
-  const firstOfMonth = new Date(monthStart);
-  firstOfMonth.setDate(1);
-  const firstWeekday = firstOfMonth.getDay(); // 0=Sun, 1=Mon
-  const offsetToMon = firstWeekday === 0 ? -6 : 1 - firstWeekday;
-  const gridStart = addDays(firstOfMonth, offsetToMon);
-
-  const days = [...Array(42)].map((_, i) => {
-    const d = addDays(gridStart, i);
-    return { d, dateStr: isoLocal(d).slice(0, 10), inMonth: d.getMonth() === monthStart.getMonth() };
-  });
-
-  const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
-
-  function dayShifts(dateStr) {
-    const dayStart = new Date(`${dateStr}T00:00:00`).toISOString();
-    const dayEnd = new Date(`${dateStr}T23:59:59`).toISOString();
-
-    return shifts
-      .filter((sh) => {
-        if (!canSeeAllShifts && !visibleClientIds.has(sh.clientId)) return false;
-        return overlaps(sh.startISO, sh.endISO, dayStart, dayEnd);
-      })
-      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-  }
-
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div style={{ ...styles.card, marginBottom: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 980 }}>Monthly Calendar</div>
-            <div style={styles.tiny}>{monthStart.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>
-          </div>
-          <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
-            Print / Save PDF
-          </button>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
-        {WEEKDAY_NAMES.map((w) => (
-          <div key={w} style={{ ...styles.card, fontWeight: 900, textAlign: "center" }}>
-            {w}
-          </div>
-        ))}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
-        {days.map(({ d, dateStr, inMonth }) => (
-          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45 }}>
-            <div style={{ fontWeight: 950, fontSize: 12 }}>
-              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
-            </div>
-            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-              {dayShifts(dateStr).length === 0 ? (
-                <div style={{ opacity: 0.75, fontSize: 10 }}>No shifts</div>
-              ) : (
-                dayShifts(dateStr).map((sh) => (
-                  <div key={sh.id} style={styles.shift}>
-                    <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
-                    <div style={styles.shiftMeta}>
-                      {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
-                      <br />
-                      Staff: <b>{staffName(sh.staffId)}</b>
-                      {sh.isShared ? (
-                        <>
-                          <br />
-                          ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* =========================
-   Main App
-========================= */
-
-export default function Page() {
-  const [mounted, setMounted] = useState(false);
-
-  // “DB state”
-  const [state, setState] = useState({
     settings: { includeUnassignedForSupervisors: true, hardStopConflicts: true },
     users: [],
     staff: [],
@@ -260,6 +133,7 @@ export default function Page() {
   });
 
   const weekStartDate = useMemo(() => new Date(`${weekStart}T00:00:00`), [weekStart]);
+  const weekEndDate = useMemo(() => addDays(weekStartDate, 7), [weekStartDate]);
 
   // --- Client Profiles state ---
   const [selectedClientId, setSelectedClientId] = useState("");
@@ -298,161 +172,6 @@ export default function Page() {
     const remainingMin = allottedMin - totalMin;
     return { totalMin, dayMin, nightMin, allottedMin, remainingMin };
   }, [selectedClientShifts, selectedClient]);
-
-        {/* ================= Client Profiles ================= */}
-        {tab === "clientProfiles" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Client Profiles</h3>
-            <div style={{ marginBottom: 16 }}>
-              <div style={styles.tiny}>Select a client to view their profile:</div>
-              <select
-                style={{ ...styles.select, maxWidth: 320, marginTop: 6 }}
-                value={selectedClientId}
-                onChange={e => setSelectedClientId(e.target.value)}
-              >
-                <option value="">Select…</option>
-                {profileClients.map(c => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
-            </div>
-            {!selectedClient ? (
-              <div style={{ ...styles.tiny, marginTop: 24 }}>Select a client to view profile</div>
-            ) : (
-              <div style={{ ...styles.card, background: "rgba(255,255,255,0.02)", marginTop: 0 }}>
-                {/* Profile Header */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                  <div>
-                    <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
-                    <div style={styles.tiny}>
-                      Supervisor: <b>{(state.users || []).find(u => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
-                      Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
-                      24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
-                    </div>
-                    <div style={styles.tiny}>
-                      Coverage: <b>{selectedClient.coverageStart} – {selectedClient.coverageEnd}</b> &nbsp;|&nbsp;
-                      Weekly Allotment: <b>{Number(selectedClient.weeklyHours) || 0}h</b>
-                    </div>
-                    <div style={styles.tiny}>
-                      Week of: <b>{weekStart}</b>
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button
-                      style={styles.btn2}
-                      onClick={() => {
-                        setTab("schedule");
-                        setShiftDraft(p => ({ ...p, clientId: selectedClient.id }));
-                      }}
-                    >Add Shift for This Client</button>
-                    <button
-                      style={styles.btn2}
-                      onClick={() => {
-                        setTab("schedule");
-                        setBuilderClientId(selectedClient.id);
-                        setBuilderOpen(true);
-                      }}
-                    >Open 24-Hour Builder</button>
-                  </div>
-                </div>
-
-                {/* Hours Summary Bar */}
-                <div style={{ marginTop: 18, marginBottom: 10 }}>
-                  <div style={styles.tiny}>Weekly Hours Summary</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
-                        <div
-                          style={{
-                            height: "100%",
-                            width: `${Math.min(100, selectedClientWeekHours.allottedMin ? Math.round((selectedClientWeekHours.totalMin / selectedClientWeekHours.allottedMin) * 100) : 0)}%`,
-                            background: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
-                          }}
-                        />
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 13, minWidth: 120 }}>
-                      {fmtHoursFromMin(selectedClientWeekHours.totalMin)} / {fmtHoursFromMin(selectedClientWeekHours.allottedMin)}
-                    </div>
-                    <div style={{ fontSize: 13, color: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
-                      Rem: {fmtHoursFromMin(selectedClientWeekHours.remainingMin)}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
-                    Day: {fmtHoursFromMin(selectedClientWeekHours.dayMin)} &nbsp;|&nbsp; Night: {fmtHoursFromMin(selectedClientWeekHours.nightMin)}
-                  </div>
-                </div>
-
-                {/* Client Schedule Section */}
-                <div style={{ marginTop: 18 }}>
-                  <h4 style={{ margin: "10px 0 6px 0" }}>Client Schedule</h4>
-                  {selectedClientShifts.length === 0 ? (
-                    <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                        <thead>
-                          <tr>
-                            <th style={styles.th}>Date</th>
-                            <th style={styles.th}>Start</th>
-                            <th style={styles.th}>End</th>
-                            <th style={styles.th}>Staff</th>
-                            <th style={styles.th}>Shared</th>
-                            <th style={styles.th}>Group</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedClientShifts.map(sh => {
-                            const staff = (state.staff || []).find(s => s.id === sh.staffId);
-                            return (
-                              <tr key={sh.id}>
-                                <td style={styles.td}>{sh.startISO.slice(0, 10)}</td>
-                                <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
-                                <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
-                                <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
-                                <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
-                                <td style={styles.td}>{sh.sharedGroupId || ""}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-
-                {/* Assigned Staff Section */}
-                <div style={{ marginTop: 18 }}>
-                  <h4 style={{ margin: "10px 0 6px 0" }}>Assigned Staff</h4>
-                  {selectedClientStaffSummary.length === 0 ? (
-                    <div style={styles.tiny}>No staff assigned this week.</div>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                        <thead>
-                          <tr>
-                            <th style={styles.th}>Staff</th>
-                            <th style={styles.th}>Total Hours</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedClientStaffSummary.map(({ staff, min }) => (
-                            <tr key={staff?.id || "unknown"}>
-                              <td style={styles.td}>{staff?.name || "Unknown"}</td>
-                              <td style={styles.td}>{fmtHoursFromMin(min)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-
-              </div>
-            )}
-          </div>
-        )}
-
 
   // keep startDate aligned with week when week changes
   useEffect(() => {
@@ -886,161 +605,8 @@ export default function Page() {
           { value: "settings", label: "Settings" },
         ]
       : []),
-  ];
+  ]);
 
-
-        {/* ================= Client Profiles ================= */}
-        {tab === "clientProfiles" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Client Profiles</h3>
-            <div style={{ marginBottom: 16 }}>
-              <div style={styles.tiny}>Select a client to view their profile:</div>
-              <select
-                style={{ ...styles.select, maxWidth: 320, marginTop: 6 }}
-                value={selectedClientId}
-                onChange={e => setSelectedClientId(e.target.value)}
-              >
-                <option value="">Select…</option>
-                {allClients.map(c => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
-            </div>
-            {!selectedClient ? (
-              <div style={{ ...styles.tiny, marginTop: 24 }}>Select a client to view profile</div>
-            ) : (
-              <div style={{ ...styles.card, background: "rgba(255,255,255,0.02)", marginTop: 0 }}>
-                {/* Profile Header */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                  <div>
-                    <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
-                    <div style={styles.tiny}>
-                      Supervisor: <b>{(state.users || []).find(u => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
-                      Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
-                      24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
-                    </div>
-                    <div style={styles.tiny}>
-                      Coverage: <b>{selectedClient.coverageStart} – {selectedClient.coverageEnd}</b> &nbsp;|&nbsp;
-                      Weekly Allotment: <b>{Number(selectedClient.weeklyHours) || 0}h</b>
-                    </div>
-                    <div style={styles.tiny}>
-                      Week of: <b>{weekStart}</b>
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button
-                      style={styles.btn2}
-                      onClick={() => {
-                        setTab("schedule");
-                        setShiftDraft(p => ({ ...p, clientId: selectedClient.id }));
-                      }}
-                    >Add Shift for This Client</button>
-                    <button
-                      style={styles.btn2}
-                      onClick={() => {
-                        setTab("schedule");
-                        setBuilderClientId(selectedClient.id);
-                        setBuilderOpen(true);
-                      }}
-                    >Open 24-Hour Builder</button>
-                  </div>
-                </div>
-
-                {/* Hours Summary Bar */}
-                <div style={{ marginTop: 18, marginBottom: 10 }}>
-                  <div style={styles.tiny}>Weekly Hours Summary</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
-                        <div
-                          style={{
-                            height: "100%",
-                            width: `${Math.min(100, selectedClientWeekHours.allottedMin ? Math.round((selectedClientWeekHours.totalMin / selectedClientWeekHours.allottedMin) * 100) : 0)}%`,
-                            background: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
-                          }}
-                        />
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 13, minWidth: 120 }}>
-                      {fmtHoursFromMin(selectedClientWeekHours.totalMin)} / {fmtHoursFromMin(selectedClientWeekHours.allottedMin)}
-                    </div>
-                    <div style={{ fontSize: 13, color: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
-                      Rem: {fmtHoursFromMin(selectedClientWeekHours.remainingMin)}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
-                    Day: {fmtHoursFromMin(selectedClientWeekHours.dayMin)} &nbsp;|&nbsp; Night: {fmtHoursFromMin(selectedClientWeekHours.nightMin)}
-                  </div>
-                </div>
-
-                {/* Client Schedule Section */}
-                <div style={{ marginTop: 18 }}>
-                  <h4 style={{ margin: "10px 0 6px 0" }}>Client Schedule</h4>
-                  {selectedClientShifts.length === 0 ? (
-                    <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                        <thead>
-                          <tr>
-                            <th style={styles.th}>Date</th>
-                            <th style={styles.th}>Start</th>
-                            <th style={styles.th}>End</th>
-                            <th style={styles.th}>Staff</th>
-                            <th style={styles.th}>Shared</th>
-                            <th style={styles.th}>Group</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedClientShifts.map(sh => {
-                            const staff = (state.staff || []).find(s => s.id === sh.staffId);
-                            return (
-                              <tr key={sh.id}>
-                                <td style={styles.td}>{sh.startISO.slice(0, 10)}</td>
-                                <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
-                                <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
-                                <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
-                                <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
-                                <td style={styles.td}>{sh.sharedGroupId || ""}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-
-                {/* Assigned Staff Section */}
-                <div style={{ marginTop: 18 }}>
-                  <h4 style={{ margin: "10px 0 6px 0" }}>Assigned Staff</h4>
-                  {selectedClientStaffSummary.length === 0 ? (
-                    <div style={styles.tiny}>No staff assigned this week.</div>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                        <thead>
-                          <tr>
-                            <th style={styles.th}>Staff</th>
-                            <th style={styles.th}>Total Hours</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedClientStaffSummary.map(({ staff, min }) => (
-                            <tr key={staff?.id || "unknown"}>
-                              <td style={styles.td}>{staff?.name || "Unknown"}</td>
-                              <td style={styles.td}>{fmtHoursFromMin(min)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
 
   if (!mounted) return null;
 
