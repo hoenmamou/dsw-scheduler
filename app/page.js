@@ -524,17 +524,51 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts })
               ) : (
                 dayShifts(dateStr).map((sh) => (
                   <div key={sh.id} style={styles.shift}>
-                    <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
-                    <div style={styles.shiftMeta}>
-                      {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
-                      <br />
-                      Staff: <b>{staffName(sh.staffId)}</b>
-                      {sh.isShared ? (
-                        <>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
+                        <div style={styles.shiftMeta}>
+                          {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
                           <br />
-                          ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
-                        </>
-                      ) : null}
+                          Staff: <b>{staffName(sh.staffId)}</b>
+                          {sh.isShared ? (
+                            <>
+                              <br />
+                              ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px" }}
+                          title="Edit shift"
+                          onClick={() => {
+                            // Load shift into draft for editing
+                            setTab && setTab("schedule");
+                            setShiftDraft && setShiftDraft({
+                              clientId: sh.clientId,
+                              staffId: sh.staffId,
+                              startDate: sh.startISO.slice(0, 10),
+                              startTime: sh.startISO.slice(11, 16),
+                              endDate: sh.endISO.slice(0, 10),
+                              endTime: sh.endISO.slice(11, 16),
+                              isShared: !!sh.isShared,
+                              clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
+                              sharedGroupId: sh.sharedGroupId || "",
+                            });
+                          }}
+                        >Edit</button>
+                        <button
+                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px", color: "#ff8b8b" }}
+                          title="Delete shift"
+                          onClick={() => {
+                            if (typeof window !== "undefined" && window.confirm("Delete this shift?")) {
+                              if (typeof deleteShift === "function") deleteShift(sh.id);
+                            }
+                          }}
+                        >Delete</button>
+                      </div>
                     </div>
                   </div>
                 ))
