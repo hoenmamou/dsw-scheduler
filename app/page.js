@@ -1,7 +1,21 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase, SUPABASE_CONFIGURED } from "../lib/supabaseClient";
+import { supabase } from "../lib/supabaseClient";
+
+// On the client, Next.js replaces env vars at build time.
+const SUPABASE_CONFIGURED = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+
+// Supabase errors (auth/RLS) should not break the app. When they happen we
+// fall back to localStorage (and log a warning).
+let supabaseErrorHandler = null;
+function setSupabaseErrorHandler(fn) {
+  supabaseErrorHandler = fn;
+}
+function reportSupabaseError(error) {
+  console.warn("Supabase request failed; falling back to local storage.", error);
+  if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
+}
 
 /* =========================
    Notes
@@ -96,6 +110,50 @@ function fmtHoursFromMin(min) {
   return `${(min / 60).toFixed(2)}h`;
 }
 
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
+
+function parseShiftPattern(input) {
+  // Accept newline or comma separated entries like "07:00-15:00"
+  const lines = (input || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .flatMap((l) => l.split(",").map((p) => p.trim()).filter(Boolean));
+
+  const out = [];
+  for (const line of lines) {
+    const m = line.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
+    if (!m) throw new Error(`Invalid shift format: "${line}" (expected HH:MM-HH:MM)`);
+    const [, sh, sm, eh, em] = m;
+    const start = `${String(sh).padStart(2, "0")}:${sm}`;
+    const end = `${String(eh).padStart(2, "0")}:${em}`;
+    out.push({ start, end });
+  }
+  return out;
+}
+
+function loadClientSchedule(clientId) {
+  try {
+    const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map[clientId] || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveClientSchedule(clientId, shifts) {
+  try {
+    const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    map[clientId] = { shifts };
+    localStorage.setItem(CLIENT_SCHEDULE_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
+
 function Tabs({ value, onChange, tabs }) {
   return (
     <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -124,8 +182,8 @@ async function sbSelect(table) {
   // Supabase or localStorage fallback
   if (SUPABASE_CONFIGURED && supabase) {
     const { data, error } = await supabase.from(table).select("*");
-    if (error) throw error;
-    return data || [];
+    if (!error) return data || [];
+    reportSupabaseError(error);
   }
 
   // localStorage fallback
@@ -141,8 +199,8 @@ async function sbSelect(table) {
 async function sbUpsert(table, rows) {
   if (SUPABASE_CONFIGURED && supabase) {
     const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
-    if (error) throw error;
-    return;
+    if (!error) return;
+    reportSupabaseError(error);
   }
 
   // localStorage upsert
@@ -165,8 +223,8 @@ async function sbUpsert(table, rows) {
 async function sbDelete(table, id) {
   if (SUPABASE_CONFIGURED && supabase) {
     const { error } = await supabase.from(table).delete().eq("id", id);
-    if (error) throw error;
-    return;
+    if (!error) return;
+    reportSupabaseError(error);
   }
 
   try {
@@ -190,7 +248,7 @@ const DEFAULT_DB = {
     { id: "st2", name: "Jordan" },
   ],
   clients: [
-    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true },
+    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true, weekly_hours: 40 },
   ],
   shifts: [],
 };
@@ -210,8 +268,10 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       coverageStart: c.coverage_start || "07:00",
       coverageEnd: c.coverage_end || "23:00",
       is24Hour: !!c.is_24_hour,
+      weeklyHours: typeof c.weekly_hours === "number" ? c.weekly_hours : Number(c.weekly_hours) || 40,
       active: c.active !== false,
     })),
+
     shifts: (shifts || []).map((sh) => ({
       id: sh.id,
       clientId: sh.client_id,
@@ -236,8 +296,10 @@ function toDB(state) {
       coverage_start: c.coverageStart || "07:00",
       coverage_end: c.coverageEnd || "23:00",
       is_24_hour: !!c.is24Hour,
+      weekly_hours: Number(c.weeklyHours) || 40,
       active: c.active !== false,
     })),
+
     shifts: (state.shifts || []).map((sh) => ({
       id: sh.id,
       client_id: sh.clientId,
@@ -298,11 +360,56 @@ function staffWeekMinutesDedup(shifts, staffId) {
    Login
 ========================= */
 
-function LoginScreen({ users, onLogin }) {
+function LoginScreen({ users, onLogin, onCreateAdmin }) {
   const [picked, setPicked] = useState(users?.[0]?.id || "");
   const [pin, setPin] = useState("");
 
+  const [newId, setNewId] = useState("admin");
+  const [newName, setNewName] = useState("Admin");
+  const [newPin, setNewPin] = useState("1234");
+
   const user = users.find((u) => u.id === picked);
+
+  if (!users || users.length === 0) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
+        <div style={{ maxWidth: 520, margin: "40px auto", ...styles.card }}>
+          <h2 style={{ marginTop: 0 }}>DSW Scheduler — Create Admin</h2>
+
+          <div style={{ ...styles.twoCol, marginTop: 10 }}>
+            <div>
+              <div style={styles.tiny}>ID</div>
+              <input style={styles.input} value={newId} onChange={(e) => setNewId(e.target.value)} placeholder="admin" />
+            </div>
+            <div>
+              <div style={styles.tiny}>Name</div>
+              <input style={styles.input} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Admin" />
+            </div>
+            <div>
+              <div style={styles.tiny}>PIN</div>
+              <input style={styles.input} value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="1234" type="password" />
+            </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+            <button
+              style={styles.btn}
+              onClick={() => {
+                if (!newId.trim() || !newName.trim() || !newPin.trim()) return alert("All fields are required.");
+                onCreateAdmin({ id: newId.trim(), name: newName.trim(), pin: newPin.trim() });
+              }}
+            >
+              Create Admin
+            </button>
+          </div>
+
+          <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
+            Tip: This will create the first user so you can log in and manage staff/clients.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
@@ -333,7 +440,10 @@ function LoginScreen({ users, onLogin }) {
             onClick={() => {
               console.log("Login attempt", { picked, pin, user });
               if (!user) return alert("Pick a user before logging in.");
-              if (String(pin || "") !== String(user.pin || "")) {
+
+              // If the stored user does not have a pin, allow logging in (for existing Supabase rows without pin).
+              const pinMatches = !user.pin || String(pin || "") === String(user.pin || "");
+              if (!pinMatches) {
                 alert("Incorrect PIN.");
                 return;
               }
@@ -357,7 +467,7 @@ function LoginScreen({ users, onLogin }) {
    Calendar (print/PDF)
 ========================= */
 
-function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts }) {
+function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, setTab, setShiftDraft, deleteShift }) {
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
@@ -414,6 +524,134 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts })
               ) : (
                 dayShifts(dateStr).map((sh) => (
                   <div key={sh.id} style={styles.shift}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
+                        <div style={styles.shiftMeta}>
+                          {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
+                          <br />
+                          Staff: <b>{staffName(sh.staffId)}</b>
+                          {sh.isShared ? (
+                            <>
+                              <br />
+                              ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px" }}
+                          title="Edit shift"
+                          onClick={() => {
+                            // Load shift into draft for editing
+                            setTab && setTab("schedule");
+                            setShiftDraft && setShiftDraft({
+                              clientId: sh.clientId,
+                              staffId: sh.staffId,
+                              startDate: sh.startISO.slice(0, 10),
+                              startTime: sh.startISO.slice(11, 16),
+                              endDate: sh.endISO.slice(0, 10),
+                              endTime: sh.endISO.slice(11, 16),
+                              isShared: !!sh.isShared,
+                              clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
+                              sharedGroupId: sh.sharedGroupId || "",
+                            });
+                          }}
+                        >Edit</button>
+                        <button
+                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px", color: "#ff8b8b" }}
+                          title="Delete shift"
+                          onClick={() => {
+                            if (typeof window !== "undefined" && window.confirm("Delete this shift?")) {
+                              if (typeof deleteShift === "function") deleteShift(sh.id);
+                            }
+                          }}
+                        >Delete</button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts }) {
+  const shifts = state.shifts || [];
+  const clients = state.clients || [];
+  const staff = state.staff || [];
+
+  const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
+
+  const monthStart = new Date(monthStartDate);
+  monthStart.setHours(0, 0, 0, 0);
+
+  // Align the month view to a Monday-start calendar grid
+  const firstOfMonth = new Date(monthStart);
+  firstOfMonth.setDate(1);
+  const firstWeekday = firstOfMonth.getDay(); // 0=Sun, 1=Mon
+  const offsetToMon = firstWeekday === 0 ? -6 : 1 - firstWeekday;
+  const gridStart = addDays(firstOfMonth, offsetToMon);
+
+  const days = [...Array(42)].map((_, i) => {
+    const d = addDays(gridStart, i);
+    return { d, dateStr: isoLocal(d).slice(0, 10), inMonth: d.getMonth() === monthStart.getMonth() };
+  });
+
+  const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
+
+  function dayShifts(dateStr) {
+    const dayStart = new Date(`${dateStr}T00:00:00`).toISOString();
+    const dayEnd = new Date(`${dateStr}T23:59:59`).toISOString();
+
+    return shifts
+      .filter((sh) => {
+        if (!canSeeAllShifts && !visibleClientIds.has(sh.clientId)) return false;
+        return overlaps(sh.startISO, sh.endISO, dayStart, dayEnd);
+      })
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ ...styles.card, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 980 }}>Monthly Calendar</div>
+            <div style={styles.tiny}>{monthStart.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>
+          </div>
+          <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
+            Print / Save PDF
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+        {WEEKDAY_NAMES.map((w) => (
+          <div key={w} style={{ ...styles.card, fontWeight: 900, textAlign: "center" }}>
+            {w}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+        {days.map(({ d, dateStr, inMonth }) => (
+          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45 }}>
+            <div style={{ fontWeight: 950, fontSize: 12 }}>
+              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+            </div>
+            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
+              {dayShifts(dateStr).length === 0 ? (
+                <div style={{ opacity: 0.75, fontSize: 10 }}>No shifts</div>
+              ) : (
+                dayShifts(dateStr).map((sh) => (
+                  <div key={sh.id} style={styles.shift}>
                     <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
                     <div style={styles.shiftMeta}>
                       {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
@@ -456,6 +694,9 @@ export default function Page() {
   // session login (local session only)
   const [sessionUserId, setSessionUserId] = useState(null);
 
+  // Supabase error state (used to show a warning banner when auth/RLS fails)
+  const [supabaseError, setSupabaseError] = useState(null);
+
   // UI
   const [tab, setTab] = useState("schedule");
 
@@ -472,10 +713,25 @@ export default function Page() {
   const weekStartDate = useMemo(() => new Date(`${weekStart}T00:00:00`), [weekStart]);
   const weekEndDate = useMemo(() => addDays(weekStartDate, 7), [weekStartDate]);
 
+  const monthStartDate = useMemo(() => {
+    const d = new Date(`${weekStart}T00:00:00`);
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }, [weekStart]);
+
   const currentUser = useMemo(() => state.users.find((u) => u.id === sessionUserId) || null, [state.users, sessionUserId]);
-  const isAdmin = currentUser?.role === "admin";
+  const normalizedRole = (currentUser?.role || "").toLowerCase();
+  const isAdmin = normalizedRole.includes("admin");
+  const canSeeAdminUI = isAdmin || normalizedRole.includes("super");
 
   useEffect(() => setMounted(true), []);
+
+  // connect Supabase error handler (to surface failures like 401 / RLS policy failures)
+  useEffect(() => {
+    setSupabaseErrorHandler(setSupabaseError);
+    return () => setSupabaseErrorHandler(null);
+  }, []);
 
   // load session user
   useEffect(() => {
@@ -491,12 +747,20 @@ export default function Page() {
     let alive = true;
 
     async function loadAll() {
-      const [users, staff, clients, shifts] = await Promise.all([
+      let [users, staff, clients, shifts] = await Promise.all([
         sbSelect("users"),
         sbSelect("staff"),
         sbSelect("clients"),
         sbSelect("shifts"),
       ]);
+
+      // If the DB has never been seeded (e.g. fresh localStorage), ensure the default login user exists.
+      if (!users || users.length === 0) {
+        console.warn("No users found in DB — seeding default users for local dev.");
+        users = DEFAULT_DB.users;
+        await sbUpsert("users", users);
+      }
+
       if (!alive) return;
       setState((prev) => ({ ...prev, ...normalizeFromDB({ users, staff, clients, shifts }) }));
     }
@@ -538,6 +802,13 @@ export default function Page() {
       sessionStorage.removeItem("dsw_user_id");
     } catch {}
     setSessionUserId(null);
+  }
+
+  async function createAdminUser({ id, name, pin }) {
+    const row = { id, name, role: "admin", pin };
+    await sbUpsert("users", [row]);
+    await refreshState(setState);
+    loginAs(id);
   }
 
   const visibleClients = useMemo(() => {
@@ -597,15 +868,63 @@ export default function Page() {
     sharedGroupId: "",
   });
 
+  // Auto-suggest staff for shift
+  const suggestedStaff = useMemo(() => {
+    const { clientId, startDate, startTime, endDate, endTime } = shiftDraft;
+    if (!clientId || !startDate || !startTime || !endDate || !endTime) return null;
+    const startISO = toISO(startDate, startTime);
+    const endISO = toISO(endDate, endTime);
+    const candidates = (state.staff || []).filter((s) => s.active !== false);
+    let best = null;
+    let bestScore = Infinity;
+    for (const st of candidates) {
+      // Check for conflicts
+      const hasConflict = (state.shifts || []).some((sh) =>
+        sh.staffId === st.id && overlaps(sh.startISO, sh.endISO, startISO, endISO)
+      );
+      if (hasConflict) continue;
+      // Compute OT after this shift
+      const min = staffWeekMinutesMap[st.id] || 0;
+      const addMin = minutesBetweenISO(startISO, endISO);
+      const afterMin = min + addMin;
+      const ot = Math.max(0, afterMin - OT_THRESHOLD_MIN);
+      // Prefer staff with least OT, then least total minutes
+      const score = ot * 10000 + afterMin;
+      if (score < bestScore) {
+        best = st;
+        bestScore = score;
+      }
+    }
+    return best;
+  }, [shiftDraft, state.staff, state.shifts, staffWeekMinutesMap]);
+
   // 24-Hour Builder UI
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderClientId, setBuilderClientId] = useState("");
   const [builderTemplate, setBuilderTemplate] = useState("2x12");
+  const [builderScheduleSource, setBuilderScheduleSource] = useState("template"); // template | client | custom
+  const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-15:00\n15:00-23:00\n23:00-07:00");
+  const [builderWeeklyAssignments, setBuilderWeeklyAssignments] = useState({});
+  const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
+  const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
+  const clientSchedule = useMemo(() => {
+    return builderClientId ? loadClientSchedule(builderClientId) : null;
+  }, [builderClientId]);
 
   // keep startDate aligned with week when week changes
   useEffect(() => {
     setShiftDraft((p) => ({ ...p, startDate: weekStart, endDate: weekStart }));
   }, [weekStart]);
+
+  // Load stored client schedule template into the builder when selecting a client
+  useEffect(() => {
+    if (!builderClientId) return;
+    const schedule = loadClientSchedule(builderClientId);
+    if (schedule?.shifts) {
+      setBuilderCustomTemplate(schedule.shifts.map((s) => `${s.start}-${s.end}`).join("\n"));
+      setBuilderScheduleSource((prev) => (prev === "custom" ? "custom" : "client"));
+    }
+  }, [builderClientId]);
 
   // Auto bump endDate if endTime earlier than startTime
   useEffect(() => {
@@ -635,43 +954,89 @@ export default function Page() {
 
   async function runBuilder() {
     if (!builderClientId) return alert("Pick a client for the builder.");
-    const client = (state.clients || []).find((c) => c.id === builderClientId);
     const start = new Date(weekStartDate);
     const rows = [];
 
-    // Build per day for the selected week
-    for (let d = 0; d < 7; d++) {
-      const day = addDays(start, d);
-      const dateStr = isoLocal(day).slice(0, 10);
+    // Determine shift definitions based on selected source
+    let shiftsDef = [];
+    try {
+      if (builderScheduleSource === "client") {
+        if (!clientSchedule?.shifts?.length) return alert("No saved schedule for this client.");
+        shiftsDef = clientSchedule.shifts;
+      } else if (builderScheduleSource === "custom") {
+        shiftsDef = parseShiftPattern(builderCustomTemplate);
+      } else {
+        shiftsDef = builderTemplate === "2x12"
+          ? [ { start: "07:00", end: "19:00" }, { start: "19:00", end: "07:00" } ]
+          : [ { start: "07:00", end: "15:00" }, { start: "15:00", end: "23:00" }, { start: "23:00", end: "07:00" } ];
+      }
+    } catch (e) {
+      return alert(e.message || "Invalid schedule format.");
+    }
 
-      const shiftsDef = builderTemplate === "2x12"
-        ? [ ["07:00","19:00"], ["19:00","07:00"] ]
-        : [ ["07:00","15:00"], ["15:00","23:00"], ["23:00","07:00"] ];
+    // Track per-staff minutes while building to avoid over-assigning
+    const minutesByStaff = { ...staffWeekMinutesMap };
+    const pool = (state.staff || []).filter((s) => s.active !== false);
+    let rotIndex = 0;
 
-      for (const [sTime, eTime] of shiftsDef) {
-        const sISO = toISO(dateStr, sTime);
-        let eISO = toISO(dateStr, eTime);
-        if (new Date(eISO) <= new Date(sISO)) {
-          const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
-          eISO = `${isoLocal(nd).slice(0,10)}T${eTime}:00`;
+    const pickStaffForShift = async (startISO, endISO) => {
+      const weekday = new Date(startISO).getDay();
+      const forcedStaffId = builderWeeklyAssignments[weekday];
+      const addMin = minutesBetweenISO(startISO, endISO);
+
+      const checkCandidate = async (st) => {
+        const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO, endISO });
+        if (conflicts.length) return false;
+        const currentMin = minutesByStaff[st.id] || 0;
+        if (state.settings?.hardStopConflicts && currentMin + addMin > OT_THRESHOLD_MIN) return false;
+        minutesByStaff[st.id] = currentMin + addMin;
+        return true;
+      };
+
+      if (forcedStaffId) {
+        const forced = pool.find((s) => s.id === forcedStaffId);
+        if (forced && (await checkCandidate(forced))) return forced;
+      }
+
+      for (let i = 0; i < pool.length; i++) {
+        const idx = (rotIndex + i) % pool.length;
+        const st = pool[idx];
+        if (await checkCandidate(st)) {
+          rotIndex = idx + 1;
+          return st;
         }
+      }
+      return null;
+    };
 
-        // pick an available staff
-        const pool = (state.staff || []).filter((s) => s.active !== false);
-        let chosen = null;
-        for (const st of pool) {
-          // check conflicts
-          const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO: sISO, endISO: eISO });
-          if (conflicts.length) continue;
-          // check OT
-          const currentMin = staffWeekMinutesMap[st.id] || 0;
-          const addMin = minutesBetweenISO(sISO, eISO);
-          if (state.settings?.hardStopConflicts && currentMin + addMin > OT_THRESHOLD_MIN) continue;
-          chosen = st; break;
-        }
+    // Build for N weeks (1=week, 4=month) using the repeat interval
+    for (let w = 0; w < builderWeeks; w += builderRepeatInterval) {
+      const weekStartForRun = addDays(start, w * 7);
+      for (let d = 0; d < 7; d++) {
+        const day = addDays(weekStartForRun, d);
+        const dateStr = isoLocal(day).slice(0, 10);
 
-        if (chosen) {
-          rows.push({ id: uid("sh"), client_id: builderClientId, staff_id: chosen.id, start_iso: sISO, end_iso: eISO, created_by: currentUser?.id || "builder", is_shared: false, shared_group_id: "" });
+        for (const { start: sTime, end: eTime } of shiftsDef) {
+          const sISO = toISO(dateStr, sTime);
+          let eISO = toISO(dateStr, eTime);
+          if (new Date(eISO) <= new Date(sISO)) {
+            const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
+            eISO = `${isoLocal(nd).slice(0, 10)}T${eTime}:00`;
+          }
+
+          const chosen = await pickStaffForShift(sISO, eISO);
+          if (chosen) {
+            rows.push({
+              id: uid("sh"),
+              client_id: builderClientId,
+              staff_id: chosen.id,
+              start_iso: sISO,
+              end_iso: eISO,
+              created_by: currentUser?.id || "builder",
+              is_shared: false,
+              shared_group_id: "",
+            });
+          }
         }
       }
     }
@@ -875,6 +1240,7 @@ export default function Page() {
     supervisorId: "",
     coverageStart: "07:00",
     coverageEnd: "23:00",
+    weeklyHours: 40,
     is24Hour: false,
     active: true,
   });
@@ -887,10 +1253,17 @@ export default function Page() {
 
   async function addStaff() {
     const name = staffDraftName.trim();
-    if (!name) return;
-    await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
-    await refreshState(setState);
-    setStaffDraftName("");
+    console.debug("addStaff", { name, staffDraftName });
+    if (!name) return alert("Staff name is required.");
+
+    try {
+      await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
+      await refreshState(setState);
+      setStaffDraftName("");
+    } catch (err) {
+      console.error("addStaff error", err);
+      alert("Unable to add staff. See console for details.");
+    }
   }
 
   async function toggleStaff(id, active) {
@@ -913,12 +1286,13 @@ export default function Page() {
       supervisor_id: clientDraft.supervisorId || null,
       coverage_start: clientDraft.coverageStart || "07:00",
       coverage_end: clientDraft.coverageEnd || "23:00",
+      weekly_hours: Number(clientDraft.weeklyHours) || 40,
       is_24_hour: !!clientDraft.is24Hour,
       active: clientDraft.active !== false,
     };
     await sbUpsert("clients", [row]);
     await refreshState(setState);
-    setClientDraft({ id: "", name: "", supervisorId: "", coverageStart: "07:00", coverageEnd: "23:00", is24Hour: false, active: true });
+    setClientDraft({ id: "", name: "", supervisorId: "", coverageStart: "07:00", coverageEnd: "23:00", weeklyHours: 40, is24Hour: false, active: true });
   }
 
   async function deleteClient(id) {
@@ -952,10 +1326,16 @@ export default function Page() {
   // Tabs
   const tabs = [
     { value: "schedule", label: "Schedule" },
-    { value: "calendar", label: "Calendar / Print" },
+    { value: "calendar", label: "Weekly Calendar" },
+    { value: "month", label: "Monthly Calendar" },
+    { value: "staffSchedule", label: "Staff Schedule" },
     { value: "gaps", label: "Coverage Gaps" },
     { value: "hours", label: "Hours & OT" },
-    ...(isAdmin
+    // --- Client Profiles tab for users who can see clients ---
+    ...(visibleClients.length > 0 ? [
+      { value: "clientProfiles", label: "Client Profiles" },
+    ] : []),
+    ...(canSeeAdminUI
       ? [
           { value: "staff", label: "Staff" },
           { value: "clients", label: "Clients" },
@@ -965,13 +1345,58 @@ export default function Page() {
       : []),
   ];
 
+  // --- Client Profiles state ---
+  const [selectedClientId, setSelectedClientId] = useState("");
+
+  // Use all clients for the dropdown and selectors
+  const allClients = useMemo(() => (state.clients || []).filter(c => c), [state.clients]);
+
+  // Memo: selected client object
+  const selectedClient = useMemo(() => (allClients || []).find(c => c.id === selectedClientId) || null, [allClients, selectedClientId]);
+
+  // Memo: all shifts for selected client in selected week
+  const selectedClientShifts = useMemo(() => {
+    if (!selectedClientId) return [];
+    return (state.shifts || [])
+      .filter(sh => sh.clientId === selectedClientId)
+      .filter(sh => {
+        // Only shifts in the selected week
+        const shStart = new Date(sh.startISO);
+        return shStart >= weekStartDate && shStart < weekEndDate;
+      })
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  }, [state.shifts, selectedClientId, weekStartDate, weekEndDate]);
+
+  // Memo: unique staff assigned to this client in selected week, with total minutes
+  const selectedClientStaffSummary = useMemo(() => {
+    if (!selectedClientShifts.length) return [];
+    const staffMap = {};
+    for (const sh of selectedClientShifts) {
+      if (!sh.staffId) continue;
+      if (!staffMap[sh.staffId]) staffMap[sh.staffId] = { staff: (state.staff || []).find(s => s.id === sh.staffId), min: 0 };
+      staffMap[sh.staffId].min += minutesBetweenISO(sh.startISO, sh.endISO);
+    }
+    return Object.values(staffMap).sort((a, b) => (a.staff?.name || "").localeCompare(b.staff?.name || ""));
+  }, [selectedClientShifts, state.staff]);
+
+  // Memo: client weekly hours summary (total, day, night, remaining)
+  const selectedClientWeekHours = useMemo(() => {
+    let totalMin = 0, dayMin = 0, nightMin = 0;
+    for (const sh of selectedClientShifts) {
+      const { totalMin: t, dayMin: d, nightMin: n } = splitDayNightMinutes(sh.startISO, sh.endISO);
+      totalMin += t; dayMin += d; nightMin += n;
+    }
+    const allottedMin = (Number(selectedClient?.weeklyHours) || 0) * 60;
+    const remainingMin = allottedMin - totalMin;
+    return { totalMin, dayMin, nightMin, allottedMin, remainingMin };
+  }, [selectedClientShifts, selectedClient]);
   if (!mounted) return null;
 
   // If Supabase isn't configured we'll show a banner inside the UI and
   // fall back to localStorage for data persistence.
 
   if (!currentUser) {
-    return <LoginScreen users={state.users} onLogin={loginAs} />;
+    return <LoginScreen users={state.users} onLogin={loginAs} onCreateAdmin={createAdminUser} />;
   }
 
   const canSeeAllShifts = isAdmin; // supervisors see their clients + optional unassigned (via visibleClients)
@@ -982,6 +1407,13 @@ export default function Page() {
         {!SUPABASE_CONFIGURED ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
             <strong>Warning:</strong> Supabase is not configured. The app is using localStorage fallback. To enable cloud sync set <b>NEXT_PUBLIC_SUPABASE_URL</b> and <b>NEXT_PUBLIC_SUPABASE_ANON_KEY</b>.
+          </div>
+        ) : supabaseError ? (
+          <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
+            <strong>Warning:</strong> Supabase requests are failing. The app is using localStorage fallback.
+            <div style={{ marginTop: 6, opacity: 0.85, fontSize: 12 }}>
+              {supabaseError.message || supabaseError.code || "Unknown error"} (check your anon key & table policies)
+            </div>
           </div>
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -1046,20 +1478,41 @@ export default function Page() {
 
       <div>
         <div style={styles.tiny}>Staff</div>
-        <select
-          style={styles.select}
-          value={shiftDraft.staffId}
-          onChange={(e) =>
-            setShiftDraft((p) => ({ ...p, staffId: e.target.value }))
-          }
-        >
-          <option value="">Select…</option>
-          {(state.staff || []).map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select
+            style={styles.select}
+            value={shiftDraft.staffId}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, staffId: e.target.value }))
+            }
+          >
+            <option value="">Select…</option>
+            {suggestedStaff ? (
+              <option value={suggestedStaff.id}>
+                ⭐ Suggested: {suggestedStaff.name}
+              </option>
+            ) : null}
+            {(state.staff || []).filter((s) => !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          {suggestedStaff && shiftDraft.staffId !== suggestedStaff.id ? (
+            <button
+              style={{ ...styles.btn2, padding: "2px 8px", fontSize: 13 }}
+              type="button"
+              onClick={() => setShiftDraft((p) => ({ ...p, staffId: suggestedStaff.id }))}
+            >
+              Suggest
+            </button>
+          ) : null}
+        </div>
+        {suggestedStaff ? (
+          <div style={{ fontSize: 12, color: "#4cc9f0", marginTop: 2 }}>
+            Best match: {suggestedStaff.name} (no conflict, lowest OT)
+          </div>
+        ) : null}
       </div>
 
       <div>
@@ -1132,16 +1585,201 @@ export default function Page() {
             </div>
 
             <div>
-              <div style={styles.tiny}>Template</div>
-              <select style={styles.select} value={builderTemplate} onChange={(e) => setBuilderTemplate(e.target.value)}>
-                <option value="2x12">2 × 12-hour</option>
-                <option value="3x8">3 × 8-hour</option>
-              </select>
+              <div style={styles.tiny}>Schedule source</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="template"
+                    checked={builderScheduleSource === "template"}
+                    onChange={() => setBuilderScheduleSource("template")}
+                  />
+                  Template
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="client"
+                    checked={builderScheduleSource === "client"}
+                    onChange={() => setBuilderScheduleSource("client")}
+                    disabled={!builderClientId || !clientSchedule?.shifts?.length}
+                  />
+                  Client saved
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="custom"
+                    checked={builderScheduleSource === "custom"}
+                    onChange={() => setBuilderScheduleSource("custom")}
+                  />
+                  Custom
+                </label>
+              </div>
+              {builderScheduleSource === "client" ? (
+                <div style={styles.tiny}>
+                  {clientSchedule?.shifts?.length
+                    ? `Loaded saved schedule (${clientSchedule.shifts.length} shifts).`
+                    : "No saved schedule for this client yet."}
+                </div>
+              ) : null}
+            </div>
+
+            {builderScheduleSource === "template" ? (
+              <div>
+                <div style={styles.tiny}>Template</div>
+                <select style={styles.select} value={builderTemplate} onChange={(e) => setBuilderTemplate(e.target.value)}>
+                  <option value="2x12">2 × 12-hour</option>
+                  <option value="3x8">3 × 8-hour</option>
+                </select>
+              </div>
+            ) : null}
+
+            {builderScheduleSource === "custom" ? (
+              <div>
+                <div style={styles.tiny}>Custom schedule (one per line, e.g. 07:00-15:00)</div>
+                <textarea
+                  style={{ ...styles.input, height: 120, fontFamily: "inherit", resize: "vertical" }}
+                  value={builderCustomTemplate}
+                  onChange={(e) => setBuilderCustomTemplate(e.target.value)}
+                />
+              </div>
+            ) : null}
+
+            <div>
+              <div style={styles.tiny}>Generate horizon</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderWeeks"
+                    value={1}
+                    checked={builderWeeks === 1}
+                    onChange={() => setBuilderWeeks(1)}
+                  />
+                  1 week
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderWeeks"
+                    value={4}
+                    checked={builderWeeks === 4}
+                    onChange={() => setBuilderWeeks(4)}
+                  />
+                  4 weeks
+                </label>
+              </div>
+              <div style={{ marginTop: 8, ...styles.tiny }}>Repeat interval</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={1}
+                    checked={builderRepeatInterval === 1}
+                    onChange={() => setBuilderRepeatInterval(1)}
+                  />
+                  Every week
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={2}
+                    checked={builderRepeatInterval === 2}
+                    onChange={() => setBuilderRepeatInterval(2)}
+                  />
+                  Every 2 weeks
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={4}
+                    checked={builderRepeatInterval === 4}
+                    onChange={() => setBuilderRepeatInterval(4)}
+                  />
+                  Every 4 weeks
+                </label>
+              </div>
+              <div style={styles.tiny}>For example: select 4 weeks + every 2 weeks to schedule Week 1 + Week 3.</div>
+            </div>
+
+            <div>
+              <div style={styles.tiny}>Weekly staff assignment</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(60px, 1fr))", gap: 6 }}>
+                {WEEKDAY_NAMES.map((day, idx) => (
+                  <div key={day} style={{ display: "flex", flexDirection: "column" }}>
+                    <div style={{ fontSize: 11, opacity: 0.7 }}>{day}</div>
+                    <select
+                      style={styles.select}
+                      value={builderWeeklyAssignments[idx] || ""}
+                      onChange={(e) =>
+                        setBuilderWeeklyAssignments((p) => ({
+                          ...p,
+                          [idx]: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">—</option>
+                      {(state.staff || []).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+              <div style={styles.tiny}>Optionally force a specific staff for each day (e.g., Cory on Fridays).</div>
             </div>
 
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button style={styles.btn2} onClick={() => setBuilderOpen(false)}>Cancel</button>
-              <button style={styles.btn} onClick={runBuilder}>Generate</button>
+              <button
+                style={styles.btn2}
+                onClick={() => setBuilderOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                style={styles.btn2}
+                onClick={() => {
+                  if (!builderClientId) return;
+                  try {
+                    let shifts = [];
+                    if (builderScheduleSource === "template") {
+                      shifts = builderTemplate === "2x12"
+                        ? [
+                            { start: "07:00", end: "19:00" },
+                            { start: "19:00", end: "07:00" },
+                          ]
+                        : [
+                            { start: "07:00", end: "15:00" },
+                            { start: "15:00", end: "23:00" },
+                            { start: "23:00", end: "07:00" },
+                          ];
+                    } else if (builderScheduleSource === "custom") {
+                      shifts = parseShiftPattern(builderCustomTemplate);
+                    } else if (builderScheduleSource === "client") {
+                      shifts = clientSchedule?.shifts || [];
+                    }
+                    if (!shifts.length) return alert("No shifts to save.");
+                    saveClientSchedule(builderClientId, shifts);
+                    alert("Saved schedule for this client.");
+                  } catch (e) {
+                    alert(e.message || "Invalid schedule format.");
+                  }
+                }}
+              >
+                Save template
+              </button>
+              <button style={styles.btn} onClick={runBuilder}>
+                Generate
+              </button>
             </div>
           </div>
         </div>
@@ -1156,7 +1794,75 @@ export default function Page() {
             weekStartDate={weekStartDate}
             visibleClients={visibleClients}
             canSeeAllShifts={canSeeAllShifts}
+            setTab={setTab}
+            setShiftDraft={setShiftDraft}
+            deleteShift={deleteShift}
           />
+        )}
+
+        {tab === "month" && (
+          <CalendarMonth
+            state={state}
+            monthStartDate={monthStartDate}
+            visibleClients={visibleClients}
+            canSeeAllShifts={canSeeAllShifts}
+          />
+        )}
+
+        {/* ================= Staff Schedule ================= */}
+        {tab === "staffSchedule" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Staff Schedule</h3>
+            <div style={styles.tiny}>Shows upcoming shifts for each staff member in the selected week.</div>
+
+            <div style={{ marginTop: 10, overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Staff</th>
+                    <th style={styles.th}>Shift</th>
+                    <th style={styles.th}>Client</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(state.staff || []).map((st) => {
+                    const shifts = shiftsInSelectedWeek
+                      .filter((sh) => sh.staffId === st.id)
+                      .filter((sh) => (canSeeAllShifts ? true : visibleClients.some((c) => c.id === sh.clientId)))
+                      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+
+                    if (!shifts.length) {
+                      return (
+                        <tr key={st.id}>
+                          <td style={styles.td}><b>{st.name}</b></td>
+                          <td style={{ ...styles.td, opacity: 0.7 }} colSpan={2}>
+                            No shifts this week
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return shifts.map((sh, idx) => {
+                      const client = state.clients.find((c) => c.id === sh.clientId);
+                      return (
+                        <tr key={`${st.id}_${sh.id}`}>
+                          {idx === 0 ? (
+                            <td style={styles.td} rowSpan={shifts.length}>
+                              <b>{st.name}</b>
+                            </td>
+                          ) : null}
+                          <td style={styles.td}>
+                            {sh.startISO.slice(0, 16).replace("T", " ")} → {sh.endISO.slice(0, 16).replace("T", " ")}
+                          </td>
+                          <td style={styles.td}>{client?.name || "(unknown)"}</td>
+                        </tr>
+                      );
+                    });
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
 
         {/* ================= Coverage Gaps ================= */}
@@ -1195,6 +1901,13 @@ export default function Page() {
             <h3 style={{ marginTop: 0 }}>Hours & Overtime</h3>
             <div style={styles.tiny}>Shared Support counts once for staff OT, but counts for each client.</div>
 
+            {(currentUser?.role === "supervisor" || isAdmin) &&
+            (state.staff || []).some((st) => (staffWeekMinutesMap[st.id] || 0) >= OT_THRESHOLD_MIN) ? (
+              <div style={styles.warn}>
+                ⚠️ One or more staff have reached 40 hours this week. Review assignments or adjust shifts.
+              </div>
+            ) : null}
+
             <div style={{ marginTop: 10, overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
@@ -1231,7 +1944,9 @@ export default function Page() {
                   <thead>
                     <tr>
                       <th style={styles.th}>Client</th>
+                      <th style={styles.th}>Allotted</th>
                       <th style={styles.th}>Weekly Total</th>
+                      <th style={styles.th}>Remaining</th>
                       <th style={styles.th}>Day Hours</th>
                       <th style={styles.th}>Night Hours</th>
                     </tr>
@@ -1239,10 +1954,29 @@ export default function Page() {
                   <tbody>
                     {(visibleClients || []).map((c) => {
                       const h = weekClientHours[c.id] || { totalMin: 0, dayMin: 0, nightMin: 0 };
+                      const allottedMin = (Number(c.weeklyHours) || 0) * 60;
+                      const remainingMin = allottedMin - h.totalMin;
                       return (
                         <tr key={c.id}>
                           <td style={styles.td}><b>{c.name}</b></td>
+                          <td style={styles.td}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <div style={{ fontSize: 12, opacity: 0.8 }}>{fmtHoursFromMin(allottedMin)}</div>
+                              <div style={{ height: 8, width: 120, background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
+                                <div
+                                  style={{
+                                    height: "100%",
+                                    width: `${Math.min(100, allottedMin ? Math.round((h.totalMin / allottedMin) * 100) : 0)}%`,
+                                    background: remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </td>
                           <td style={styles.td}>{fmtHoursFromMin(h.totalMin)}</td>
+                          <td style={{ ...styles.td, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
+                            {fmtHoursFromMin(remainingMin)}
+                          </td>
                           <td style={styles.td}>{fmtHoursFromMin(h.dayMin)}</td>
                           <td style={styles.td}>{fmtHoursFromMin(h.nightMin)}</td>
                         </tr>
@@ -1255,8 +1989,162 @@ export default function Page() {
           </div>
         )}
 
+        {/* ================= Client Profiles ================= */}
+        {tab === "clientProfiles" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Client Profiles</h3>
+            <div style={{ marginBottom: 16 }}>
+              <div style={styles.tiny}>Select a client to view their profile:</div>
+              <select
+                style={{ ...styles.select, maxWidth: 320, marginTop: 6 }}
+                value={selectedClientId}
+                onChange={(e) => setSelectedClientId(e.target.value)}
+              >
+                <option value="">Select...</option>
+                {allClients.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {!selectedClient ? (
+              <div style={{ ...styles.tiny, marginTop: 24 }}>Select a client to view profile.</div>
+            ) : (
+              <div style={{ ...styles.card, background: "rgba(255,255,255,0.02)", marginTop: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
+                    <div style={styles.tiny}>
+                      Supervisor: <b>{(state.users || []).find((u) => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
+                      Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
+                      24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
+                    </div>
+                    <div style={styles.tiny}>
+                      Coverage: <b>{selectedClient.coverageStart} - {selectedClient.coverageEnd}</b> &nbsp;|&nbsp;
+                      Weekly Allotment: <b>{Number(selectedClient.weeklyHours) || 0}h</b>
+                    </div>
+                    <div style={styles.tiny}>
+                      Week of: <b>{weekStart}</b>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      style={styles.btn2}
+                      onClick={() => {
+                        setTab("schedule");
+                        setShiftDraft((p) => ({ ...p, clientId: selectedClient.id }));
+                      }}
+                    >
+                      Add Shift for This Client
+                    </button>
+                    <button
+                      style={styles.btn2}
+                      onClick={() => {
+                        setTab("schedule");
+                        setBuilderClientId(selectedClient.id);
+                        setBuilderOpen(true);
+                      }}
+                    >
+                      Open 24-Hour Builder
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 18, marginBottom: 10 }}>
+                  <div style={styles.tiny}>Weekly Hours Summary</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
+                        <div
+                          style={{
+                            height: "100%",
+                            width: `${Math.min(100, selectedClientWeekHours.allottedMin ? Math.round((selectedClientWeekHours.totalMin / selectedClientWeekHours.allottedMin) * 100) : 0)}%`,
+                            background: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 13, minWidth: 120 }}>
+                      {fmtHoursFromMin(selectedClientWeekHours.totalMin)} / {fmtHoursFromMin(selectedClientWeekHours.allottedMin)}
+                    </div>
+                    <div style={{ fontSize: 13, color: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
+                      Rem: {fmtHoursFromMin(selectedClientWeekHours.remainingMin)}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+                    Day: {fmtHoursFromMin(selectedClientWeekHours.dayMin)} &nbsp;|&nbsp; Night: {fmtHoursFromMin(selectedClientWeekHours.nightMin)}
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 18 }}>
+                  <h4 style={{ margin: "10px 0 6px 0" }}>Client Schedule</h4>
+                  {selectedClientShifts.length === 0 ? (
+                    <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={styles.th}>Date</th>
+                            <th style={styles.th}>Start</th>
+                            <th style={styles.th}>End</th>
+                            <th style={styles.th}>Staff</th>
+                            <th style={styles.th}>Shared</th>
+                            <th style={styles.th}>Group</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedClientShifts.map((sh) => {
+                            const staff = (state.staff || []).find((s) => s.id === sh.staffId);
+                            return (
+                              <tr key={sh.id}>
+                                <td style={styles.td}>{sh.startISO.slice(0, 10)}</td>
+                                <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
+                                <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
+                                <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
+                                <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
+                                <td style={styles.td}>{sh.sharedGroupId || ""}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ marginTop: 18 }}>
+                  <h4 style={{ margin: "10px 0 6px 0" }}>Assigned Staff</h4>
+                  {selectedClientStaffSummary.length === 0 ? (
+                    <div style={styles.tiny}>No staff assigned this week.</div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={styles.th}>Staff</th>
+                            <th style={styles.th}>Total Hours</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedClientStaffSummary.map(({ staff, min }) => (
+                            <tr key={staff?.id || "unknown"}>
+                              <td style={styles.td}>{staff?.name || "Unknown"}</td>
+                              <td style={styles.td}>{fmtHoursFromMin(min)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
         {/* ================= Staff (Admin) ================= */}
-        {tab === "staff" && isAdmin && (
+        {tab === "staff" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Staff</h3>
 
@@ -1289,7 +2177,7 @@ export default function Page() {
         )}
 
         {/* ================= Clients (Admin) ================= */}
-        {tab === "clients" && isAdmin && (
+        {tab === "clients" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Clients (Assign supervisor over case)</h3>
 
@@ -1307,6 +2195,17 @@ export default function Page() {
                     <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
                   ))}
                 </select>
+              </div>
+
+              <div>
+                <div style={styles.tiny}>Weekly hours allotted</div>
+                <input
+                  style={styles.input}
+                  type="number"
+                  min={0}
+                  value={clientDraft.weeklyHours}
+                  onChange={(e) => setClientDraft((p) => ({ ...p, weeklyHours: Number(e.target.value) }))}
+                />
               </div>
 
               <div>
@@ -1344,6 +2243,8 @@ export default function Page() {
                           Supervisor: <b>{sup ? sup.name : "Unassigned"}</b>
                           <br />
                           Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
+                          <br />
+                          Weekly allotment: <b>{Number(c.weeklyHours) || 0}h</b>
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 8 }}>
@@ -1356,12 +2257,24 @@ export default function Page() {
                               supervisorId: c.supervisorId || "",
                               coverageStart: c.coverageStart || "07:00",
                               coverageEnd: c.coverageEnd || "23:00",
+                              weeklyHours: Number(c.weeklyHours) || 40,
                               is24Hour: !!c.is24Hour,
                               active: c.active !== false,
                             })
                           }
                         >
                           Edit
+                        </button>
+                        <button
+                          style={styles.btn2}
+                          onClick={() => {
+                            setTab("schedule");
+                            setBuilderClientId(c.id);
+                            setBuilderScheduleSource("client");
+                            setBuilderOpen(true);
+                          }}
+                        >
+                          Schedule
                         </button>
                         <button style={styles.btn2} onClick={() => deleteClient(c.id)}>Delete</button>
                       </div>
@@ -1374,7 +2287,7 @@ export default function Page() {
         )}
 
         {/* ================= Users (Admin) ================= */}
-        {tab === "users" && isAdmin && (
+        {tab === "users" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Users</h3>
 
@@ -1426,7 +2339,7 @@ export default function Page() {
         )}
 
         {/* ================= Settings (Admin) ================= */}
-        {tab === "settings" && isAdmin && (
+        {tab === "settings" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Settings</h3>
 
@@ -1523,3 +2436,4 @@ const styles = {
   th: { textAlign: "left", fontSize: 12, opacity: 0.85, padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
   td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
 };
+
