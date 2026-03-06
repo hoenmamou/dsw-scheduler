@@ -2299,4 +2299,3 @@ const styles = {
       ) : null}
     </div>
   );
-}
