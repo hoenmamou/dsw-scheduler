@@ -1977,6 +1977,7 @@ export default function Page() {
                         <button
                           style={styles.btn2}
                           onClick={() => {
+                            setTab("schedule");
                             setBuilderClientId(c.id);
                             setBuilderScheduleSource("client");
                             setBuilderOpen(true);
