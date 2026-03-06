@@ -248,7 +248,7 @@ const DEFAULT_DB = {
     { id: "st2", name: "Jordan" },
   ],
   clients: [
-    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true },
+    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true, weekly_hours: 40 },
   ],
   shifts: [],
 };
@@ -268,8 +268,10 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       coverageStart: c.coverage_start || "07:00",
       coverageEnd: c.coverage_end || "23:00",
       is24Hour: !!c.is_24_hour,
+      weeklyHours: typeof c.weekly_hours === "number" ? c.weekly_hours : Number(c.weekly_hours) || 40,
       active: c.active !== false,
     })),
+
     shifts: (shifts || []).map((sh) => ({
       id: sh.id,
       clientId: sh.client_id,
@@ -294,8 +296,10 @@ function toDB(state) {
       coverage_start: c.coverageStart || "07:00",
       coverage_end: c.coverageEnd || "23:00",
       is_24_hour: !!c.is24Hour,
+      weekly_hours: Number(c.weeklyHours) || 40,
       active: c.active !== false,
     })),
+
     shifts: (state.shifts || []).map((sh) => ({
       id: sh.id,
       client_id: sh.clientId,
@@ -1172,6 +1176,7 @@ export default function Page() {
     supervisorId: "",
     coverageStart: "07:00",
     coverageEnd: "23:00",
+    weeklyHours: 40,
     is24Hour: false,
     active: true,
   });
@@ -1217,12 +1222,13 @@ export default function Page() {
       supervisor_id: clientDraft.supervisorId || null,
       coverage_start: clientDraft.coverageStart || "07:00",
       coverage_end: clientDraft.coverageEnd || "23:00",
+      weekly_hours: Number(clientDraft.weeklyHours) || 40,
       is_24_hour: !!clientDraft.is24Hour,
       active: clientDraft.active !== false,
     };
     await sbUpsert("clients", [row]);
     await refreshState(setState);
-    setClientDraft({ id: "", name: "", supervisorId: "", coverageStart: "07:00", coverageEnd: "23:00", is24Hour: false, active: true });
+    setClientDraft({ id: "", name: "", supervisorId: "", coverageStart: "07:00", coverageEnd: "23:00", weeklyHours: 40, is24Hour: false, active: true });
   }
 
   async function deleteClient(id) {
@@ -1801,7 +1807,9 @@ export default function Page() {
                   <thead>
                     <tr>
                       <th style={styles.th}>Client</th>
+                      <th style={styles.th}>Allotted</th>
                       <th style={styles.th}>Weekly Total</th>
+                      <th style={styles.th}>Remaining</th>
                       <th style={styles.th}>Day Hours</th>
                       <th style={styles.th}>Night Hours</th>
                     </tr>
@@ -1809,10 +1817,29 @@ export default function Page() {
                   <tbody>
                     {(visibleClients || []).map((c) => {
                       const h = weekClientHours[c.id] || { totalMin: 0, dayMin: 0, nightMin: 0 };
+                      const allottedMin = (Number(c.weeklyHours) || 0) * 60;
+                      const remainingMin = allottedMin - h.totalMin;
                       return (
                         <tr key={c.id}>
                           <td style={styles.td}><b>{c.name}</b></td>
+                          <td style={styles.td}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <div style={{ fontSize: 12, opacity: 0.8 }}>{fmtHoursFromMin(allottedMin)}</div>
+                              <div style={{ height: 8, width: 120, background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
+                                <div
+                                  style={{
+                                    height: "100%",
+                                    width: `${Math.min(100, allottedMin ? Math.round((h.totalMin / allottedMin) * 100) : 0)}%`,
+                                    background: remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </td>
                           <td style={styles.td}>{fmtHoursFromMin(h.totalMin)}</td>
+                          <td style={{ ...styles.td, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
+                            {fmtHoursFromMin(remainingMin)}
+                          </td>
                           <td style={styles.td}>{fmtHoursFromMin(h.dayMin)}</td>
                           <td style={styles.td}>{fmtHoursFromMin(h.nightMin)}</td>
                         </tr>
@@ -1880,6 +1907,17 @@ export default function Page() {
               </div>
 
               <div>
+                <div style={styles.tiny}>Weekly hours allotted</div>
+                <input
+                  style={styles.input}
+                  type="number"
+                  min={0}
+                  value={clientDraft.weeklyHours}
+                  onChange={(e) => setClientDraft((p) => ({ ...p, weeklyHours: Number(e.target.value) }))}
+                />
+              </div>
+
+              <div>
                 <div style={styles.tiny}>Coverage Start</div>
                 <input style={styles.input} type="time" value={clientDraft.coverageStart || "07:00"} onChange={(e) => setClientDraft((p) => ({ ...p, coverageStart: e.target.value }))} />
                 <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
@@ -1914,6 +1952,8 @@ export default function Page() {
                           Supervisor: <b>{sup ? sup.name : "Unassigned"}</b>
                           <br />
                           Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
+                          <br />
+                          Weekly allotment: <b>{Number(c.weeklyHours) || 0}h</b>
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 8 }}>
@@ -1926,6 +1966,7 @@ export default function Page() {
                               supervisorId: c.supervisorId || "",
                               coverageStart: c.coverageStart || "07:00",
                               coverageEnd: c.coverageEnd || "23:00",
+                              weeklyHours: Number(c.weeklyHours) || 40,
                               is24Hour: !!c.is24Hour,
                               active: c.active !== false,
                             })
