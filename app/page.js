@@ -3,11 +3,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
-const SUPABASE_CONFIGURED = !!(
-  process.env.NEXT_PUBLIC_SUPABASE_URL &&
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
+// On the client, Next.js replaces env vars at build time.
+const SUPABASE_CONFIGURED = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
+// Supabase errors (auth/RLS) should not break the app. When they happen we
+// fall back to localStorage (and log a warning).
 let supabaseErrorHandler = null;
 function setSupabaseErrorHandler(fn) {
   supabaseErrorHandler = fn;
@@ -17,61 +17,110 @@ function reportSupabaseError(error) {
   if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
 }
 
-const DAY_START_MIN = 7 * 60;
-const DAY_END_MIN = 23 * 60;
+/* =========================
+   Notes
+   - This version is "dynamic": Supabase is the source of truth.
+   - If Supabase env vars are missing, it will show an error banner.
+========================= */
+
+const DAY_START_MIN = 7 * 60;  // 07:00
+const DAY_END_MIN = 23 * 60;   // 23:00
 const OT_THRESHOLD_MIN = 40 * 60;
-const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
+
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
 
 function uid(prefix = "id") {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
-function clamp(n, a, b) {
-  return Math.max(a, Math.min(b, n));
-}
+
 function isoLocal(date) {
   const d = new Date(date);
   const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}:00`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
 }
+
+function normalizeDateTimeISO(value) {
+  const d = new Date(value);
+  if (isNaN(d)) return null;
+  return isoLocal(d);
+}
+
 function addDays(date, n) {
   const d = new Date(date);
   d.setDate(d.getDate() + n);
   return d;
 }
-function toISO(dateStr, timeStr) {
-  return `${dateStr}T${timeStr}:00`;
-}
+
 function minutesBetweenISO(aISO, bISO) {
   const a = new Date(aISO);
   const b = new Date(bISO);
   if (isNaN(a) || isNaN(b) || b <= a) return 0;
   return Math.round((b - a) / 60000);
 }
+
 function overlaps(aStart, aEnd, bStart, bEnd) {
   return new Date(aStart) < new Date(bEnd) && new Date(bStart) < new Date(aEnd);
 }
+
+/** Day: 07:00-23:00, Night: 23:00-07:00 */
+function splitDayNightMinutes(startISO, endISO) {
+  const start = new Date(startISO);
+  const end = new Date(endISO);
+
+  if (isNaN(start) || isNaN(end) || end <= start) {
+    return { totalMin: 0, dayMin: 0, nightMin: 0 };
+  }
+
+  let totalMin = 0;
+  let dayMin = 0;
+  let nightMin = 0;
+
+  let cursor = new Date(start);
+  while (cursor < end) {
+    const dayStart = new Date(cursor);
+    dayStart.setHours(0, 0, 0, 0);
+
+    const nextDay = new Date(dayStart);
+    nextDay.setDate(nextDay.getDate() + 1);
+
+    const segStart = cursor;
+    const segEnd = end < nextDay ? end : nextDay;
+
+    const segMin = Math.round((segEnd - segStart) / 60000);
+    totalMin += segMin;
+
+    const segStartMin = segStart.getHours() * 60 + segStart.getMinutes();
+    let segEndMin = segEnd.getHours() * 60 + segEnd.getMinutes();
+
+    // if ends exactly at midnight treat as 1440
+    if (segEnd <= nextDay && segEndMin === 0 && segEnd.getHours() === 0 && segEnd.getMinutes() === 0) {
+      segEndMin = 1440;
+    }
+
+    const dayOverlapStart = clamp(segStartMin, DAY_START_MIN, DAY_END_MIN);
+    const dayOverlapEnd = clamp(segEndMin, DAY_START_MIN, DAY_END_MIN);
+    const dayOverlap = Math.max(0, dayOverlapEnd - dayOverlapStart);
+
+    dayMin += dayOverlap;
+    nightMin += (segMin - dayOverlap);
+
+    cursor = segEnd;
+  }
+
+  return { totalMin, dayMin, nightMin };
+}
+
 function fmtHoursFromMin(min) {
-  const sign = min < 0 ? "-" : "";
-  const abs = Math.abs(min);
-  return `${sign}${(abs / 60).toFixed(2)}h`;
+  return `${(min / 60).toFixed(2)}h`;
 }
-function formatDateHuman(dateLike) {
-  const d = new Date(dateLike);
-  if (isNaN(d)) return "";
-  return d.toLocaleDateString();
-}
-function startOfWeekMonday(inputDate = new Date()) {
-  const d = new Date(inputDate);
-  const day = d.getDay();
-  const diffToMon = (day === 0 ? -6 : 1) - day;
-  d.setDate(d.getDate() + diffToMon);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
+
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
+
 function parseShiftPattern(input) {
+  // Accept newline or comma separated entries like "07:00-15:00"
   const lines = (input || "")
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -83,13 +132,13 @@ function parseShiftPattern(input) {
     const m = line.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
     if (!m) throw new Error(`Invalid shift format: "${line}" (expected HH:MM-HH:MM)`);
     const [, sh, sm, eh, em] = m;
-    out.push({
-      start: `${String(sh).padStart(2, "0")}:${sm}`,
-      end: `${String(eh).padStart(2, "0")}:${em}`,
-    });
+    const start = `${String(sh).padStart(2, "0")}:${sm}`;
+    const end = `${String(eh).padStart(2, "0")}:${em}`;
+    out.push({ start, end });
   }
   return out;
 }
+
 function loadClientSchedule(clientId) {
   try {
     const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
@@ -99,127 +148,213 @@ function loadClientSchedule(clientId) {
     return null;
   }
 }
+
 function saveClientSchedule(clientId, shifts) {
   try {
     const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
     const map = raw ? JSON.parse(raw) : {};
     map[clientId] = { shifts };
     localStorage.setItem(CLIENT_SCHEDULE_STORAGE_KEY, JSON.stringify(map));
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
-function splitDayNightMinutes(startISO, endISO) {
-  const start = new Date(startISO);
-  const end = new Date(endISO);
-  if (isNaN(start) || isNaN(end) || end <= start) {
-    return { totalMin: 0, dayMin: 0, nightMin: 0 };
+
+function Tabs({ value, onChange, tabs }) {
+  return (
+    <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {tabs.map((t) => (
+        <button
+          key={t.value}
+          onClick={() => onChange(t.value)}
+          style={{
+            ...styles.btn2,
+            background: value === t.value ? "rgba(31,111,235,0.18)" : "transparent",
+            borderColor: value === t.value ? "rgba(31,111,235,0.55)" : "rgba(255,255,255,0.18)",
+          }}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* =========================
+   Supabase data helpers
+========================= */
+
+async function sbSelect(table) {
+  // Supabase or localStorage fallback
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { data, error } = await supabase.from(table).select("*");
+    if (!error) return data || [];
+    reportSupabaseError(error);
   }
 
-  let totalMin = 0;
-  let dayMin = 0;
-  let nightMin = 0;
-  let cursor = new Date(start);
+  // localStorage fallback
+  try {
+    const raw = localStorage.getItem("dsw_local_db");
+    const db = raw ? JSON.parse(raw) : DEFAULT_DB;
+    return db[table] || [];
+  } catch (e) {
+    return [];
+  }
+}
 
-  while (cursor < end) {
-    const dayStart = new Date(cursor);
-    dayStart.setHours(0, 0, 0, 0);
-    const nextDay = new Date(dayStart);
-    nextDay.setDate(nextDay.getDate() + 1);
+async function sbUpsert(table, rows) {
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
+    if (!error) return;
+    reportSupabaseError(error);
+  }
 
-    const segStart = cursor;
-    const segEnd = end < nextDay ? end : nextDay;
-    const segMin = Math.round((segEnd - segStart) / 60000);
-    totalMin += segMin;
-
-    const segStartMin = segStart.getHours() * 60 + segStart.getMinutes();
-    let segEndMin = segEnd.getHours() * 60 + segEnd.getMinutes();
-    if (segEnd <= nextDay && segEndMin === 0 && segEnd.getHours() === 0) {
-      segEndMin = 1440;
+  // localStorage upsert
+  try {
+    const raw = localStorage.getItem("dsw_local_db");
+    const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
+    db[table] = db[table] || [];
+    for (const r of rows) {
+      const idx = db[table].findIndex((x) => x.id === r.id);
+      if (idx >= 0) db[table][idx] = { ...db[table][idx], ...r };
+      else db[table].push(r);
     }
+    localStorage.setItem("dsw_local_db", JSON.stringify(db));
+    // refresh in-memory state by triggering loadAll externally (caller should reload)
+  } catch (e) {
+    console.error(e);
+  }
+}
 
-    const dayOverlapStart = clamp(segStartMin, DAY_START_MIN, DAY_END_MIN);
-    const dayOverlapEnd = clamp(segEndMin, DAY_START_MIN, DAY_END_MIN);
-    const dayOverlap = Math.max(0, dayOverlapEnd - dayOverlapStart);
-
-    dayMin += dayOverlap;
-    nightMin += segMin - dayOverlap;
-    cursor = segEnd;
+async function sbDelete(table, id) {
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { error } = await supabase.from(table).delete().eq("id", id);
+    if (!error) return;
+    reportSupabaseError(error);
   }
 
-  return { totalMin, dayMin, nightMin };
+  try {
+    const raw = localStorage.getItem("dsw_local_db");
+    const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
+    db[table] = (db[table] || []).filter((x) => x.id !== id);
+    localStorage.setItem("dsw_local_db", JSON.stringify(db));
+  } catch (e) {
+    console.error(e);
+  }
 }
-function makeDefaultAvailability() {
+
+// Local data fallback default seed
+const DEFAULT_DB = {
+  users: [
+    { id: "admin", name: "Admin", role: "admin", pin: "1234" },
+    { id: "sup1", name: "Supervisor One", role: "supervisor", pin: "1111" },
+  ],
+  staff: [
+    { id: "st1", name: "Natasha" },
+    { id: "st2", name: "Jordan" },
+  ],
+  clients: [
+    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true, weekly_hours: 40 },
+  ],
+  shifts: [],
+};
+
+function normalizeFromDB({ users, staff, clients, shifts }) {
   return {
-    days: [1, 2, 3, 4, 5],
-    start: "07:00",
-    end: "23:00",
+    settings: {
+      includeUnassignedForSupervisors: true,
+      hardStopConflicts: true,
+    },
+    users: (users || []).map((u) => ({ id: u.id, name: u.name, role: u.role, pin: u.pin })),
+    staff: (staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
+    clients: (clients || []).map((c) => ({
+      id: c.id,
+      name: c.name,
+      supervisorId: c.supervisor_id || "",
+      coverageStart: c.coverage_start || "07:00",
+      coverageEnd: c.coverage_end || "23:00",
+      is24Hour: !!c.is_24_hour,
+      weeklyHours: typeof c.weekly_hours === "number" ? c.weekly_hours : Number(c.weekly_hours) || 40,
+      active: c.active !== false,
+    })),
+
+    shifts: (shifts || [])
+      .map((sh) => {
+        const startISO = normalizeDateTimeISO(sh.start_iso || sh.startISO);
+        const endISO = normalizeDateTimeISO(sh.end_iso || sh.endISO);
+        if (!startISO || !endISO) return null;
+        return {
+          id: sh.id,
+          clientId: sh.client_id || sh.clientId,
+          staffId: sh.staff_id || sh.staffId,
+          startISO,
+          endISO,
+          createdBy: sh.created_by || sh.createdBy,
+          isShared: !!(sh.is_shared || sh.isShared),
+          sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
+        };
+      })
+      .filter(Boolean),
   };
 }
-function parseJsonSafe(value, fallback) {
-  if (!value) return fallback;
-  if (typeof value === "object") return value;
+
+function toDB(state) {
+  return {
+    users: (state.users || []).map((u) => ({ id: u.id, name: u.name, role: u.role, pin: u.pin })),
+    staff: (state.staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
+    clients: (state.clients || []).map((c) => ({
+      id: c.id,
+      name: c.name,
+      supervisor_id: c.supervisorId || null,
+      coverage_start: c.coverageStart || "07:00",
+      coverage_end: c.coverageEnd || "23:00",
+      is_24_hour: !!c.is24Hour,
+      weekly_hours: Number(c.weeklyHours) || 40,
+      active: c.active !== false,
+    })),
+
+    shifts: (state.shifts || []).map((sh) => ({
+      id: sh.id,
+      client_id: sh.clientId,
+      staff_id: sh.staffId,
+      start_iso: sh.startISO,
+      end_iso: sh.endISO,
+      created_by: sh.createdBy || "unknown",
+      is_shared: !!sh.isShared,
+      shared_group_id: sh.sharedGroupId || "",
+    })),
+  };
+}
+
+// Refresh in-memory state from DB or localStorage
+async function refreshState(setStateLocal) {
   try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
+    const [users, staff, clients, shifts] = await Promise.all([
+      sbSelect("users"),
+      sbSelect("staff"),
+      sbSelect("clients"),
+      sbSelect("shifts"),
+    ]);
+    const normalized = normalizeFromDB({ users, staff, clients, shifts });
+    if (typeof setStateLocal === "function") setStateLocal((p) => ({ ...p, ...normalized }));
+    return normalized;
+  } catch (e) {
+    console.error(e);
+    return null;
   }
 }
-function todayYMD() {
-  return isoLocal(new Date()).slice(0, 10);
-}
-function isExpired(dateStr) {
-  if (!dateStr) return false;
-  const d = new Date(`${dateStr}T23:59:59`);
-  if (isNaN(d)) return false;
-  return d < new Date();
-}
-function daysUntil(dateStr) {
-  if (!dateStr) return null;
-  const d = new Date(`${dateStr}T23:59:59`);
-  if (isNaN(d)) return null;
-  return Math.ceil((d - new Date()) / 86400000);
-}
-function getTrainingStatus(staff) {
-  const items = [
-    { key: "cprExp", label: "CPR", value: staff.cprExp },
-    { key: "firstAidExp", label: "First Aid", value: staff.firstAidExp },
-    { key: "medExp", label: "Med Training", value: staff.medExp },
-  ];
-  const expired = items.filter((x) => isExpired(x.value));
-  const dueSoon = items.filter((x) => {
-    const days = daysUntil(x.value);
-    return days !== null && days >= 0 && days <= 30;
-  });
-  return { expired, dueSoon, items };
-}
-function isStaffAvailableForShift(staff, startISO, endISO) {
-  const availability = staff.availability || makeDefaultAvailability();
-  const start = new Date(startISO);
-  const end = new Date(endISO);
-  if (isNaN(start) || isNaN(end)) return false;
 
-  const day = start.getDay();
-  const allowedDays = Array.isArray(availability.days) ? availability.days : [];
-  if (allowedDays.length && !allowedDays.includes(day)) return false;
-
-  const shiftStart = start.getHours() * 60 + start.getMinutes();
-  const shiftEnd = end.getHours() * 60 + end.getMinutes();
-
-  const [ah, am] = String(availability.start || "00:00").split(":").map(Number);
-  const [bh, bm] = String(availability.end || "23:59").split(":").map(Number);
-  const availStart = ah * 60 + am;
-  const availEnd = bh * 60 + bm;
-
-  if (endISO.slice(0, 10) !== startISO.slice(0, 10)) {
-    return false;
-  }
-  return shiftStart >= availStart && shiftEnd <= availEnd;
-}
+/* =========================
+   Shared support OT logic
+========================= */
 function staffShiftUniqueKey(sh) {
+  // Shared support: the TWO shift rows should count once for staff OT
   if (sh.isShared && sh.sharedGroupId) {
     return `SS|${sh.staffId}|${sh.startISO}|${sh.endISO}|${sh.sharedGroupId}`;
   }
   return `N|${sh.id}`;
 }
+
 function staffWeekMinutesDedup(shifts, staffId) {
   const seen = new Set();
   let total = 0;
@@ -232,196 +367,6 @@ function staffWeekMinutesDedup(shifts, staffId) {
   }
   return total;
 }
-function Tabs({ value, onChange, tabs }) {
-  return (
-    <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-      {tabs.map((t) => (
-        <button
-          key={t.value}
-          onClick={() => onChange(t.value)}
-          style={{
-            ...styles.btn2,
-            background: value === t.value ? "rgba(31,111,235,0.18)" : "transparent",
-            borderColor:
-              value === t.value ? "rgba(31,111,235,0.55)" : "rgba(255,255,255,0.18)",
-          }}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/* =========================
-   DB helpers
-========================= */
-
-async function sbSelect(table) {
-  if (SUPABASE_CONFIGURED && supabase) {
-    const { data, error } = await supabase.from(table).select("*");
-    if (!error) return data || [];
-    reportSupabaseError(error);
-  }
-  try {
-    const raw = localStorage.getItem("dsw_local_db");
-    const db = raw ? JSON.parse(raw) : DEFAULT_DB;
-    return db[table] || [];
-  } catch {
-    return [];
-  }
-}
-async function sbUpsert(table, rows) {
-  if (SUPABASE_CONFIGURED && supabase) {
-    const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
-    if (!error) return;
-    reportSupabaseError(error);
-  }
-  try {
-    const raw = localStorage.getItem("dsw_local_db");
-    const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
-    db[table] = db[table] || [];
-    for (const r of rows) {
-      const idx = db[table].findIndex((x) => x.id === r.id);
-      if (idx >= 0) db[table][idx] = { ...db[table][idx], ...r };
-      else db[table].push(r);
-    }
-    localStorage.setItem("dsw_local_db", JSON.stringify(db));
-  } catch (e) {
-    console.error(e);
-  }
-}
-async function sbDelete(table, id) {
-  if (SUPABASE_CONFIGURED && supabase) {
-    const { error } = await supabase.from(table).delete().eq("id", id);
-    if (!error) return;
-    reportSupabaseError(error);
-  }
-  try {
-    const raw = localStorage.getItem("dsw_local_db");
-    const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
-    db[table] = (db[table] || []).filter((x) => x.id !== id);
-    localStorage.setItem("dsw_local_db", JSON.stringify(db));
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-const DEFAULT_DB = {
-  users: [
-    { id: "admin", name: "Admin", role: "admin", pin: "1234" },
-    { id: "sup1", name: "Supervisor One", role: "supervisor", pin: "1111" },
-  ],
-  staff: [
-    {
-      id: "st1",
-      name: "Natasha",
-      active: true,
-      availability: JSON.stringify(makeDefaultAvailability()),
-      cpr_exp: "",
-      first_aid_exp: "",
-      med_exp: "",
-      can_overtime: false,
-    },
-    {
-      id: "st2",
-      name: "Jordan",
-      active: true,
-      availability: JSON.stringify(makeDefaultAvailability()),
-      cpr_exp: "",
-      first_aid_exp: "",
-      med_exp: "",
-      can_overtime: false,
-    },
-  ],
-  clients: [
-    {
-      id: "cl1",
-      name: "Client A",
-      supervisor_id: "sup1",
-      coverage_start: "07:00",
-      coverage_end: "23:00",
-      is_24_hour: false,
-      active: true,
-      weekly_hours: 40,
-    },
-  ],
-  shifts: [],
-};
-
-function normalizeFromDB({ users, staff, clients, shifts }) {
-  return {
-    settings: {
-      includeUnassignedForSupervisors: true,
-      hardStopConflicts: true,
-      hardStopOT: true,
-      blockExpiredTraining: true,
-      allowOvertimeOverride: true,
-    },
-    users: (users || []).map((u) => ({
-      id: u.id,
-      name: u.name,
-      role: u.role,
-      pin: u.pin,
-    })),
-    staff: (staff || []).map((s) => ({
-      id: s.id,
-      name: s.name,
-      active: s.active !== false,
-      availability: parseJsonSafe(s.availability, makeDefaultAvailability()),
-      cprExp: s.cpr_exp || "",
-      firstAidExp: s.first_aid_exp || "",
-      medExp: s.med_exp || "",
-      canOvertime: !!s.can_overtime,
-    })),
-    clients: (clients || []).map((c) => ({
-      id: c.id,
-      name: c.name,
-      supervisorId: c.supervisor_id || "",
-      coverageStart: c.coverage_start || "07:00",
-      coverageEnd: c.coverage_end || "23:00",
-      is24Hour: !!c.is_24_hour,
-      weeklyHours:
-        typeof c.weekly_hours === "number"
-          ? c.weekly_hours
-          : Number(c.weekly_hours) || 40,
-      active: c.active !== false,
-    })),
-    shifts: (shifts || []).map((sh) => ({
-      id: sh.id,
-      clientId: sh.client_id,
-      staffId: sh.staff_id,
-      startISO: new Date(sh.start_iso).toISOString(),
-      endISO: new Date(sh.end_iso).toISOString(),
-      createdBy: sh.created_by || "",
-      isShared: !!sh.is_shared,
-      sharedGroupId: sh.shared_group_id || "",
-      overtimeApproved: !!sh.overtime_approved,
-    })),
-  };
-}
-async function refreshState(setStateLocal) {
-  try {
-    const [users, staff, clients, shifts] = await Promise.all([
-      sbSelect("users"),
-      sbSelect("staff"),
-      sbSelect("clients"),
-      sbSelect("shifts"),
-    ]);
-    const normalized = normalizeFromDB({ users, staff, clients, shifts });
-    if (typeof setStateLocal === "function") {
-      setStateLocal((p) => ({
-        ...p,
-        ...normalized,
-        settings: { ...p.settings, ...normalized.settings },
-      }));
-    }
-    return normalized;
-  } catch (e) {
-    console.error(e);
-    return null;
-  }
-}
 
 /* =========================
    Login
@@ -430,6 +375,7 @@ async function refreshState(setStateLocal) {
 function LoginScreen({ users, onLogin, onCreateAdmin }) {
   const [picked, setPicked] = useState(users?.[0]?.id || "");
   const [pin, setPin] = useState("");
+
   const [newId, setNewId] = useState("admin");
   const [newName, setNewName] = useState("Admin");
   const [newPin, setNewPin] = useState("1234");
@@ -441,41 +387,36 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
       <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
         <div style={{ maxWidth: 520, margin: "40px auto", ...styles.card }}>
           <h2 style={{ marginTop: 0 }}>DSW Scheduler — Create Admin</h2>
+
           <div style={{ ...styles.twoCol, marginTop: 10 }}>
             <div>
               <div style={styles.tiny}>ID</div>
-              <input style={styles.input} value={newId} onChange={(e) => setNewId(e.target.value)} />
+              <input style={styles.input} value={newId} onChange={(e) => setNewId(e.target.value)} placeholder="admin" />
             </div>
             <div>
               <div style={styles.tiny}>Name</div>
-              <input style={styles.input} value={newName} onChange={(e) => setNewName(e.target.value)} />
+              <input style={styles.input} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Admin" />
             </div>
             <div>
               <div style={styles.tiny}>PIN</div>
-              <input
-                style={styles.input}
-                type="password"
-                value={newPin}
-                onChange={(e) => setNewPin(e.target.value)}
-              />
+              <input style={styles.input} value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="1234" type="password" />
             </div>
           </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
             <button
               style={styles.btn}
               onClick={() => {
-                if (!newId.trim() || !newName.trim() || !newPin.trim()) {
-                  return alert("All fields are required.");
-                }
-                onCreateAdmin({
-                  id: newId.trim(),
-                  name: newName.trim(),
-                  pin: newPin.trim(),
-                });
+                if (!newId.trim() || !newName.trim() || !newPin.trim()) return alert("All fields are required.");
+                onCreateAdmin({ id: newId.trim(), name: newName.trim(), pin: newPin.trim() });
               }}
             >
               Create Admin
             </button>
+          </div>
+
+          <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
+            Tip: This will create the first user so you can log in and manage staff/clients.
           </div>
         </div>
       </div>
@@ -486,6 +427,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
     <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
       <div style={{ maxWidth: 520, margin: "40px auto", ...styles.card }}>
         <h2 style={{ marginTop: 0 }}>DSW Scheduler Login</h2>
+
         <div style={{ ...styles.twoCol, marginTop: 10 }}>
           <div>
             <div style={styles.tiny}>User</div>
@@ -497,28 +439,36 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
               ))}
             </select>
           </div>
+
           <div>
             <div style={styles.tiny}>PIN</div>
-            <input
-              style={styles.input}
-              type="password"
-              value={pin}
-              onChange={(e) => setPin(e.target.value)}
-            />
+            <input style={styles.input} value={pin} onChange={(e) => setPin(e.target.value)} placeholder="Enter PIN" type="password" />
           </div>
         </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
           <button
             style={styles.btn}
             onClick={() => {
-              if (!user) return alert("Pick a user.");
+              console.log("Login attempt", { picked, pin, user });
+              if (!user) return alert("Pick a user before logging in.");
+
+              // If the stored user does not have a pin, allow logging in (for existing Supabase rows without pin).
               const pinMatches = !user.pin || String(pin || "") === String(user.pin || "");
-              if (!pinMatches) return alert("Incorrect PIN.");
+              if (!pinMatches) {
+                alert("Incorrect PIN.");
+                return;
+              }
               onLogin(user.id);
             }}
+            disabled={!user}
           >
             Login
           </button>
+        </div>
+
+        <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
+          Tip: PIN login is a simple MVP. For real security later, we’ll swap to Supabase Auth + roles.
         </div>
       </div>
     </div>
@@ -526,21 +476,14 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
 }
 
 /* =========================
-   Calendar
+   Calendar (print/PDF)
 ========================= */
 
-function CalendarWeek({
-  state,
-  weekStartDate,
-  visibleClients,
-  canSeeAllShifts,
-  setTab,
-  setShiftDraft,
-  deleteShift,
-}) {
+function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, setTab, setShiftDraft, deleteShift }) {
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
+
   const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
   const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
 
@@ -569,7 +512,7 @@ function CalendarWeek({
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ ...styles.card, marginBottom: 12 }}>
-        <div style={styles.rowBetween}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 980 }}>Weekly Calendar</div>
             <div style={styles.tiny}>Week of {start.toLocaleDateString()}</div>
@@ -586,9 +529,136 @@ function CalendarWeek({
             <div style={{ fontWeight: 950 }}>
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
+
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
               {dayShifts(dateStr).length === 0 ? (
                 <div style={{ opacity: 0.75, fontSize: 12 }}>No shifts</div>
+              ) : (
+                dayShifts(dateStr).map((sh) => (
+                  <div key={sh.id} style={styles.shift}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
+                        <div style={styles.shiftMeta}>
+                          {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
+                          <br />
+                          Staff: <b>{staffName(sh.staffId)}</b>
+                          {sh.isShared ? (
+                            <>
+                              <br />
+                              ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px" }}
+                          title="Edit shift"
+                          onClick={() => {
+                            // Load shift into draft for editing
+                            setTab && setTab("schedule");
+                            setShiftDraft && setShiftDraft({
+                              clientId: sh.clientId,
+                              staffId: sh.staffId,
+                              startDate: sh.startISO.slice(0, 10),
+                              startTime: sh.startISO.slice(11, 16),
+                              endDate: sh.endISO.slice(0, 10),
+                              endTime: sh.endISO.slice(11, 16),
+                              isShared: !!sh.isShared,
+                              clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
+                              sharedGroupId: sh.sharedGroupId || "",
+                            });
+                          }}
+                        >Edit</button>
+                        <button
+                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px", color: "#ff8b8b" }}
+                          title="Delete shift"
+                          onClick={() => {
+                            if (typeof deleteShift === "function") deleteShift(sh.id);
+                          }}
+                        >Delete</button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts }) {
+  const shifts = state.shifts || [];
+  const clients = state.clients || [];
+  const staff = state.staff || [];
+
+  const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
+
+  const monthStart = new Date(monthStartDate);
+  monthStart.setHours(0, 0, 0, 0);
+
+  // Align the month view to a Monday-start calendar grid
+  const firstOfMonth = new Date(monthStart);
+  firstOfMonth.setDate(1);
+  const firstWeekday = firstOfMonth.getDay(); // 0=Sun, 1=Mon
+  const offsetToMon = firstWeekday === 0 ? -6 : 1 - firstWeekday;
+  const gridStart = addDays(firstOfMonth, offsetToMon);
+
+  const days = [...Array(42)].map((_, i) => {
+    const d = addDays(gridStart, i);
+    return { d, dateStr: isoLocal(d).slice(0, 10), inMonth: d.getMonth() === monthStart.getMonth() };
+  });
+
+  const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
+
+  function dayShifts(dateStr) {
+    const dayStart = new Date(`${dateStr}T00:00:00`).toISOString();
+    const dayEnd = new Date(`${dateStr}T23:59:59`).toISOString();
+
+    return shifts
+      .filter((sh) => {
+        if (!canSeeAllShifts && !visibleClientIds.has(sh.clientId)) return false;
+        return overlaps(sh.startISO, sh.endISO, dayStart, dayEnd);
+      })
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ ...styles.card, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 980 }}>Monthly Calendar</div>
+            <div style={styles.tiny}>{monthStart.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>
+          </div>
+          <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
+            Print / Save PDF
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+        {WEEKDAY_NAMES.map((w) => (
+          <div key={w} style={{ ...styles.card, fontWeight: 900, textAlign: "center" }}>
+            {w}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+        {days.map(({ d, dateStr, inMonth }) => (
+          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45 }}>
+            <div style={{ fontWeight: 950, fontSize: 12 }}>
+              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+            </div>
+            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
+              {dayShifts(dateStr).length === 0 ? (
+                <div style={{ opacity: 0.75, fontSize: 10 }}>No shifts</div>
               ) : (
                 dayShifts(dateStr).map((sh) => (
                   <div key={sh.id} style={styles.shift}>
@@ -600,47 +670,9 @@ function CalendarWeek({
                       {sh.isShared ? (
                         <>
                           <br />
-                          Shared: <b>{sh.sharedGroupId || "Yes"}</b>
+                          ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
                         </>
                       ) : null}
-                      {sh.overtimeApproved ? (
-                        <>
-                          <br />
-                          OT Override: <b>Approved</b>
-                        </>
-                      ) : null}
-                    </div>
-                    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                      <button
-                        style={{ ...styles.btn2, padding: "2px 8px", fontSize: 12 }}
-                        onClick={() => {
-                          setTab("schedule");
-                          setShiftDraft({
-                            clientId: sh.clientId,
-                            clientId2: sh.isShared
-                              ? state.shifts.find(
-                                  (s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id
-                                )?.clientId || ""
-                              : "",
-                            staffId: sh.staffId,
-                            startDate: sh.startISO.slice(0, 10),
-                            startTime: sh.startISO.slice(11, 16),
-                            endDate: sh.endISO.slice(0, 10),
-                            endTime: sh.endISO.slice(11, 16),
-                            isShared: !!sh.isShared,
-                            sharedGroupId: sh.sharedGroupId || "",
-                            overtimeApproved: !!sh.overtimeApproved,
-                          });
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        style={{ ...styles.btn2, padding: "2px 8px", fontSize: 12, color: "#ff8b8b" }}
-                        onClick={() => deleteShift(sh.id)}
-                      >
-                        Delete
-                      </button>
                     </div>
                   </div>
                 ))
@@ -659,102 +691,59 @@ function CalendarWeek({
 
 export default function Page() {
   const [mounted, setMounted] = useState(false);
+
+  // “DB state”
   const [state, setState] = useState({
-    settings: {
-      includeUnassignedForSupervisors: true,
-      hardStopConflicts: true,
-      hardStopOT: true,
-      blockExpiredTraining: true,
-      allowOvertimeOverride: true,
-    },
+    settings: { includeUnassignedForSupervisors: true, hardStopConflicts: true },
     users: [],
     staff: [],
     clients: [],
     shifts: [],
   });
+
+  // session login (local session only)
   const [sessionUserId, setSessionUserId] = useState(null);
+
+  // Supabase error state (used to show a warning banner when auth/RLS fails)
   const [supabaseError, setSupabaseError] = useState(null);
 
+  // UI
   const [tab, setTab] = useState("schedule");
 
-  const [weekStart, setWeekStart] = useState(() => isoLocal(startOfWeekMonday()).slice(0, 10));
+  // Week selection (Monday start)
+  const [weekStart, setWeekStart] = useState(() => {
+    const d = new Date();
+    const day = d.getDay(); // 0 Sun
+    const diffToMon = (day === 0 ? -6 : 1) - day;
+    d.setDate(d.getDate() + diffToMon);
+    d.setHours(0, 0, 0, 0);
+    return isoLocal(d).slice(0, 10);
+  });
+
   const weekStartDate = useMemo(() => new Date(`${weekStart}T00:00:00`), [weekStart]);
   const weekEndDate = useMemo(() => addDays(weekStartDate, 7), [weekStartDate]);
 
-  const [dailyPrintDate, setDailyPrintDate] = useState(() => weekStart);
-  const [builderOpen, setBuilderOpen] = useState(false);
-  const [builderClientId, setBuilderClientId] = useState("");
-  const [builderTemplate, setBuilderTemplate] = useState("2x12");
-  const [builderScheduleSource, setBuilderScheduleSource] = useState("template");
-  const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-15:00\n15:00-23:00");
-  const [builderWeeklyAssignments, setBuilderWeeklyAssignments] = useState({});
-  const [builderWeeks, setBuilderWeeks] = useState(1);
+  const monthStartDate = useMemo(() => {
+    const d = new Date(`${weekStart}T00:00:00`);
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }, [weekStart]);
 
-  const currentUser = useMemo(
-    () => state.users.find((u) => u.id === sessionUserId) || null,
-    [state.users, sessionUserId]
-  );
+  const currentUser = useMemo(() => state.users.find((u) => u.id === sessionUserId) || null, [state.users, sessionUserId]);
   const normalizedRole = (currentUser?.role || "").toLowerCase();
   const isAdmin = normalizedRole.includes("admin");
   const canSeeAdminUI = isAdmin || normalizedRole.includes("super");
 
-  const [shiftDraft, setShiftDraft] = useState({
-    clientId: "",
-    clientId2: "",
-    staffId: "",
-    startDate: weekStart,
-    startTime: "07:00",
-    endDate: weekStart,
-    endTime: "15:00",
-    isShared: false,
-    sharedGroupId: "",
-    overtimeApproved: false,
-  });
-
-  const [staffDraft, setStaffDraft] = useState({
-    id: "",
-    name: "",
-    active: true,
-    availabilityDays: [1, 2, 3, 4, 5],
-    availabilityStart: "07:00",
-    availabilityEnd: "23:00",
-    cprExp: "",
-    firstAidExp: "",
-    medExp: "",
-    canOvertime: false,
-  });
-
-  const [clientDraft, setClientDraft] = useState({
-    id: "",
-    name: "",
-    supervisorId: "",
-    coverageStart: "07:00",
-    coverageEnd: "23:00",
-    weeklyHours: 40,
-    is24Hour: false,
-    active: true,
-  });
-
-  const [userDraft, setUserDraft] = useState({
-    id: "",
-    name: "",
-    role: "supervisor",
-    pin: "",
-  });
-
-  const [emergencyFillDraft, setEmergencyFillDraft] = useState({
-    clientId: "",
-    date: weekStart,
-    startTime: "07:00",
-    endTime: "15:00",
-    isShared: false,
-  });
-
   useEffect(() => setMounted(true), []);
+
+  // connect Supabase error handler (to surface failures like 401 / RLS policy failures)
   useEffect(() => {
     setSupabaseErrorHandler(setSupabaseError);
     return () => setSupabaseErrorHandler(null);
   }, []);
+
+  // load session user
   useEffect(() => {
     if (!mounted) return;
     try {
@@ -762,6 +751,7 @@ export default function Page() {
     } catch {}
   }, [mounted]);
 
+  // initial fetch + realtime subscriptions
   useEffect(() => {
     if (!mounted) return;
     let alive = true;
@@ -774,22 +764,20 @@ export default function Page() {
         sbSelect("shifts"),
       ]);
 
+      // If the DB has never been seeded (e.g. fresh localStorage), ensure the default login user exists.
       if (!users || users.length === 0) {
+        console.warn("No users found in DB — seeding default users for local dev.");
         users = DEFAULT_DB.users;
         await sbUpsert("users", users);
       }
 
       if (!alive) return;
-      const normalized = normalizeFromDB({ users, staff, clients, shifts });
-      setState((prev) => ({
-        ...prev,
-        ...normalized,
-        settings: { ...prev.settings, ...normalized.settings },
-      }));
+      setState((prev) => ({ ...prev, ...normalizeFromDB({ users, staff, clients, shifts }) }));
     }
 
-    loadAll().catch(console.error);
+    loadAll().catch((e) => console.error(e));
 
+    // Setup realtime subscriptions only when Supabase is configured
     if (SUPABASE_CONFIGURED && supabase) {
       const ch1 = supabase.channel("rt_users").on("postgres_changes", { event: "*", schema: "public", table: "users" }, loadAll).subscribe();
       const ch2 = supabase.channel("rt_staff").on("postgres_changes", { event: "*", schema: "public", table: "staff" }, loadAll).subscribe();
@@ -803,7 +791,7 @@ export default function Page() {
           supabase.removeChannel(ch2);
           supabase.removeChannel(ch3);
           supabase.removeChannel(ch4);
-        } catch {}
+        } catch (e) {}
       };
     }
 
@@ -812,12 +800,143 @@ export default function Page() {
     };
   }, [mounted]);
 
+  function loginAs(userId) {
+    try {
+      sessionStorage.setItem("dsw_user_id", userId);
+    } catch {}
+    setSessionUserId(userId);
+  }
+
+  function logout() {
+    try {
+      sessionStorage.removeItem("dsw_user_id");
+    } catch {}
+    setSessionUserId(null);
+  }
+
+  async function createAdminUser({ id, name, pin }) {
+    const row = { id, name, role: "admin", pin };
+    await sbUpsert("users", [row]);
+    await refreshState(setState);
+    loginAs(id);
+  }
+
+  const visibleClients = useMemo(() => {
+    const all = (state.clients || []).filter((c) => c.active !== false);
+
+    if (isAdmin) return all;
+
+    const me = currentUser?.id || "";
+    const includeUnassigned = !!state.settings?.includeUnassignedForSupervisors;
+
+    return all.filter((c) => {
+      if ((c.supervisorId || "") === me) return true;
+      if (includeUnassigned && (c.supervisorId || "") === "") return true;
+      return false;
+    });
+  }, [state.clients, state.settings?.includeUnassignedForSupervisors, isAdmin, currentUser?.id]);
+
+  const shiftsInSelectedWeek = useMemo(() => {
+    return (state.shifts || []).filter((sh) => {
+      const s = new Date(sh.startISO);
+      return s >= weekStartDate && s < weekEndDate;
+    });
+  }, [state.shifts, weekStartDate, weekEndDate]);
+
+  const weekClientHours = useMemo(() => {
+    const byClient = {};
+    for (const sh of shiftsInSelectedWeek) {
+      const id = sh.clientId;
+      if (!id) continue;
+      if (!byClient[id]) byClient[id] = { totalMin: 0, dayMin: 0, nightMin: 0 };
+      const { totalMin, dayMin, nightMin } = splitDayNightMinutes(sh.startISO, sh.endISO);
+      byClient[id].totalMin += totalMin;
+      byClient[id].dayMin += dayMin;
+      byClient[id].nightMin += nightMin;
+    }
+    return byClient;
+  }, [shiftsInSelectedWeek]);
+
+  const staffWeekMinutesMap = useMemo(() => {
+    const out = {};
+    for (const st of state.staff || []) {
+      out[st.id] = staffWeekMinutesDedup(shiftsInSelectedWeek, st.id);
+    }
+    return out;
+  }, [state.staff, shiftsInSelectedWeek]);
+
+  // Draft shift form (now includes Shared Support)
+  const [shiftDraft, setShiftDraft] = useState({
+    clientId: "",
+    clientId2: "",
+    staffId: "",
+    startDate: weekStart,
+    startTime: "07:00",
+    endDate: weekStart,
+    endTime: "15:00",
+    isShared: false,
+    sharedGroupId: "",
+  });
+
+  // Auto-suggest staff for shift
+  const suggestedStaff = useMemo(() => {
+    const { clientId, startDate, startTime, endDate, endTime } = shiftDraft;
+    if (!clientId || !startDate || !startTime || !endDate || !endTime) return null;
+    const startISO = toISO(startDate, startTime);
+    const endISO = toISO(endDate, endTime);
+    const candidates = (state.staff || []).filter((s) => s.active !== false);
+    let best = null;
+    let bestScore = Infinity;
+    for (const st of candidates) {
+      // Check for conflicts
+      const hasConflict = (state.shifts || []).some((sh) =>
+        sh.staffId === st.id && overlaps(sh.startISO, sh.endISO, startISO, endISO)
+      );
+      if (hasConflict) continue;
+      // Compute OT after this shift
+      const min = staffWeekMinutesMap[st.id] || 0;
+      const addMin = minutesBetweenISO(startISO, endISO);
+      const afterMin = min + addMin;
+      const ot = Math.max(0, afterMin - OT_THRESHOLD_MIN);
+      // Prefer staff with least OT, then least total minutes
+      const score = ot * 10000 + afterMin;
+      if (score < bestScore) {
+        best = st;
+        bestScore = score;
+      }
+    }
+    return best;
+  }, [shiftDraft, state.staff, state.shifts, staffWeekMinutesMap]);
+
+  // 24-Hour Builder UI
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [builderClientId, setBuilderClientId] = useState("");
+  const [builderTemplate, setBuilderTemplate] = useState("2x12");
+  const [builderScheduleSource, setBuilderScheduleSource] = useState("template"); // template | client | custom
+  const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-15:00\n15:00-23:00\n23:00-07:00");
+  const [builderWeeklyAssignments, setBuilderWeeklyAssignments] = useState({});
+  const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
+  const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
+  const clientSchedule = useMemo(() => {
+    return builderClientId ? loadClientSchedule(builderClientId) : null;
+  }, [builderClientId]);
+
+  // keep startDate aligned with week when week changes
   useEffect(() => {
     setShiftDraft((p) => ({ ...p, startDate: weekStart, endDate: weekStart }));
-    setEmergencyFillDraft((p) => ({ ...p, date: weekStart }));
-    setDailyPrintDate(weekStart);
   }, [weekStart]);
 
+  // Load stored client schedule template into the builder when selecting a client
+  useEffect(() => {
+    if (!builderClientId) return;
+    const schedule = loadClientSchedule(builderClientId);
+    if (schedule?.shifts) {
+      setBuilderCustomTemplate(schedule.shifts.map((s) => `${s.start}-${s.end}`).join("\n"));
+      setBuilderScheduleSource((prev) => (prev === "custom" ? "custom" : "client"));
+    }
+  }, [builderClientId]);
+
+  // Auto bump endDate if endTime earlier than startTime
   useEffect(() => {
     const sd = shiftDraft.startDate;
     const st = shiftDraft.startTime;
@@ -836,139 +955,255 @@ export default function Page() {
       endDate = isoLocal(d).slice(0, 10);
     }
     if (shiftDraft.endDate !== endDate) setShiftDraft((p) => ({ ...p, endDate }));
-  }, [shiftDraft.startDate, shiftDraft.startTime, shiftDraft.endTime, shiftDraft.endDate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shiftDraft.startDate, shiftDraft.startTime, shiftDraft.endTime]);
 
-  function loginAs(userId) {
+  function toISO(dateStr, timeStr) {
+    return `${dateStr}T${timeStr}:00`;
+  }
+
+  async function runBuilder() {
+    if (!builderClientId) return alert("Pick a client for the builder.");
+    const start = new Date(weekStartDate);
+    const rows = [];
+
+    // Determine shift definitions based on selected source
+    let shiftsDef = [];
     try {
-      sessionStorage.setItem("dsw_user_id", userId);
-    } catch {}
-    setSessionUserId(userId);
-  }
-  function logout() {
-    try {
-      sessionStorage.removeItem("dsw_user_id");
-    } catch {}
-    setSessionUserId(null);
-  }
-  async function createAdminUser({ id, name, pin }) {
-    await sbUpsert("users", [{ id, name, role: "admin", pin }]);
-    await refreshState(setState);
-    loginAs(id);
-  }
-
-  const visibleClients = useMemo(() => {
-    const all = (state.clients || []).filter((c) => c.active !== false);
-    if (isAdmin) return all;
-    const me = currentUser?.id || "";
-    const includeUnassigned = !!state.settings?.includeUnassignedForSupervisors;
-    return all.filter((c) => {
-      if ((c.supervisorId || "") === me) return true;
-      if (includeUnassigned && (c.supervisorId || "") === "") return true;
-      return false;
-    });
-  }, [state.clients, isAdmin, currentUser?.id, state.settings?.includeUnassignedForSupervisors]);
-
-  const visibleClientIds = useMemo(() => new Set(visibleClients.map((c) => c.id)), [visibleClients]);
-
-  const shiftsInSelectedWeek = useMemo(() => {
-    return (state.shifts || []).filter((sh) => {
-      const s = new Date(sh.startISO);
-      return s >= weekStartDate && s < weekEndDate;
-    });
-  }, [state.shifts, weekStartDate, weekEndDate]);
-
-  const visibleShiftsInWeek = useMemo(() => {
-    return shiftsInSelectedWeek.filter((sh) => (isAdmin ? true : visibleClientIds.has(sh.clientId)));
-  }, [shiftsInSelectedWeek, isAdmin, visibleClientIds]);
-
-  const staffWeekMinutesMap = useMemo(() => {
-    const out = {};
-    for (const st of state.staff || []) {
-      out[st.id] = staffWeekMinutesDedup(shiftsInSelectedWeek, st.id);
+      if (builderScheduleSource === "client") {
+        if (!clientSchedule?.shifts?.length) return alert("No saved schedule for this client.");
+        shiftsDef = clientSchedule.shifts;
+      } else if (builderScheduleSource === "custom") {
+        shiftsDef = parseShiftPattern(builderCustomTemplate);
+      } else {
+        shiftsDef = builderTemplate === "2x12"
+          ? [ { start: "07:00", end: "19:00" }, { start: "19:00", end: "07:00" } ]
+          : [ { start: "07:00", end: "15:00" }, { start: "15:00", end: "23:00" }, { start: "23:00", end: "07:00" } ];
+      }
+    } catch (e) {
+      return alert(e.message || "Invalid schedule format.");
     }
-    return out;
-  }, [state.staff, shiftsInSelectedWeek]);
 
-  const weekClientHours = useMemo(() => {
-    const byClient = {};
-    for (const sh of shiftsInSelectedWeek) {
-      const id = sh.clientId;
-      if (!id) continue;
-      if (!byClient[id]) byClient[id] = { totalMin: 0, dayMin: 0, nightMin: 0 };
-      const { totalMin, dayMin, nightMin } = splitDayNightMinutes(sh.startISO, sh.endISO);
-      byClient[id].totalMin += totalMin;
-      byClient[id].dayMin += dayMin;
-      byClient[id].nightMin += nightMin;
-    }
-    return byClient;
-  }, [shiftsInSelectedWeek]);
+    // Track per-staff minutes while building to avoid over-assigning
+    const minutesByStaff = { ...staffWeekMinutesMap };
+    const pool = (state.staff || []).filter((s) => s.active !== false);
+    let rotIndex = 0;
 
-  async function findStaffConflictsDB({ staffId, startISO, endISO }) {
-    const rows = await sbSelect("shifts");
-    const all = (rows || []).map((sh) => ({
-      id: sh.id,
-      staffId: sh.staff_id || sh.staffId,
-      clientId: sh.client_id || sh.clientId,
-      startISO: new Date(sh.start_iso || sh.startISO).toISOString(),
-      endISO: new Date(sh.end_iso || sh.endISO).toISOString(),
-      isShared: !!(sh.is_shared || sh.isShared),
-      sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
-    }));
-    return all.filter((sh) => sh.staffId === staffId && overlaps(sh.startISO, sh.endISO, startISO, endISO));
-  }
-
-  function getAllowedVisibleStaff() {
-    return (state.staff || []).filter((s) => s.active !== false);
-  }
-
-  function getTrainingBlockReason(staff) {
-    if (!state.settings?.blockExpiredTraining) return "";
-    const status = getTrainingStatus(staff);
-    if (status.expired.length) {
-      return `Expired training: ${status.expired.map((x) => x.label).join(", ")}`;
-    }
-    return "";
-  }
-
-  const suggestedStaff = useMemo(() => {
-    const { clientId, startDate, startTime, endDate, endTime } = shiftDraft;
-    if (!clientId || !startDate || !startTime || !endDate || !endTime) return null;
-
-    const startISO = toISO(startDate, startTime);
-    const endISO = toISO(endDate, endTime);
-    const client = state.clients.find((c) => c.id === clientId);
-    const candidates = getAllowedVisibleStaff();
-
-    let best = null;
-    let bestScore = Infinity;
-
-    for (const st of candidates) {
-      const trainingBlock = getTrainingBlockReason(st);
-      if (trainingBlock) continue;
-      if (!isStaffAvailableForShift(st, startISO, endISO)) continue;
-
-      const hasConflict = (state.shifts || []).some((sh) => {
-        if (sh.staffId !== st.id) return false;
-        if (!overlaps(sh.startISO, sh.endISO, startISO, endISO)) return false;
-        if (shiftDraft.isShared && sh.isShared && sh.sharedGroupId === shiftDraft.sharedGroupId) return false;
-        return true;
-      });
-      if (hasConflict) continue;
-
-      const currentMin = staffWeekMinutesMap[st.id] || 0;
+    const pickStaffForShift = async (startISO, endISO) => {
+      const weekday = new Date(startISO).getDay();
+      const forcedStaffId = builderWeeklyAssignments[weekday];
       const addMin = minutesBetweenISO(startISO, endISO);
-      const afterMin = currentMin + addMin;
-      const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-      const score = otMin * 10000 + afterMin + (client ? 0 : 10);
-      if (score < bestScore) {
-        best = st;
-        bestScore = score;
+
+      const checkCandidate = async (st) => {
+        const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO, endISO });
+        if (conflicts.length) return false;
+        const currentMin = minutesByStaff[st.id] || 0;
+        // Builder should not auto-assign overtime shifts.
+        if (currentMin + addMin > OT_THRESHOLD_MIN) return false;
+        minutesByStaff[st.id] = currentMin + addMin;
+        return true;
+      };
+
+      if (forcedStaffId) {
+        const forced = pool.find((s) => s.id === forcedStaffId);
+        if (forced && (await checkCandidate(forced))) return forced;
+      }
+
+      for (let i = 0; i < pool.length; i++) {
+        const idx = (rotIndex + i) % pool.length;
+        const st = pool[idx];
+        if (await checkCandidate(st)) {
+          rotIndex = idx + 1;
+          return st;
+        }
+      }
+      return null;
+    };
+
+    // Build for N weeks (1=week, 4=month) using the repeat interval
+    for (let w = 0; w < builderWeeks; w += builderRepeatInterval) {
+      const weekStartForRun = addDays(start, w * 7);
+      for (let d = 0; d < 7; d++) {
+        const day = addDays(weekStartForRun, d);
+        const dateStr = isoLocal(day).slice(0, 10);
+
+        for (const { start: sTime, end: eTime } of shiftsDef) {
+          const sISO = toISO(dateStr, sTime);
+          let eISO = toISO(dateStr, eTime);
+          if (new Date(eISO) <= new Date(sISO)) {
+            const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
+            eISO = `${isoLocal(nd).slice(0, 10)}T${eTime}:00`;
+          }
+
+          const chosen = await pickStaffForShift(sISO, eISO);
+          if (chosen) {
+            rows.push({
+              id: uid("sh"),
+              client_id: builderClientId,
+              staff_id: chosen.id,
+              start_iso: sISO,
+              end_iso: eISO,
+              created_by: currentUser?.id || "builder",
+              is_shared: false,
+              shared_group_id: "",
+            });
+          }
+        }
       }
     }
 
-    return best;
-  }, [shiftDraft, state.staff, state.shifts, staffWeekMinutesMap, state.settings, state.clients]);
+    if (!rows.length) return alert("Builder did not create any shifts (no available staff).");
+    await sbUpsert("shifts", rows);
+    await refreshState(setState);
+    setBuilderOpen(false);
+    alert(`Builder created ${rows.length} shift rows.`);
+  }
 
+  // Cross-supervisor (global) staff conflict check
+  async function findStaffConflictsDB({ staffId, startISO, endISO }) {
+    // Use sbSelect which supports Supabase or local fallback
+    const rows = await sbSelect("shifts");
+    const all = (rows || [])
+      .map((sh) => {
+        const normalizedStartISO = normalizeDateTimeISO(sh.start_iso || sh.startISO);
+        const normalizedEndISO = normalizeDateTimeISO(sh.end_iso || sh.endISO);
+        if (!normalizedStartISO || !normalizedEndISO) return null;
+        return {
+          id: sh.id,
+          staffId: sh.staff_id || sh.staffId,
+          clientId: sh.client_id || sh.clientId,
+          startISO: normalizedStartISO,
+          endISO: normalizedEndISO,
+          isShared: !!(sh.is_shared || sh.isShared),
+          sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
+        };
+      })
+      .filter(Boolean);
+
+    return all.filter((sh) => sh.staffId === staffId && overlaps(sh.startISO, sh.endISO, startISO, endISO));
+  }
+
+  async function addShift() {
+    // Works with Supabase or localStorage fallback via sbUpsert
+
+    const { clientId, clientId2, staffId, startDate, startTime, endDate, endTime, isShared } = shiftDraft;
+
+    if (!clientId || !staffId) return alert("Pick a client and staff.");
+
+    if (isShared) {
+      if (!clientId2) return alert("Pick the 2nd client for Shared Support.");
+      if (clientId2 === clientId) return alert("Client 1 and Client 2 cannot be the same.");
+    }
+
+    const startISO = toISO(startDate, startTime);
+    const endISO = toISO(endDate, endTime);
+    if (new Date(endISO) <= new Date(startISO)) return alert("End must be after start.");
+
+    const sharedGroupId = isShared
+      ? (shiftDraft.sharedGroupId.trim() || `SS-${Date.now().toString().slice(-6)}`)
+      : "";
+
+    // Check conflicts globally
+    const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
+
+    // Allow overlap ONLY when it is the same shared-group/time block
+    const illegalConflicts = conflicts.filter((c) => {
+      if (!isShared) return true; // non-shared can never overlap
+      // shared can overlap only if the conflict is also shared and matches group + exact time
+      return !(
+        c.isShared &&
+        c.sharedGroupId === sharedGroupId &&
+        c.startISO === startISO &&
+        c.endISO === endISO
+      );
+    });
+
+    if (illegalConflicts.length) {
+      const first = illegalConflicts[0];
+      const client = (state.clients || []).find((x) => x.id === first.clientId);
+      const sup = (state.users || []).find((u) => u.id === (client?.supervisorId || ""));
+      const msg =
+        `Conflict: staff already scheduled.\n\n` +
+        `Client: ${client?.name || "Unknown"}\n` +
+        `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
+        `Time: ${first.startISO.slice(0, 16).replace("T", " ")} → ${first.endISO.slice(0, 16).replace("T", " ")}`;
+
+      if (state.settings?.hardStopConflicts) return alert(msg);
+      if (!confirm(msg + "\n\nContinue anyway?")) return;
+    }
+
+    // OT warning (dedup shared support)
+    const newMin = minutesBetweenISO(startISO, endISO);
+    const currentMin = staffWeekMinutesMap[staffId] || 0;
+    const afterMin = currentMin + newMin; // shared counts once per staff, so this is fine
+    const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
+    if (otMin > 0) {
+      if (!confirm(`This will create overtime: ${fmtHoursFromMin(otMin)}.\n\nContinue?`)) return;
+    }
+
+    const createdBy = currentUser?.id || "unknown";
+    const rows = [];
+
+    // Always create row for primary client
+    rows.push({
+      id: uid("sh"),
+      client_id: clientId,
+      staff_id: staffId,
+      start_iso: startISO,
+      end_iso: endISO,
+      created_by: createdBy,
+      is_shared: !!isShared,
+      shared_group_id: sharedGroupId,
+    });
+
+    // Shared support: also create row for client 2
+    if (isShared) {
+      rows.push({
+        id: uid("sh"),
+        client_id: clientId2,
+        staff_id: staffId,
+        start_iso: startISO,
+        end_iso: endISO,
+        created_by: createdBy,
+        is_shared: true,
+        shared_group_id: sharedGroupId,
+      });
+    }
+
+    await sbUpsert("shifts", rows);
+    // refresh UI and reset draft
+    await refreshState(setState);
+    setShiftDraft((p) => ({ ...p, isShared: false, clientId2: "", sharedGroupId: "" }));
+  }
+
+  async function deleteShift(id) {
+    const allShifts = await sbSelect("shifts");
+    const target = (allShifts || []).find((sh) => sh.id === id);
+    const sharedGroupId = target?.shared_group_id || target?.sharedGroupId || "";
+    const idsToDelete = sharedGroupId
+      ? (allShifts || [])
+          .filter((sh) => (sh.shared_group_id || sh.sharedGroupId || "") === sharedGroupId)
+          .map((sh) => sh.id)
+      : [id];
+
+    const uniqueIds = Array.from(new Set(idsToDelete.length ? idsToDelete : [id]));
+    if (
+      !confirm(
+        uniqueIds.length > 1
+          ? `Delete this shared shift group (${uniqueIds.length} linked shifts)?`
+          : "Delete this shift?"
+      )
+    ) {
+      return;
+    }
+
+    for (const shiftId of uniqueIds) {
+      await sbDelete("shifts", shiftId);
+    }
+    await refreshState(setState);
+  }
+
+  // Coverage gaps (uses visible clients + their coverage windows; supports 24h clients)
   const coverageGaps = useMemo(() => {
     const gaps = [];
     const start = new Date(weekStartDate);
@@ -985,14 +1220,18 @@ export default function Page() {
         let covStartISO = `${dateStr}T${covStart}:00`;
         let covEndISO = `${dateStr}T${covEnd}:00`;
 
+        // 24h client overrides
         if (c.is24Hour) {
           covStartISO = `${dateStr}T00:00:00`;
           const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
           covEndISO = `${isoLocal(nd).slice(0, 10)}T00:00:00`;
-        } else if (new Date(covEndISO) <= new Date(covStartISO)) {
-          const nd = new Date(`${dateStr}T00:00:00`);
-          nd.setDate(nd.getDate() + 1);
-          covEndISO = `${isoLocal(nd).slice(0, 10)}T${covEnd}:00`;
+        } else {
+          // if coverage wraps past midnight
+          if (new Date(covEndISO) <= new Date(covStartISO)) {
+            const nd = new Date(`${dateStr}T00:00:00`);
+            nd.setDate(nd.getDate() + 1);
+            covEndISO = `${isoLocal(nd).slice(0, 10)}T${covEnd}:00`;
+          }
         }
 
         const clientShifts = shiftsInSelectedWeek
@@ -1000,6 +1239,7 @@ export default function Page() {
           .map((sh) => ({ start: sh.startISO, end: sh.endISO }))
           .sort((a, b) => new Date(a.start) - new Date(b.start));
 
+        // Merge overlaps
         const merged = [];
         for (const s of clientShifts) {
           if (!merged.length) merged.push({ ...s });
@@ -1007,13 +1247,13 @@ export default function Page() {
             const last = merged[merged.length - 1];
             if (new Date(s.start) <= new Date(last.end)) {
               if (new Date(s.end) > new Date(last.end)) last.end = s.end;
-            } else {
-              merged.push({ ...s });
-            }
+            } else merged.push({ ...s });
           }
         }
 
+        // Find gaps inside coverage window
         let cursor = covStartISO;
+
         for (const seg of merged) {
           if (overlaps(cursor, covEndISO, seg.start, seg.end)) {
             const segStart = new Date(seg.start) > new Date(cursor) ? seg.start : cursor;
@@ -1023,433 +1263,65 @@ export default function Page() {
             cursor = new Date(seg.end) > new Date(cursor) ? seg.end : cursor;
           }
         }
-        if (new Date(cursor) < new Date(covEndISO)) {
-          gaps.push({ clientId: c.id, dateStr, startISO: cursor, endISO: covEndISO });
-        }
+
+        if (new Date(cursor) < new Date(covEndISO)) gaps.push({ clientId: c.id, dateStr, startISO: cursor, endISO: covEndISO });
       }
     }
 
     return gaps.filter((g) => minutesBetweenISO(g.startISO, g.endISO) >= 5);
   }, [visibleClients, shiftsInSelectedWeek, weekStartDate]);
 
-  const emergencyFillSuggestions = useMemo(() => {
-    const { clientId, date, startTime, endTime } = emergencyFillDraft;
-    if (!clientId || !date || !startTime || !endTime) return [];
-    const startISO = toISO(date, startTime);
-    let endISO = toISO(date, endTime);
-    if (new Date(endISO) <= new Date(startISO)) {
-      const nd = addDays(new Date(`${date}T00:00:00`), 1);
-      endISO = `${isoLocal(nd).slice(0, 10)}T${endTime}:00`;
-    }
+  // Admin: drafts
+  const [staffDraftName, setStaffDraftName] = useState("");
+  const [clientDraft, setClientDraft] = useState({
+    id: "",
+    name: "",
+    supervisorId: "",
+    coverageStart: "07:00",
+    coverageEnd: "23:00",
+    weeklyHours: 40,
+    is24Hour: false,
+    active: true,
+  });
+  const [userDraft, setUserDraft] = useState({ id: "", name: "", role: "supervisor", pin: "" });
 
-    return (state.staff || [])
-      .filter((st) => st.active !== false)
-      .map((st) => {
-        const conflict = (state.shifts || []).find(
-          (sh) => sh.staffId === st.id && overlaps(sh.startISO, sh.endISO, startISO, endISO)
-        );
-        const available = isStaffAvailableForShift(st, startISO, endISO);
-        const trainingBlock = getTrainingBlockReason(st);
-        const currentMin = staffWeekMinutesMap[st.id] || 0;
-        const addMin = minutesBetweenISO(startISO, endISO);
-        const afterMin = currentMin + addMin;
-        const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-
-        let score = 0;
-        if (conflict) score += 10000;
-        if (!available) score += 5000;
-        if (trainingBlock) score += 7000;
-        score += otMin * 20;
-        score += afterMin;
-
-        return {
-          staff: st,
-          conflict,
-          available,
-          trainingBlock,
-          currentMin,
-          afterMin,
-          otMin,
-          score,
-        };
-      })
-      .sort((a, b) => a.score - b.score);
-  }, [emergencyFillDraft, state.staff, state.shifts, staffWeekMinutesMap, state.settings]);
-
-  const supervisorDashboard = useMemo(() => {
-    const supervisors = (state.users || []).filter(
-      (u) => u.role === "supervisor" || u.role === "admin"
-    );
-
-    return supervisors.map((u) => {
-      const clients = (state.clients || []).filter((c) => c.active !== false && c.supervisorId === u.id);
-      const clientIds = new Set(clients.map((c) => c.id));
-      const clientShifts = shiftsInSelectedWeek.filter((sh) => clientIds.has(sh.clientId));
-      const clientGaps = coverageGaps.filter((g) => clientIds.has(g.clientId));
-
-      const clientCoverageWindows = clients.reduce((sum, c) => {
-        if (c.is24Hour) return sum + 24 * 60 * 7;
-        const start = c.coverageStart || "07:00";
-        const end = c.coverageEnd || "23:00";
-        const s = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
-        const e = Number(end.slice(0, 2)) * 60 + Number(end.slice(3, 5));
-        const mins = e > s ? e - s : 1440 - s + e;
-        return sum + mins * 7;
-      }, 0);
-
-      const gapMin = clientGaps.reduce((sum, g) => sum + minutesBetweenISO(g.startISO, g.endISO), 0);
-      const coveragePct =
-        clientCoverageWindows > 0
-          ? Math.max(0, Math.round(((clientCoverageWindows - gapMin) / clientCoverageWindows) * 100))
-          : 100;
-
-      return {
-        supervisor: u,
-        clientsCount: clients.length,
-        shiftsCount: clientShifts.length,
-        gapsCount: clientGaps.length,
-        coveragePct,
-      };
-    });
-  }, [state.users, state.clients, shiftsInSelectedWeek, coverageGaps]);
-
-  const weeklyHealthScore = useMemo(() => {
-    const overtimeStaff = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > OT_THRESHOLD_MIN).length;
-    const expTrainingCount = (state.staff || []).filter((st) => getTrainingStatus(st).expired.length > 0).length;
-    const openGapCount = coverageGaps.length;
-    const totalVisibleClients = visibleClients.length || 1;
-
-    let score = 100;
-    score -= overtimeStaff * 8;
-    score -= expTrainingCount * 6;
-    score -= Math.min(30, openGapCount);
-    score = Math.max(0, score);
-
-    let label = "Strong";
-    if (score < 85) label = "Watch";
-    if (score < 70) label = "Risk";
-    if (score < 50) label = "Critical";
-
-    return {
-      score,
-      label,
-      overtimeStaff,
-      expTrainingCount,
-      openGapCount,
-      totalVisibleClients,
-    };
-  }, [state.staff, staffWeekMinutesMap, coverageGaps, visibleClients]);
-
-  const dailyPrintRows = useMemo(() => {
-    const dayStart = new Date(`${dailyPrintDate}T00:00:00`).toISOString();
-    const dayEnd = new Date(`${dailyPrintDate}T23:59:59`).toISOString();
-
-    return (state.shifts || [])
-      .filter((sh) => (isAdmin ? true : visibleClientIds.has(sh.clientId)))
-      .filter((sh) => overlaps(sh.startISO, sh.endISO, dayStart, dayEnd))
-      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-  }, [state.shifts, dailyPrintDate, isAdmin, visibleClientIds]);
-
-  const tabs = [
-    { value: "schedule", label: "Schedule" },
-    { value: "calendar", label: "Weekly Calendar" },
-    { value: "dailyPrint", label: "Daily Printout" },
-    { value: "gaps", label: "Coverage Gaps" },
-    { value: "hours", label: "Hours & OT" },
-    { value: "emergencyFill", label: "Emergency Fill" },
-    { value: "dashboard", label: "Dashboard" },
-    ...(canSeeAdminUI
-      ? [
-          { value: "staff", label: "Staff" },
-          { value: "clients", label: "Clients" },
-          { value: "users", label: "Users" },
-          { value: "settings", label: "Settings" },
-        ]
-      : []),
-  ];
-
-  async function addShift() {
-    const {
-      clientId,
-      clientId2,
-      staffId,
-      startDate,
-      startTime,
-      endDate,
-      endTime,
-      isShared,
-      overtimeApproved,
-    } = shiftDraft;
-
-    if (!clientId || !staffId) return alert("Pick a client and staff.");
-    if (isShared && !clientId2) return alert("Pick the 2nd client for shared support.");
-    if (isShared && clientId2 === clientId) return alert("Client 1 and Client 2 cannot be the same.");
-
-    const staff = state.staff.find((s) => s.id === staffId);
-    if (!staff) return alert("Staff not found.");
-
-    const startISO = toISO(startDate, startTime);
-    const endISO = toISO(endDate, endTime);
-    if (new Date(endISO) <= new Date(startISO)) return alert("End must be after start.");
-
-    const trainingBlock = getTrainingBlockReason(staff);
-    if (trainingBlock) return alert(trainingBlock);
-
-    if (!isStaffAvailableForShift(staff, startISO, endISO)) {
-      return alert(`${staff.name} is outside availability for this shift.`);
-    }
-
-    const sharedGroupId = isShared
-      ? shiftDraft.sharedGroupId.trim() || `SS-${Date.now().toString().slice(-6)}`
-      : "";
-
-    const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
-    const illegalConflicts = conflicts.filter((c) => {
-      if (!isShared) return true;
-      return !(
-        c.isShared &&
-        c.sharedGroupId === sharedGroupId &&
-        c.startISO === new Date(startISO).toISOString() &&
-        c.endISO === new Date(endISO).toISOString()
-      );
-    });
-
-    if (illegalConflicts.length) {
-      const first = illegalConflicts[0];
-      const client = (state.clients || []).find((x) => x.id === first.clientId);
-      const sup = (state.users || []).find((u) => u.id === (client?.supervisorId || ""));
-      const msg =
-        `Conflict: staff already scheduled.\n\n` +
-        `Client: ${client?.name || "Unknown"}\n` +
-        `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
-        `Time: ${first.startISO.slice(0, 16).replace("T", " ")} → ${first.endISO
-          .slice(0, 16)
-          .replace("T", " ")}`;
-
-      if (state.settings?.hardStopConflicts) return alert(msg);
-      if (!confirm(msg + "\n\nContinue anyway?")) return;
-    }
-
-    const addMin = minutesBetweenISO(startISO, endISO);
-    const currentMin = staffWeekMinutesMap[staffId] || 0;
-    const afterMin = currentMin + addMin;
-    const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-
-    if (otMin > 0) {
-      const canOverride =
-        state.settings?.allowOvertimeOverride && (overtimeApproved || staff.canOvertime);
-
-      if (state.settings?.hardStopOT && !canOverride) {
-        return alert(
-          `${staff.name} would exceed 40 hours.\nWeek total after shift: ${fmtHoursFromMin(afterMin)}.\nApprove overtime or choose different staff.`
-        );
-      }
-
-      if (!canOverride) {
-        if (!confirm(`This creates overtime (${fmtHoursFromMin(otMin)}). Continue?`)) return;
-      }
-    }
-
-    const createdBy = currentUser?.id || "unknown";
-    const rows = [
-      {
-        id: uid("sh"),
-        client_id: clientId,
-        staff_id: staffId,
-        start_iso: startISO,
-        end_iso: endISO,
-        created_by: createdBy,
-        is_shared: !!isShared,
-        shared_group_id: sharedGroupId,
-        overtime_approved: !!overtimeApproved,
-      },
-    ];
-
-    if (isShared) {
-      rows.push({
-        id: uid("sh"),
-        client_id: clientId2,
-        staff_id: staffId,
-        start_iso: startISO,
-        end_iso: endISO,
-        created_by: createdBy,
-        is_shared: true,
-        shared_group_id: sharedGroupId,
-        overtime_approved: !!overtimeApproved,
-      });
-    }
-
-    await sbUpsert("shifts", rows);
-    await refreshState(setState);
-    setShiftDraft((p) => ({
-      ...p,
-      clientId2: "",
-      isShared: false,
-      sharedGroupId: "",
-      overtimeApproved: false,
-    }));
+  async function saveAllNow() {
+    // Manual refresh is enough because we already upsert on actions. Works with local fallback.
+    alert("Saved / Synced (Realtime will update all users when Supabase is configured).");
   }
 
-  async function deleteShift(id) {
-    if (!confirm("Delete this shift?")) return;
-    await sbDelete("shifts", id);
-    await refreshState(setState);
-  }
-
-  async function runBuilder() {
-    if (!builderClientId) return alert("Pick a client for the builder.");
-    const start = new Date(weekStartDate);
-    const rows = [];
-    let shiftsDef = [];
+  async function addStaff() {
+    const name = staffDraftName.trim();
+    console.debug("addStaff", { name, staffDraftName });
+    if (!name) return alert("Staff name is required.");
 
     try {
-      if (builderScheduleSource === "client") {
-        const schedule = loadClientSchedule(builderClientId);
-        if (!schedule?.shifts?.length) return alert("No saved schedule for this client.");
-        shiftsDef = schedule.shifts;
-      } else if (builderScheduleSource === "custom") {
-        shiftsDef = parseShiftPattern(builderCustomTemplate);
-      } else {
-        shiftsDef =
-          builderTemplate === "2x12"
-            ? [
-                { start: "07:00", end: "19:00" },
-                { start: "19:00", end: "07:00" },
-              ]
-            : [
-                { start: "07:00", end: "15:00" },
-                { start: "15:00", end: "23:00" },
-              ];
-      }
-    } catch (e) {
-      return alert(e.message || "Invalid schedule format.");
+      await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
+      await refreshState(setState);
+      setStaffDraftName("");
+    } catch (err) {
+      console.error("addStaff error", err);
+      alert("Unable to add staff. See console for details.");
     }
-
-    const minutesByStaff = { ...staffWeekMinutesMap };
-    const pool = (state.staff || []).filter((s) => s.active !== false);
-    let rotIndex = 0;
-
-    const pickStaffForShift = (startISO, endISO) => {
-      const weekday = new Date(startISO).getDay();
-      const forcedStaffId = builderWeeklyAssignments[weekday];
-      const addMin = minutesBetweenISO(startISO, endISO);
-
-      const checkCandidate = (st) => {
-        if (getTrainingBlockReason(st)) return false;
-        if (!isStaffAvailableForShift(st, startISO, endISO)) return false;
-
-        const hasConflict = (state.shifts || []).some(
-          (sh) => sh.staffId === st.id && overlaps(sh.startISO, sh.endISO, startISO, endISO)
-        );
-        if (hasConflict) return false;
-
-        const currentMin = minutesByStaff[st.id] || 0;
-        const afterMin = currentMin + addMin;
-        const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-        if (state.settings?.hardStopOT && otMin > 0 && !st.canOvertime) return false;
-
-        minutesByStaff[st.id] = afterMin;
-        return true;
-      };
-
-      if (forcedStaffId) {
-        const forced = pool.find((s) => s.id === forcedStaffId);
-        if (forced && checkCandidate(forced)) return forced;
-      }
-
-      for (let i = 0; i < pool.length; i++) {
-        const idx = (rotIndex + i) % pool.length;
-        const st = pool[idx];
-        if (checkCandidate(st)) {
-          rotIndex = idx + 1;
-          return st;
-        }
-      }
-      return null;
-    };
-
-    for (let w = 0; w < builderWeeks; w++) {
-      const weekStartForRun = addDays(start, w * 7);
-      for (let d = 0; d < 7; d++) {
-        const day = addDays(weekStartForRun, d);
-        const dateStr = isoLocal(day).slice(0, 10);
-
-        for (const { start: sTime, end: eTime } of shiftsDef) {
-          const sISO = toISO(dateStr, sTime);
-          let eISO = toISO(dateStr, eTime);
-          if (new Date(eISO) <= new Date(sISO)) {
-            const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
-            eISO = `${isoLocal(nd).slice(0, 10)}T${eTime}:00`;
-          }
-
-          const chosen = pickStaffForShift(sISO, eISO);
-          if (chosen) {
-            rows.push({
-              id: uid("sh"),
-              client_id: builderClientId,
-              staff_id: chosen.id,
-              start_iso: sISO,
-              end_iso: eISO,
-              created_by: currentUser?.id || "builder",
-              is_shared: false,
-              shared_group_id: "",
-              overtime_approved: false,
-            });
-          }
-        }
-      }
-    }
-
-    if (!rows.length) return alert("Builder did not create any shifts.");
-    await sbUpsert("shifts", rows);
-    await refreshState(setState);
-    setBuilderOpen(false);
-    alert(`Builder created ${rows.length} shift rows.`);
   }
 
-  async function saveStaff() {
-    if (!staffDraft.name.trim()) return alert("Staff name is required.");
-    const row = {
-      id: staffDraft.id || uid("st"),
-      name: staffDraft.name.trim(),
-      active: staffDraft.active !== false,
-      availability: JSON.stringify({
-        days: staffDraft.availabilityDays,
-        start: staffDraft.availabilityStart,
-        end: staffDraft.availabilityEnd,
-      }),
-      cpr_exp: staffDraft.cprExp || null,
-      first_aid_exp: staffDraft.firstAidExp || null,
-      med_exp: staffDraft.medExp || null,
-      can_overtime: !!staffDraft.canOvertime,
-    };
-    await sbUpsert("staff", [row]);
+  async function toggleStaff(id, active) {
+    await sbUpsert("staff", [{ id, active: !active }]);
     await refreshState(setState);
-    setStaffDraft({
-      id: "",
-      name: "",
-      active: true,
-      availabilityDays: [1, 2, 3, 4, 5],
-      availabilityStart: "07:00",
-      availabilityEnd: "23:00",
-      cprExp: "",
-      firstAidExp: "",
-      medExp: "",
-      canOvertime: false,
-    });
   }
 
   async function removeStaff(id) {
-    if (!confirm("Remove staff?")) return;
+    if (!confirm("Remove staff? (This does not delete their shifts automatically.)")) return;
     await sbDelete("staff", id);
     await refreshState(setState);
   }
 
   async function saveClient() {
-    if (!clientDraft.name.trim()) return alert("Client name required.");
+    const name = clientDraft.name.trim();
+    if (!name) return alert("Client name required.");
     const row = {
       id: clientDraft.id || uid("cl"),
-      name: clientDraft.name.trim(),
+      name,
       supervisor_id: clientDraft.supervisorId || null,
       coverage_start: clientDraft.coverageStart || "07:00",
       coverage_end: clientDraft.coverageEnd || "23:00",
@@ -1459,25 +1331,17 @@ export default function Page() {
     };
     await sbUpsert("clients", [row]);
     await refreshState(setState);
-    setClientDraft({
-      id: "",
-      name: "",
-      supervisorId: "",
-      coverageStart: "07:00",
-      coverageEnd: "23:00",
-      weeklyHours: 40,
-      is24Hour: false,
-      active: true,
-    });
+    setClientDraft({ id: "", name: "", supervisorId: "", coverageStart: "07:00", coverageEnd: "23:00", weeklyHours: 40, is24Hour: false, active: true });
   }
 
   async function deleteClient(id) {
     if (!confirm("Delete this client?")) return;
+    // remove shifts for that client first
     const shifts = await sbSelect("shifts");
-    const toRemove = (shifts || [])
-      .filter((s) => (s.client_id || s.clientId) === id)
-      .map((s) => s.id);
-    for (const sid of toRemove) await sbDelete("shifts", sid);
+    const toRemove = (shifts || []).filter((s) => (s.client_id || s.clientId) === id).map((s) => s.id);
+    for (const sid of toRemove) {
+      await sbDelete("shifts", sid);
+    }
     await sbDelete("clients", id);
     await refreshState(setState);
   }
@@ -1486,14 +1350,8 @@ export default function Page() {
     if (!userDraft.id.trim() || !userDraft.name.trim() || !userDraft.pin.trim()) {
       return alert("User id, name, and PIN required.");
     }
-    await sbUpsert("users", [
-      {
-        id: userDraft.id.trim(),
-        name: userDraft.name.trim(),
-        role: userDraft.role,
-        pin: userDraft.pin.trim(),
-      },
-    ]);
+    const row = { id: userDraft.id.trim(), name: userDraft.name.trim(), role: userDraft.role, pin: userDraft.pin.trim() };
+    await sbUpsert("users", [row]);
     await refreshState(setState);
     setUserDraft({ id: "", name: "", role: "supervisor", pin: "" });
   }
@@ -1504,73 +1362,110 @@ export default function Page() {
     await refreshState(setState);
   }
 
-  function saveAllNow() {
-    alert("Saved / Synced.");
-  }
+  // Tabs
+  const tabs = [
+    { value: "schedule", label: "Schedule" },
+    { value: "calendar", label: "Weekly Calendar" },
+    { value: "month", label: "Monthly Calendar" },
+    { value: "staffSchedule", label: "Staff Schedule" },
+    { value: "gaps", label: "Coverage Gaps" },
+    { value: "hours", label: "Hours & OT" },
+    // --- Client Profiles tab for users who can see clients ---
+    ...(visibleClients.length > 0 ? [
+      { value: "clientProfiles", label: "Client Profiles" },
+    ] : []),
+    ...(canSeeAdminUI
+      ? [
+          { value: "staff", label: "Staff" },
+          { value: "clients", label: "Clients" },
+          { value: "users", label: "Users" },
+          { value: "settings", label: "Settings" },
+        ]
+      : []),
+  ];
 
+  // --- Client Profiles state ---
+  const [selectedClientId, setSelectedClientId] = useState("");
+
+  // Use all clients for the dropdown and selectors
+  const allClients = useMemo(() => (state.clients || []).filter(c => c), [state.clients]);
+
+  // Memo: selected client object
+  const selectedClient = useMemo(() => (allClients || []).find(c => c.id === selectedClientId) || null, [allClients, selectedClientId]);
+
+  // Memo: all shifts for selected client in selected week
+  const selectedClientShifts = useMemo(() => {
+    if (!selectedClientId) return [];
+    return (state.shifts || [])
+      .filter(sh => sh.clientId === selectedClientId)
+      .filter(sh => {
+        // Only shifts in the selected week
+        const shStart = new Date(sh.startISO);
+        return shStart >= weekStartDate && shStart < weekEndDate;
+      })
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  }, [state.shifts, selectedClientId, weekStartDate, weekEndDate]);
+
+  // Memo: unique staff assigned to this client in selected week, with total minutes
+  const selectedClientStaffSummary = useMemo(() => {
+    if (!selectedClientShifts.length) return [];
+    const staffMap = {};
+    for (const sh of selectedClientShifts) {
+      if (!sh.staffId) continue;
+      if (!staffMap[sh.staffId]) staffMap[sh.staffId] = { staff: (state.staff || []).find(s => s.id === sh.staffId), min: 0 };
+      staffMap[sh.staffId].min += minutesBetweenISO(sh.startISO, sh.endISO);
+    }
+    return Object.values(staffMap).sort((a, b) => (a.staff?.name || "").localeCompare(b.staff?.name || ""));
+  }, [selectedClientShifts, state.staff]);
+
+  // Memo: client weekly hours summary (total, day, night, remaining)
+  const selectedClientWeekHours = useMemo(() => {
+    let totalMin = 0, dayMin = 0, nightMin = 0;
+    for (const sh of selectedClientShifts) {
+      const { totalMin: t, dayMin: d, nightMin: n } = splitDayNightMinutes(sh.startISO, sh.endISO);
+      totalMin += t; dayMin += d; nightMin += n;
+    }
+    const allottedMin = (Number(selectedClient?.weeklyHours) || 0) * 60;
+    const remainingMin = allottedMin - totalMin;
+    return { totalMin, dayMin, nightMin, allottedMin, remainingMin };
+  }, [selectedClientShifts, selectedClient]);
   if (!mounted) return null;
+
+  // If Supabase isn't configured we'll show a banner inside the UI and
+  // fall back to localStorage for data persistence.
+
   if (!currentUser) {
     return <LoginScreen users={state.users} onLogin={loginAs} onCreateAdmin={createAdminUser} />;
   }
 
+  const canSeeAllShifts = isAdmin; // supervisors see their clients + optional unassigned (via visibleClients)
+
   return (
     <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 16 }}>
-      <div style={{ maxWidth: 1280, margin: "0 auto" }}>
+      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
         {!SUPABASE_CONFIGURED ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
-            <strong>Warning:</strong> Supabase is not configured. Using localStorage fallback.
+            <strong>Warning:</strong> Supabase is not configured. The app is using localStorage fallback. To enable cloud sync set <b>NEXT_PUBLIC_SUPABASE_URL</b> and <b>NEXT_PUBLIC_SUPABASE_ANON_KEY</b>.
           </div>
         ) : supabaseError ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
-            <strong>Warning:</strong> Supabase requests are failing. Using localStorage fallback.
+            <strong>Warning:</strong> Supabase requests are failing. The app is using localStorage fallback.
             <div style={{ marginTop: 6, opacity: 0.85, fontSize: 12 }}>
-              {supabaseError.message || supabaseError.code || "Unknown error"}
+              {supabaseError.message || supabaseError.code || "Unknown error"} (check your anon key & table policies)
             </div>
           </div>
         ) : null}
-
-        <div style={styles.rowBetween}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <div>
-            <div style={{ fontSize: 24, fontWeight: 980 }}>DSW Scheduler</div>
+            <div style={{ fontSize: 22, fontWeight: 980 }}>DSW Scheduler (Dynamic)</div>
             <div style={styles.tiny}>
               Logged in as <b>{currentUser.name}</b> ({currentUser.role})
             </div>
           </div>
-          <div className="no-print" style={{ display: "flex", gap: 8 }}>
+
+          <div className="no-print" style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button style={styles.btn2} onClick={saveAllNow}>Save</button>
             <button style={styles.btn2} onClick={logout}>Logout</button>
-          </div>
-        </div>
-
-        <div style={{ ...styles.card, marginTop: 12 }}>
-          <div style={styles.rowBetween}>
-            <div>
-              <div style={{ fontWeight: 900, fontSize: 18 }}>Weekly Staffing Health Score</div>
-              <div style={styles.tiny}>Week of {weekStart}</div>
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 28, fontWeight: 980 }}>{weeklyHealthScore.score}</div>
-              <div style={styles.tiny}>{weeklyHealthScore.label}</div>
-            </div>
-          </div>
-
-          <div style={{ ...styles.grid4, marginTop: 12 }}>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Open Gaps</div>
-              <div style={styles.statValue}>{weeklyHealthScore.openGapCount}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Staff in OT</div>
-              <div style={styles.statValue}>{weeklyHealthScore.overtimeStaff}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Expired Training</div>
-              <div style={styles.statValue}>{weeklyHealthScore.expTrainingCount}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Visible Clients</div>
-              <div style={styles.statValue}>{weeklyHealthScore.totalVisibleClients}</div>
-            </div>
           </div>
         </div>
 
@@ -1582,493 +1477,475 @@ export default function Page() {
           </div>
         </div>
 
-        {tab === "schedule" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <div style={styles.rowBetween}>
-              <h3 style={{ margin: 0 }}>Add Shift</h3>
-              <button style={styles.btn2} onClick={() => setBuilderOpen(true)}>
-                24-Hour Builder
-              </button>
+              {/* ================= Schedule ================= */}
+{tab === "schedule" && (
+  <div style={{ marginTop: 12, ...styles.card }}>
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 10,
+        flexWrap: "wrap",
+        alignItems: "center",
+      }}
+    >
+      <h3 style={{ margin: 0 }}>Add Shift</h3>
+
+      <button style={styles.btn2} onClick={() => setBuilderOpen(true)}>
+        24-Hour Builder
+      </button>
+    </div>
+
+    <div style={{ marginTop: 10, ...styles.grid4 }}>
+      <div>
+        <div style={styles.tiny}>Client</div>
+        <select
+          style={styles.select}
+          value={shiftDraft.clientId}
+          onChange={(e) =>
+            setShiftDraft((p) => ({ ...p, clientId: e.target.value }))
+          }
+        >
+          <option value="">Select…</option>
+          {visibleClients.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div>
+        <div style={styles.tiny}>Staff</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select
+            style={styles.select}
+            value={shiftDraft.staffId}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, staffId: e.target.value }))
+            }
+          >
+            <option value="">Select…</option>
+            {suggestedStaff ? (
+              <option value={suggestedStaff.id}>
+                ⭐ Suggested: {suggestedStaff.name}
+              </option>
+            ) : null}
+            {(state.staff || []).filter((s) => !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          {suggestedStaff && shiftDraft.staffId !== suggestedStaff.id ? (
+            <button
+              style={{ ...styles.btn2, padding: "2px 8px", fontSize: 13 }}
+              type="button"
+              onClick={() => setShiftDraft((p) => ({ ...p, staffId: suggestedStaff.id }))}
+            >
+              Suggest
+            </button>
+          ) : null}
+        </div>
+        {suggestedStaff ? (
+          <div style={{ fontSize: 12, color: "#4cc9f0", marginTop: 2 }}>
+            Best match: {suggestedStaff.name} (no conflict, lowest OT)
+          </div>
+        ) : null}
+      </div>
+
+      <div>
+        <div style={styles.tiny}>Start</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            style={styles.input}
+            type="date"
+            value={shiftDraft.startDate}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, startDate: e.target.value }))
+            }
+          />
+          <input
+            style={styles.input}
+            type="time"
+            value={shiftDraft.startTime}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, startTime: e.target.value }))
+            }
+          />
+        </div>
+      </div>
+
+      <div>
+        <div style={styles.tiny}>End</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            style={styles.input}
+            type="date"
+            value={shiftDraft.endDate}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, endDate: e.target.value }))
+            }
+          />
+          <input
+            style={styles.input}
+            type="time"
+            value={shiftDraft.endTime}
+            onChange={(e) =>
+              setShiftDraft((p) => ({ ...p, endTime: e.target.value }))
+            }
+          />
+        </div>
+        <div style={styles.tiny}>
+          Auto bump end date if end time is earlier than start.
+        </div>
+      </div>
+    </div>
+
+    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+      <button style={styles.btn} onClick={addShift}>
+        Add Shift
+      </button>
+    </div>
+
+    {builderOpen ? (
+      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.6)" }} className="no-print">
+        <div style={{ width: 720, maxWidth: "95%", ...styles.card }}>
+          <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
+          <div style={{ display: "grid", gap: 8 }}>
+            <div>
+              <div style={styles.tiny}>Client</div>
+              <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
+                <option value="">Select…</option>
+                {(state.clients || []).map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
             </div>
 
-            <div style={{ marginTop: 10, ...styles.grid4 }}>
+            <div>
+              <div style={styles.tiny}>Schedule source</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="template"
+                    checked={builderScheduleSource === "template"}
+                    onChange={() => setBuilderScheduleSource("template")}
+                  />
+                  Template
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="client"
+                    checked={builderScheduleSource === "client"}
+                    onChange={() => setBuilderScheduleSource("client")}
+                    disabled={!builderClientId || !clientSchedule?.shifts?.length}
+                  />
+                  Client saved
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderScheduleSource"
+                    value="custom"
+                    checked={builderScheduleSource === "custom"}
+                    onChange={() => setBuilderScheduleSource("custom")}
+                  />
+                  Custom
+                </label>
+              </div>
+              {builderScheduleSource === "client" ? (
+                <div style={styles.tiny}>
+                  {clientSchedule?.shifts?.length
+                    ? `Loaded saved schedule (${clientSchedule.shifts.length} shifts).`
+                    : "No saved schedule for this client yet."}
+                </div>
+              ) : null}
+            </div>
+
+            {builderScheduleSource === "template" ? (
               <div>
-                <div style={styles.tiny}>Client</div>
-                <select
-                  style={styles.select}
-                  value={shiftDraft.clientId}
-                  onChange={(e) => setShiftDraft((p) => ({ ...p, clientId: e.target.value }))}
-                >
-                  <option value="">Select…</option>
-                  {visibleClients.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
+                <div style={styles.tiny}>Template</div>
+                <select style={styles.select} value={builderTemplate} onChange={(e) => setBuilderTemplate(e.target.value)}>
+                  <option value="2x12">2 × 12-hour</option>
+                  <option value="3x8">3 × 8-hour</option>
                 </select>
               </div>
+            ) : null}
 
+            {builderScheduleSource === "custom" ? (
               <div>
-                <div style={styles.tiny}>Staff</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <select
-                    style={styles.select}
-                    value={shiftDraft.staffId}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, staffId: e.target.value }))}
-                  >
-                    <option value="">Select…</option>
-                    {suggestedStaff ? (
-                      <option value={suggestedStaff.id}>⭐ Suggested: {suggestedStaff.name}</option>
-                    ) : null}
-                    {getAllowedVisibleStaff()
-                      .filter((s) => !suggestedStaff || s.id !== suggestedStaff.id)
-                      .map((s) => (
+                <div style={styles.tiny}>Custom schedule (one per line, e.g. 07:00-15:00)</div>
+                <textarea
+                  style={{ ...styles.input, height: 120, fontFamily: "inherit", resize: "vertical" }}
+                  value={builderCustomTemplate}
+                  onChange={(e) => setBuilderCustomTemplate(e.target.value)}
+                />
+              </div>
+            ) : null}
+
+            <div>
+              <div style={styles.tiny}>Generate horizon</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderWeeks"
+                    value={1}
+                    checked={builderWeeks === 1}
+                    onChange={() => setBuilderWeeks(1)}
+                  />
+                  1 week
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderWeeks"
+                    value={4}
+                    checked={builderWeeks === 4}
+                    onChange={() => setBuilderWeeks(4)}
+                  />
+                  4 weeks
+                </label>
+              </div>
+              <div style={{ marginTop: 8, ...styles.tiny }}>Repeat interval</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={1}
+                    checked={builderRepeatInterval === 1}
+                    onChange={() => setBuilderRepeatInterval(1)}
+                  />
+                  Every week
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={2}
+                    checked={builderRepeatInterval === 2}
+                    onChange={() => setBuilderRepeatInterval(2)}
+                  />
+                  Every 2 weeks
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="radio"
+                    name="builderRepeatInterval"
+                    value={4}
+                    checked={builderRepeatInterval === 4}
+                    onChange={() => setBuilderRepeatInterval(4)}
+                  />
+                  Every 4 weeks
+                </label>
+              </div>
+              <div style={styles.tiny}>For example: select 4 weeks + every 2 weeks to schedule Week 1 + Week 3.</div>
+            </div>
+
+            <div>
+              <div style={styles.tiny}>Weekly staff assignment</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(60px, 1fr))", gap: 6 }}>
+                {WEEKDAY_NAMES.map((day, idx) => (
+                  <div key={day} style={{ display: "flex", flexDirection: "column" }}>
+                    <div style={{ fontSize: 11, opacity: 0.7 }}>{day}</div>
+                    <select
+                      style={styles.select}
+                      value={builderWeeklyAssignments[idx] || ""}
+                      onChange={(e) =>
+                        setBuilderWeeklyAssignments((p) => ({
+                          ...p,
+                          [idx]: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">—</option>
+                      {(state.staff || []).map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.name}
                         </option>
                       ))}
-                  </select>
-                  {suggestedStaff && (
-                    <button
-                      style={{ ...styles.btn2, padding: "2px 8px", fontSize: 13 }}
-                      onClick={() => setShiftDraft((p) => ({ ...p, staffId: suggestedStaff.id }))}
-                    >
-                      Suggest
-                    </button>
-                  )}
-                </div>
+                    </select>
+                  </div>
+                ))}
               </div>
-
-              <div>
-                <div style={styles.tiny}>Start</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    style={styles.input}
-                    type="date"
-                    value={shiftDraft.startDate}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, startDate: e.target.value }))}
-                  />
-                  <input
-                    style={styles.input}
-                    type="time"
-                    value={shiftDraft.startTime}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, startTime: e.target.value }))}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <div style={styles.tiny}>End</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    style={styles.input}
-                    type="date"
-                    value={shiftDraft.endDate}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, endDate: e.target.value }))}
-                  />
-                  <input
-                    style={styles.input}
-                    type="time"
-                    value={shiftDraft.endTime}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, endTime: e.target.value }))}
-                  />
-                </div>
-              </div>
+              <div style={styles.tiny}>Optionally force a specific staff for each day (e.g., Cory on Fridays).</div>
             </div>
 
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
-              <label style={styles.checkboxRow}>
-                <input
-                  type="checkbox"
-                  checked={!!shiftDraft.isShared}
-                  onChange={(e) => setShiftDraft((p) => ({ ...p, isShared: e.target.checked }))}
-                />
-                Shared support
-              </label>
-
-              {shiftDraft.isShared ? (
-                <div>
-                  <div style={styles.tiny}>Shared Client 2</div>
-                  <select
-                    style={styles.select}
-                    value={shiftDraft.clientId2}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, clientId2: e.target.value }))}
-                  >
-                    <option value="">Select…</option>
-                    {visibleClients
-                      .filter((c) => c.id !== shiftDraft.clientId)
-                      .map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              ) : (
-                <div />
-              )}
-
-              <div>
-                <div style={styles.tiny}>Shared Group ID</div>
-                <input
-                  style={styles.input}
-                  value={shiftDraft.sharedGroupId}
-                  onChange={(e) => setShiftDraft((p) => ({ ...p, sharedGroupId: e.target.value }))}
-                  placeholder="Optional"
-                />
-              </div>
-
-              <label style={styles.checkboxRow}>
-                <input
-                  type="checkbox"
-                  checked={!!shiftDraft.overtimeApproved}
-                  onChange={(e) => setShiftDraft((p) => ({ ...p, overtimeApproved: e.target.checked }))}
-                  disabled={!state.settings.allowOvertimeOverride}
-                />
-                Overtime approval for this shift
-              </label>
-            </div>
-
-            {shiftDraft.staffId ? (() => {
-              const st = state.staff.find((s) => s.id === shiftDraft.staffId);
-              if (!st) return null;
-              const training = getTrainingStatus(st);
-              const currentMin = staffWeekMinutesMap[st.id] || 0;
-              const proposedMin =
-                currentMin +
-                minutesBetweenISO(
-                  toISO(shiftDraft.startDate, shiftDraft.startTime),
-                  toISO(shiftDraft.endDate, shiftDraft.endTime)
-                );
-              return (
-                <div style={{ marginTop: 12, ...styles.card }}>
-                  <div style={{ fontWeight: 900 }}>{st.name} Weekly Summary</div>
-                  <div style={styles.tiny}>
-                    Current week hours: <b>{fmtHoursFromMin(currentMin)}</b> • After this shift:{" "}
-                    <b>{fmtHoursFromMin(proposedMin)}</b>
-                  </div>
-                  <div style={styles.tiny}>
-                    Availability:{" "}
-                    <b>
-                      {(st.availability?.days || []).map((d) => WEEKDAY_NAMES[d]).join(", ") || "All days"} |{" "}
-                      {st.availability?.start || "00:00"} - {st.availability?.end || "23:59"}
-                    </b>
-                  </div>
-                  {training.expired.length > 0 ? (
-                    <div style={styles.warn}>Expired: {training.expired.map((x) => x.label).join(", ")}</div>
-                  ) : null}
-                  {training.dueSoon.length > 0 ? (
-                    <div style={{ ...styles.tiny, color: "#f59e0b", marginTop: 4 }}>
-                      Due soon: {training.dueSoon.map((x) => `${x.label} (${x.value})`).join(", ")}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })() : null}
-
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
-              <button style={styles.btn} onClick={addShift}>
-                Add Shift
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                style={styles.btn2}
+                onClick={() => setBuilderOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                style={styles.btn2}
+                onClick={() => {
+                  if (!builderClientId) return;
+                  try {
+                    let shifts = [];
+                    if (builderScheduleSource === "template") {
+                      shifts = builderTemplate === "2x12"
+                        ? [
+                            { start: "07:00", end: "19:00" },
+                            { start: "19:00", end: "07:00" },
+                          ]
+                        : [
+                            { start: "07:00", end: "15:00" },
+                            { start: "15:00", end: "23:00" },
+                            { start: "23:00", end: "07:00" },
+                          ];
+                    } else if (builderScheduleSource === "custom") {
+                      shifts = parseShiftPattern(builderCustomTemplate);
+                    } else if (builderScheduleSource === "client") {
+                      shifts = clientSchedule?.shifts || [];
+                    }
+                    if (!shifts.length) return alert("No shifts to save.");
+                    saveClientSchedule(builderClientId, shifts);
+                    alert("Saved schedule for this client.");
+                  } catch (e) {
+                    alert(e.message || "Invalid schedule format.");
+                  }
+                }}
+              >
+                Save template
+              </button>
+              <button style={styles.btn} onClick={runBuilder}>
+                Generate
               </button>
             </div>
-
-            {builderOpen ? (
-              <div style={styles.modalWrap} className="no-print">
-                <div style={{ width: 720, maxWidth: "95%", ...styles.card }}>
-                  <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
-                  <div style={{ display: "grid", gap: 10 }}>
-                    <div>
-                      <div style={styles.tiny}>Client</div>
-                      <select
-                        style={styles.select}
-                        value={builderClientId}
-                        onChange={(e) => setBuilderClientId(e.target.value)}
-                      >
-                        <option value="">Select…</option>
-                        {state.clients.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <div style={styles.tiny}>Schedule source</div>
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <label style={styles.checkboxRow}>
-                          <input
-                            type="radio"
-                            name="builderSource"
-                            value="template"
-                            checked={builderScheduleSource === "template"}
-                            onChange={() => setBuilderScheduleSource("template")}
-                          />
-                          Template
-                        </label>
-                        <label style={styles.checkboxRow}>
-                          <input
-                            type="radio"
-                            name="builderSource"
-                            value="client"
-                            checked={builderScheduleSource === "client"}
-                            onChange={() => setBuilderScheduleSource("client")}
-                          />
-                          Client saved
-                        </label>
-                        <label style={styles.checkboxRow}>
-                          <input
-                            type="radio"
-                            name="builderSource"
-                            value="custom"
-                            checked={builderScheduleSource === "custom"}
-                            onChange={() => setBuilderScheduleSource("custom")}
-                          />
-                          Custom
-                        </label>
-                      </div>
-                    </div>
-
-                    {builderScheduleSource === "template" ? (
-                      <div>
-                        <div style={styles.tiny}>Template</div>
-                        <select
-                          style={styles.select}
-                          value={builderTemplate}
-                          onChange={(e) => setBuilderTemplate(e.target.value)}
-                        >
-                          <option value="2x12">2 × 12-hour</option>
-                          <option value="2x8">2 × 8-hour</option>
-                        </select>
-                      </div>
-                    ) : null}
-
-                    {builderScheduleSource === "custom" ? (
-                      <div>
-                        <div style={styles.tiny}>Custom schedule</div>
-                        <textarea
-                          style={{ ...styles.input, height: 120, resize: "vertical" }}
-                          value={builderCustomTemplate}
-                          onChange={(e) => setBuilderCustomTemplate(e.target.value)}
-                        />
-                      </div>
-                    ) : null}
-
-                    <div>
-                      <div style={styles.tiny}>Generate weeks</div>
-                      <select
-                        style={styles.select}
-                        value={builderWeeks}
-                        onChange={(e) => setBuilderWeeks(Number(e.target.value))}
-                      >
-                        <option value={1}>1 week</option>
-                        <option value={2}>2 weeks</option>
-                        <option value={4}>4 weeks</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <div style={styles.tiny}>Weekly staff assignment (optional)</div>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
-                        {WEEKDAY_NAMES.map((day, idx) => (
-                          <div key={day}>
-                            <div style={{ fontSize: 11, opacity: 0.7 }}>{day}</div>
-                            <select
-                              style={styles.select}
-                              value={builderWeeklyAssignments[idx] || ""}
-                              onChange={(e) =>
-                                setBuilderWeeklyAssignments((p) => ({
-                                  ...p,
-                                  [idx]: e.target.value,
-                                }))
-                              }
-                            >
-                              <option value="">—</option>
-                              {state.staff.map((s) => (
-                                <option key={s.id} value={s.id}>
-                                  {s.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                      <button style={styles.btn2} onClick={() => setBuilderOpen(false)}>
-                        Cancel
-                      </button>
-                      <button
-                        style={styles.btn2}
-                        onClick={() => {
-                          if (!builderClientId) return alert("Choose a client first.");
-                          try {
-                            let shifts = [];
-                            if (builderScheduleSource === "template") {
-                              shifts =
-                                builderTemplate === "2x12"
-                                  ? [
-                                      { start: "07:00", end: "19:00" },
-                                      { start: "19:00", end: "07:00" },
-                                    ]
-                                  : [
-                                      { start: "07:00", end: "15:00" },
-                                      { start: "15:00", end: "23:00" },
-                                    ];
-                            } else if (builderScheduleSource === "custom") {
-                              shifts = parseShiftPattern(builderCustomTemplate);
-                            } else {
-                              shifts = loadClientSchedule(builderClientId)?.shifts || [];
-                            }
-                            if (!shifts.length) return alert("No shifts to save.");
-                            saveClientSchedule(builderClientId, shifts);
-                            alert("Saved schedule template.");
-                          } catch (e) {
-                            alert(e.message || "Invalid schedule format.");
-                          }
-                        }}
-                      >
-                        Save Template
-                      </button>
-                      <button style={styles.btn} onClick={runBuilder}>
-                        Generate
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ) : null}
           </div>
-        )}
-
+        </div>
+      </div>
+    ) : null}
+  </div>
+)}
+        {/* ================= Calendar ================= */}
         {tab === "calendar" && (
           <CalendarWeek
             state={state}
             weekStartDate={weekStartDate}
             visibleClients={visibleClients}
-            canSeeAllShifts={isAdmin}
+            canSeeAllShifts={canSeeAllShifts}
             setTab={setTab}
             setShiftDraft={setShiftDraft}
             deleteShift={deleteShift}
           />
         )}
 
-        {tab === "dailyPrint" && (
+        {tab === "month" && (
+          <CalendarMonth
+            state={state}
+            monthStartDate={monthStartDate}
+            visibleClients={visibleClients}
+            canSeeAllShifts={canSeeAllShifts}
+          />
+        )}
+
+        {/* ================= Staff Schedule ================= */}
+        {tab === "staffSchedule" && (
           <div style={{ marginTop: 12, ...styles.card }}>
-            <div style={styles.rowBetween}>
-              <div>
-                <h3 style={{ margin: 0 }}>Daily Schedule Printout</h3>
-                <div style={styles.tiny}>Print-friendly daily staffing list</div>
-              </div>
-              <button style={styles.btn2} onClick={() => window.print()}>
-                Print / Save PDF
-              </button>
-            </div>
+            <h3 style={{ marginTop: 0 }}>Staff Schedule</h3>
+            <div style={styles.tiny}>Shows upcoming shifts for each staff member in the selected week.</div>
 
-            <div className="no-print" style={{ marginTop: 12, maxWidth: 220 }}>
-              <div style={styles.tiny}>Date</div>
-              <input
-                style={styles.input}
-                type="date"
-                value={dailyPrintDate}
-                onChange={(e) => setDailyPrintDate(e.target.value)}
-              />
-            </div>
-
-            <div style={{ marginTop: 14, overflowX: "auto" }}>
+            <div style={{ marginTop: 10, overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
-                    <th style={styles.th}>Client</th>
                     <th style={styles.th}>Staff</th>
-                    <th style={styles.th}>Start</th>
-                    <th style={styles.th}>End</th>
-                    <th style={styles.th}>Shared</th>
-                    <th style={styles.th}>OT Override</th>
+                    <th style={styles.th}>Shift</th>
+                    <th style={styles.th}>Client</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {dailyPrintRows.length === 0 ? (
-                    <tr>
-                      <td style={styles.td} colSpan={6}>
-                        No shifts for {dailyPrintDate}
-                      </td>
-                    </tr>
-                  ) : (
-                    dailyPrintRows.map((sh) => {
-                      const client = state.clients.find((c) => c.id === sh.clientId);
-                      const staff = state.staff.find((s) => s.id === sh.staffId);
+                  {(state.staff || []).map((st) => {
+                    const shifts = shiftsInSelectedWeek
+                      .filter((sh) => sh.staffId === st.id)
+                      .filter((sh) => (canSeeAllShifts ? true : visibleClients.some((c) => c.id === sh.clientId)))
+                      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+
+                    if (!shifts.length) {
                       return (
-                        <tr key={sh.id}>
-                          <td style={styles.td}>{client?.name || "Unknown"}</td>
-                          <td style={styles.td}>{staff?.name || "Unknown"}</td>
-                          <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
-                          <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
-                          <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
-                          <td style={styles.td}>{sh.overtimeApproved ? "Approved" : ""}</td>
+                        <tr key={st.id}>
+                          <td style={styles.td}><b>{st.name}</b></td>
+                          <td style={{ ...styles.td, opacity: 0.7 }} colSpan={2}>
+                            No shifts this week
+                          </td>
                         </tr>
                       );
-                    })
-                  )}
+                    }
+
+                    return shifts.map((sh, idx) => {
+                      const client = state.clients.find((c) => c.id === sh.clientId);
+                      return (
+                        <tr key={`${st.id}_${sh.id}`}>
+                          {idx === 0 ? (
+                            <td style={styles.td} rowSpan={shifts.length}>
+                              <b>{st.name}</b>
+                            </td>
+                          ) : null}
+                          <td style={styles.td}>
+                            {sh.startISO.slice(0, 16).replace("T", " ")} → {sh.endISO.slice(0, 16).replace("T", " ")}
+                          </td>
+                          <td style={styles.td}>{client?.name || "(unknown)"}</td>
+                        </tr>
+                      );
+                    });
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
         )}
 
+        {/* ================= Coverage Gaps ================= */}
         {tab === "gaps" && (
           <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Coverage Gaps</h3>
+            <h3 style={{ marginTop: 0 }}>Coverage Gaps (visible clients)</h3>
+            <div style={styles.tiny}>
+              Based on coverage window (default 7:00a–11:00p). 24-hour clients use 00:00–24:00.
+            </div>
+            <div style={styles.hr} />
+
             {coverageGaps.length === 0 ? (
-              <div style={styles.tiny}>No gaps detected for this week.</div>
+              <div style={styles.tiny}>No gaps detected for the selected week.</div>
             ) : (
               <div style={{ display: "grid", gap: 10 }}>
-                {coverageGaps.map((g, idx) => {
-                  const c = state.clients.find((x) => x.id === g.clientId);
+                {coverageGaps.slice(0, 300).map((g, idx) => {
+                  const c = (state.clients || []).find((x) => x.id === g.clientId);
                   return (
                     <div key={`${g.clientId}_${idx}`} style={styles.shift}>
                       <div style={styles.shiftTitle}>{c?.name || "Unknown Client"}</div>
                       <div style={styles.shiftMeta}>
                         {g.startISO.slice(0, 16).replace("T", " ")} → {g.endISO.slice(0, 16).replace("T", " ")}
                       </div>
-                      <div style={{ marginTop: 8 }}>
-                        <button
-                          style={styles.btn2}
-                          onClick={() => {
-                            setEmergencyFillDraft({
-                              clientId: g.clientId,
-                              date: g.startISO.slice(0, 10),
-                              startTime: g.startISO.slice(11, 16),
-                              endTime: g.endISO.slice(11, 16),
-                              isShared: false,
-                            });
-                            setTab("emergencyFill");
-                          }}
-                        >
-                          Find Replacement Staff
-                        </button>
-                      </div>
                     </div>
                   );
                 })}
+                {coverageGaps.length > 300 && <div style={styles.warn}>Showing first 300 gaps.</div>}
               </div>
             )}
           </div>
         )}
 
+        {/* ================= Hours & OT ================= */}
         {tab === "hours" && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Hours & Overtime</h3>
+            <div style={styles.tiny}>Shared Support counts once for staff OT, but counts for each client.</div>
 
-            <div style={{ ...styles.card, marginBottom: 12 }}>
-              <div style={{ fontWeight: 900 }}>Weekly Summary</div>
-              <div style={styles.tiny}>
-                Staff over 40 hours:{" "}
-                <b>{(state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > OT_THRESHOLD_MIN).length}</b>
-                {" "}• Coverage gaps: <b>{coverageGaps.length}</b>
+            {(currentUser?.role === "supervisor" || isAdmin) &&
+            (state.staff || []).some((st) => (staffWeekMinutesMap[st.id] || 0) >= OT_THRESHOLD_MIN) ? (
+              <div style={styles.warn}>
+                ⚠️ One or more staff have reached 40 hours this week. Review assignments or adjust shifts.
               </div>
-            </div>
+            ) : null}
 
             <div style={{ marginTop: 10, overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -2077,30 +1954,17 @@ export default function Page() {
                     <th style={styles.th}>Staff</th>
                     <th style={styles.th}>Week Hours</th>
                     <th style={styles.th}>OT Hours</th>
-                    <th style={styles.th}>OT Allowed</th>
-                    <th style={styles.th}>Training Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {state.staff.map((st) => {
+                  {(state.staff || []).map((st) => {
                     const min = staffWeekMinutesMap[st.id] || 0;
                     const otMin = Math.max(0, min - OT_THRESHOLD_MIN);
-                    const training = getTrainingStatus(st);
                     return (
                       <tr key={st.id}>
                         <td style={styles.td}><b>{st.name}</b></td>
                         <td style={styles.td}>{fmtHoursFromMin(min)}</td>
-                        <td style={{ ...styles.td, color: otMin > 0 ? "#ff8b8b" : "inherit" }}>
-                          {fmtHoursFromMin(otMin)}
-                        </td>
-                        <td style={styles.td}>{st.canOvertime ? "Yes" : "No"}</td>
-                        <td style={styles.td}>
-                          {training.expired.length
-                            ? `Expired: ${training.expired.map((x) => x.label).join(", ")}`
-                            : training.dueSoon.length
-                            ? `Due soon: ${training.dueSoon.map((x) => x.label).join(", ")}`
-                            : "OK"}
-                        </td>
+                        <td style={styles.td}>{fmtHoursFromMin(otMin)}</td>
                       </tr>
                     );
                   })}
@@ -2109,8 +1973,12 @@ export default function Page() {
             </div>
 
             <div style={{ marginTop: 16, ...styles.card }}>
-              <h3 style={{ marginTop: 0 }}>Client Weekly Hours</h3>
-              <div style={{ overflowX: "auto" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                <h3 style={{ margin: 0 }}>Client Weekly Hours</h3>
+                <div style={styles.tiny}>Day: 7:00a–11:00p • Night: 11:00p–7:00a</div>
+              </div>
+
+              <div style={{ marginTop: 10, overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>
@@ -2123,14 +1991,27 @@ export default function Page() {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleClients.map((c) => {
+                    {(visibleClients || []).map((c) => {
                       const h = weekClientHours[c.id] || { totalMin: 0, dayMin: 0, nightMin: 0 };
                       const allottedMin = (Number(c.weeklyHours) || 0) * 60;
                       const remainingMin = allottedMin - h.totalMin;
                       return (
                         <tr key={c.id}>
                           <td style={styles.td}><b>{c.name}</b></td>
-                          <td style={styles.td}>{fmtHoursFromMin(allottedMin)}</td>
+                          <td style={styles.td}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <div style={{ fontSize: 12, opacity: 0.8 }}>{fmtHoursFromMin(allottedMin)}</div>
+                              <div style={{ height: 8, width: 120, background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
+                                <div
+                                  style={{
+                                    height: "100%",
+                                    width: `${Math.min(100, allottedMin ? Math.round((h.totalMin / allottedMin) * 100) : 0)}%`,
+                                    background: remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </td>
                           <td style={styles.td}>{fmtHoursFromMin(h.totalMin)}</td>
                           <td style={{ ...styles.td, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
                             {fmtHoursFromMin(remainingMin)}
@@ -2147,365 +2028,216 @@ export default function Page() {
           </div>
         )}
 
-        {tab === "emergencyFill" && (
+        {/* ================= Client Profiles ================= */}
+        {tab === "clientProfiles" && (
           <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Call-In / Emergency Fill System</h3>
-
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
-              <div>
-                <div style={styles.tiny}>Client</div>
-                <select
-                  style={styles.select}
-                  value={emergencyFillDraft.clientId}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, clientId: e.target.value }))}
-                >
-                  <option value="">Select…</option>
-                  {visibleClients.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <div style={styles.tiny}>Date</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={emergencyFillDraft.date}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, date: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <div style={styles.tiny}>Start</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={emergencyFillDraft.startTime}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, startTime: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <div style={styles.tiny}>End</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={emergencyFillDraft.endTime}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, endTime: e.target.value }))}
-                />
-              </div>
+            <h3 style={{ marginTop: 0 }}>Client Profiles</h3>
+            <div style={{ marginBottom: 16 }}>
+              <div style={styles.tiny}>Select a client to view their profile:</div>
+              <select
+                style={{ ...styles.select, maxWidth: 320, marginTop: 6 }}
+                value={selectedClientId}
+                onChange={(e) => setSelectedClientId(e.target.value)}
+              >
+                <option value="">Select...</option>
+                {allClients.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
             </div>
 
-            <div style={{ marginTop: 14, overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Staff</th>
-                    <th style={styles.th}>Status</th>
-                    <th style={styles.th}>Week Hours</th>
-                    <th style={styles.th}>After Fill</th>
-                    <th style={styles.th}>Notes</th>
-                    <th style={styles.th}>Use</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {emergencyFillSuggestions.map((row) => (
-                    <tr key={row.staff.id}>
-                      <td style={styles.td}><b>{row.staff.name}</b></td>
-                      <td style={styles.td}>
-                        {row.conflict
-                          ? "Conflict"
-                          : !row.available
-                          ? "Unavailable"
-                          : row.trainingBlock
-                          ? "Training Block"
-                          : row.otMin > 0
-                          ? "OT Risk"
-                          : "Best Fit"}
-                      </td>
-                      <td style={styles.td}>{fmtHoursFromMin(row.currentMin)}</td>
-                      <td style={styles.td}>{fmtHoursFromMin(row.afterMin)}</td>
-                      <td style={styles.td}>
-                        {row.conflict
-                          ? "Already scheduled"
-                          : !row.available
-                          ? "Outside availability"
-                          : row.trainingBlock
-                          ? row.trainingBlock
-                          : row.otMin > 0
-                          ? `Would add ${fmtHoursFromMin(row.otMin)} OT`
-                          : "No conflict, in availability"}
-                      </td>
-                      <td style={styles.td}>
-                        <button
-                          style={styles.btn2}
-                          onClick={() => {
-                            setTab("schedule");
-                            setShiftDraft((p) => ({
-                              ...p,
-                              clientId: emergencyFillDraft.clientId,
-                              staffId: row.staff.id,
-                              startDate: emergencyFillDraft.date,
-                              startTime: emergencyFillDraft.startTime,
-                              endDate: emergencyFillDraft.date,
-                              endTime: emergencyFillDraft.endTime,
-                              overtimeApproved: row.otMin > 0,
-                            }));
+            {!selectedClient ? (
+              <div style={{ ...styles.tiny, marginTop: 24 }}>Select a client to view profile.</div>
+            ) : (
+              <div style={{ ...styles.card, background: "rgba(255,255,255,0.02)", marginTop: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
+                    <div style={styles.tiny}>
+                      Supervisor: <b>{(state.users || []).find((u) => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
+                      Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
+                      24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
+                    </div>
+                    <div style={styles.tiny}>
+                      Coverage: <b>{selectedClient.coverageStart} - {selectedClient.coverageEnd}</b> &nbsp;|&nbsp;
+                      Weekly Allotment: <b>{Number(selectedClient.weeklyHours) || 0}h</b>
+                    </div>
+                    <div style={styles.tiny}>
+                      Week of: <b>{weekStart}</b>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      style={styles.btn2}
+                      onClick={() => {
+                        setTab("schedule");
+                        setShiftDraft((p) => ({ ...p, clientId: selectedClient.id }));
+                      }}
+                    >
+                      Add Shift for This Client
+                    </button>
+                    <button
+                      style={styles.btn2}
+                      onClick={() => {
+                        setTab("schedule");
+                        setBuilderClientId(selectedClient.id);
+                        setBuilderOpen(true);
+                      }}
+                    >
+                      Open 24-Hour Builder
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 18, marginBottom: 10 }}>
+                  <div style={styles.tiny}>Weekly Hours Summary</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
+                        <div
+                          style={{
+                            height: "100%",
+                            width: `${Math.min(100, selectedClientWeekHours.allottedMin ? Math.round((selectedClientWeekHours.totalMin / selectedClientWeekHours.allottedMin) * 100) : 0)}%`,
+                            background: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
                           }}
-                        >
-                          Use
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                        />
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 13, minWidth: 120 }}>
+                      {fmtHoursFromMin(selectedClientWeekHours.totalMin)} / {fmtHoursFromMin(selectedClientWeekHours.allottedMin)}
+                    </div>
+                    <div style={{ fontSize: 13, color: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
+                      Rem: {fmtHoursFromMin(selectedClientWeekHours.remainingMin)}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+                    Day: {fmtHoursFromMin(selectedClientWeekHours.dayMin)} &nbsp;|&nbsp; Night: {fmtHoursFromMin(selectedClientWeekHours.nightMin)}
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 18 }}>
+                  <h4 style={{ margin: "10px 0 6px 0" }}>Client Schedule</h4>
+                  {selectedClientShifts.length === 0 ? (
+                    <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={styles.th}>Date</th>
+                            <th style={styles.th}>Start</th>
+                            <th style={styles.th}>End</th>
+                            <th style={styles.th}>Staff</th>
+                            <th style={styles.th}>Shared</th>
+                            <th style={styles.th}>Group</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedClientShifts.map((sh) => {
+                            const staff = (state.staff || []).find((s) => s.id === sh.staffId);
+                            return (
+                              <tr key={sh.id}>
+                                <td style={styles.td}>{sh.startISO.slice(0, 10)}</td>
+                                <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
+                                <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
+                                <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
+                                <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
+                                <td style={styles.td}>{sh.sharedGroupId || ""}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ marginTop: 18 }}>
+                  <h4 style={{ margin: "10px 0 6px 0" }}>Assigned Staff</h4>
+                  {selectedClientStaffSummary.length === 0 ? (
+                    <div style={styles.tiny}>No staff assigned this week.</div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={styles.th}>Staff</th>
+                            <th style={styles.th}>Total Hours</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedClientStaffSummary.map(({ staff, min }) => (
+                            <tr key={staff?.id || "unknown"}>
+                              <td style={styles.td}>{staff?.name || "Unknown"}</td>
+                              <td style={styles.td}>{fmtHoursFromMin(min)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
-
-        {tab === "dashboard" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Supervisor Dashboard</h3>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Supervisor</th>
-                    <th style={styles.th}>Clients</th>
-                    <th style={styles.th}>Shifts</th>
-                    <th style={styles.th}>Gaps</th>
-                    <th style={styles.th}>Coverage %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {supervisorDashboard.map((row) => (
-                    <tr key={row.supervisor.id}>
-                      <td style={styles.td}><b>{row.supervisor.name}</b></td>
-                      <td style={styles.td}>{row.clientsCount}</td>
-                      <td style={styles.td}>{row.shiftsCount}</td>
-                      <td style={styles.td}>{row.gapsCount}</td>
-                      <td style={styles.td}>{row.coveragePct}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
+        {/* ================= Staff (Admin) ================= */}
         {tab === "staff" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Staff Availability Profiles</h3>
+            <h3 style={{ marginTop: 0 }}>Staff</h3>
 
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
-              <div>
-                <div style={styles.tiny}>Name</div>
-                <input
-                  style={styles.input}
-                  value={staffDraft.name}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, name: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <div style={styles.tiny}>Availability Start</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={staffDraft.availabilityStart}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, availabilityStart: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <div style={styles.tiny}>Availability End</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={staffDraft.availabilityEnd}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, availabilityEnd: e.target.value }))}
-                />
-              </div>
-
-              <label style={styles.checkboxRow}>
-                <input
-                  type="checkbox"
-                  checked={!!staffDraft.canOvertime}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, canOvertime: e.target.checked }))}
-                />
-                Can work overtime
-              </label>
-            </div>
-
-            <div style={{ marginTop: 10 }}>
-              <div style={styles.tiny}>Available Days</div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
-                {WEEKDAY_NAMES.map((day, idx) => (
-                  <label key={day} style={styles.checkboxRow}>
-                    <input
-                      type="checkbox"
-                      checked={staffDraft.availabilityDays.includes(idx)}
-                      onChange={() =>
-                        setStaffDraft((p) => ({
-                          ...p,
-                          availabilityDays: p.availabilityDays.includes(idx)
-                            ? p.availabilityDays.filter((x) => x !== idx)
-                            : [...p.availabilityDays, idx].sort((a, b) => a - b),
-                        }))
-                      }
-                    />
-                    {day}
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
-              <div>
-                <div style={styles.tiny}>CPR Expiration</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={staffDraft.cprExp}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, cprExp: e.target.value }))}
-                />
-              </div>
-              <div>
-                <div style={styles.tiny}>First Aid Expiration</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={staffDraft.firstAidExp}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, firstAidExp: e.target.value }))}
-                />
-              </div>
-              <div>
-                <div style={styles.tiny}>Med Training Expiration</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={staffDraft.medExp}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, medExp: e.target.value }))}
-                />
-              </div>
-              <div style={{ display: "flex", alignItems: "end", justifyContent: "flex-end" }}>
-                <button style={styles.btn} onClick={saveStaff}>Save Staff</button>
-              </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input style={{ ...styles.input, maxWidth: 360 }} value={staffDraftName} onChange={(e) => setStaffDraftName(e.target.value)} placeholder="Add staff name…" />
+              <button style={styles.btn} onClick={addStaff}>Add Staff</button>
             </div>
 
             <div style={styles.hr} />
 
             <div style={{ display: "grid", gap: 10 }}>
-              {state.staff.map((s) => {
-                const training = getTrainingStatus(s);
-                return (
-                  <div key={s.id} style={styles.shift}>
-                    <div style={styles.shiftTop}>
-                      <div>
-                        <div style={styles.shiftTitle}>{s.name}</div>
-                        <div style={styles.shiftMeta}>
-                          Status: <b>{s.active !== false ? "Active" : "Inactive"}</b>
-                          <br />
-                          Availability: {(s.availability?.days || []).map((d) => WEEKDAY_NAMES[d]).join(", ")} •{" "}
-                          {s.availability?.start || "00:00"} - {s.availability?.end || "23:59"}
-                          <br />
-                          CPR: {s.cprExp || "—"} • First Aid: {s.firstAidExp || "—"} • Med: {s.medExp || "—"}
-                          <br />
-                          OT Permission: <b>{s.canOvertime ? "Yes" : "No"}</b>
-                        </div>
-                        {training.expired.length ? (
-                          <div style={styles.warn}>
-                            Training expired: {training.expired.map((x) => x.label).join(", ")}
-                          </div>
-                        ) : null}
-                      </div>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button
-                          style={styles.btn2}
-                          onClick={() =>
-                            setStaffDraft({
-                              id: s.id,
-                              name: s.name,
-                              active: s.active !== false,
-                              availabilityDays: s.availability?.days || [],
-                              availabilityStart: s.availability?.start || "07:00",
-                              availabilityEnd: s.availability?.end || "23:00",
-                              cprExp: s.cprExp || "",
-                              firstAidExp: s.firstAidExp || "",
-                              medExp: s.medExp || "",
-                              canOvertime: !!s.canOvertime,
-                            })
-                          }
-                        >
-                          Edit
-                        </button>
-                        <button style={styles.btn2} onClick={() => removeStaff(s.id)}>Remove</button>
-                      </div>
+              {(state.staff || []).map((s) => (
+                <div key={s.id} style={styles.shift}>
+                  <div style={styles.shiftTop}>
+                    <div>
+                      <div style={styles.shiftTitle}>{s.name}</div>
+                      <div style={styles.shiftMeta}>Status: <b>{s.active !== false ? "Active" : "Inactive"}</b></div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button style={styles.btn2} onClick={() => toggleStaff(s.id, s.active !== false)}>
+                        {s.active !== false ? "Deactivate" : "Activate"}
+                      </button>
+                      <button style={styles.btn2} onClick={() => removeStaff(s.id)}>Remove</button>
                     </div>
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           </div>
         )}
 
+        {/* ================= Clients (Admin) ================= */}
         {tab === "clients" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Clients</h3>
+            <h3 style={{ marginTop: 0 }}>Clients (Assign supervisor over case)</h3>
 
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
+            <div style={{ marginTop: 10, ...styles.grid4 }}>
               <div>
                 <div style={styles.tiny}>Client name</div>
-                <input
-                  style={styles.input}
-                  value={clientDraft.name}
-                  onChange={(e) => setClientDraft((p) => ({ ...p, name: e.target.value }))}
-                />
+                <input style={styles.input} value={clientDraft.name} onChange={(e) => setClientDraft((p) => ({ ...p, name: e.target.value }))} />
               </div>
+
               <div>
-                <div style={styles.tiny}>Supervisor</div>
-                <select
-                  style={styles.select}
-                  value={clientDraft.supervisorId}
-                  onChange={(e) => setClientDraft((p) => ({ ...p, supervisorId: e.target.value }))}
-                >
+                <div style={styles.tiny}>Supervisor over case</div>
+                <select style={styles.select} value={clientDraft.supervisorId || ""} onChange={(e) => setClientDraft((p) => ({ ...p, supervisorId: e.target.value }))}>
                   <option value="">Unassigned</option>
-                  {state.users
-                    .filter((u) => u.role === "supervisor" || u.role === "admin")
-                    .map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.name} ({u.role})
-                      </option>
-                    ))}
+                  {(state.users || []).filter((u) => u.role === "supervisor" || u.role === "admin").map((u) => (
+                    <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
+                  ))}
                 </select>
               </div>
-              <div>
-                <div style={styles.tiny}>Coverage Start</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={clientDraft.coverageStart}
-                  onChange={(e) => setClientDraft((p) => ({ ...p, coverageStart: e.target.value }))}
-                />
-              </div>
-              <div>
-                <div style={styles.tiny}>Coverage End</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={clientDraft.coverageEnd}
-                  onChange={(e) => setClientDraft((p) => ({ ...p, coverageEnd: e.target.value }))}
-                />
-              </div>
-            </div>
 
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
               <div>
-                <div style={styles.tiny}>Weekly Hours</div>
+                <div style={styles.tiny}>Weekly hours allotted</div>
                 <input
                   style={styles.input}
                   type="number"
@@ -2514,36 +2246,44 @@ export default function Page() {
                   onChange={(e) => setClientDraft((p) => ({ ...p, weeklyHours: Number(e.target.value) }))}
                 />
               </div>
-              <label style={styles.checkboxRow}>
-                <input
-                  type="checkbox"
-                  checked={!!clientDraft.is24Hour}
-                  onChange={(e) => setClientDraft((p) => ({ ...p, is24Hour: e.target.checked }))}
-                />
-                24-hour client
-              </label>
-              <div />
-              <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "end" }}>
-                <button style={styles.btn} onClick={saveClient}>Save Client</button>
+
+              <div>
+                <div style={styles.tiny}>Coverage Start</div>
+                <input style={styles.input} type="time" value={clientDraft.coverageStart || "07:00"} onChange={(e) => setClientDraft((p) => ({ ...p, coverageStart: e.target.value }))} />
+                <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+                  <input type="checkbox" checked={!!clientDraft.is24Hour} onChange={(e) => setClientDraft((p) => ({ ...p, is24Hour: e.target.checked }))} />
+                  24-hour client
+                </label>
               </div>
+
+              <div>
+                <div style={styles.tiny}>Coverage End</div>
+                <input style={styles.input} type="time" value={clientDraft.coverageEnd || "23:00"} onChange={(e) => setClientDraft((p) => ({ ...p, coverageEnd: e.target.value }))} />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+              <button style={styles.btn} onClick={saveClient}>Save Client</button>
             </div>
 
             <div style={styles.hr} />
 
             <div style={{ display: "grid", gap: 10 }}>
-              {state.clients.map((c) => {
-                const sup = state.users.find((u) => u.id === c.supervisorId);
+              {(state.clients || []).map((c) => {
+                const sup = (state.users || []).find((u) => u.id === (c.supervisorId || ""));
                 return (
                   <div key={c.id} style={styles.shift}>
                     <div style={styles.shiftTop}>
                       <div>
-                        <div style={styles.shiftTitle}>{c.name}</div>
+                        <div style={styles.shiftTitle}>
+                          {c.name} {c.is24Hour ? <span style={{ opacity: 0.8 }}>(24h)</span> : null}
+                        </div>
                         <div style={styles.shiftMeta}>
                           Supervisor: <b>{sup ? sup.name : "Unassigned"}</b>
                           <br />
-                          Coverage: {c.coverageStart} → {c.coverageEnd}
+                          Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
                           <br />
-                          Weekly Hours: <b>{c.weeklyHours}</b> {c.is24Hour ? "• 24h" : ""}
+                          Weekly allotment: <b>{Number(c.weeklyHours) || 0}h</b>
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 8 }}>
@@ -2567,9 +2307,10 @@ export default function Page() {
                         <button
                           style={styles.btn2}
                           onClick={() => {
-                            setBuilderClientId(c.id);
-                            setBuilderOpen(true);
                             setTab("schedule");
+                            setBuilderClientId(c.id);
+                            setBuilderScheduleSource("client");
+                            setBuilderOpen(true);
                           }}
                         >
                           Schedule
@@ -2584,61 +2325,46 @@ export default function Page() {
           </div>
         )}
 
+        {/* ================= Users (Admin) ================= */}
         {tab === "users" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Users</h3>
 
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
+            <div style={{ marginTop: 10, ...styles.grid4 }}>
               <div>
-                <div style={styles.tiny}>User ID</div>
-                <input
-                  style={styles.input}
-                  value={userDraft.id}
-                  onChange={(e) => setUserDraft((p) => ({ ...p, id: e.target.value }))}
-                />
+                <div style={styles.tiny}>User ID (unique)</div>
+                <input style={styles.input} value={userDraft.id} onChange={(e) => setUserDraft((p) => ({ ...p, id: e.target.value }))} />
               </div>
               <div>
                 <div style={styles.tiny}>Name</div>
-                <input
-                  style={styles.input}
-                  value={userDraft.name}
-                  onChange={(e) => setUserDraft((p) => ({ ...p, name: e.target.value }))}
-                />
+                <input style={styles.input} value={userDraft.name} onChange={(e) => setUserDraft((p) => ({ ...p, name: e.target.value }))} />
               </div>
               <div>
                 <div style={styles.tiny}>Role</div>
-                <select
-                  style={styles.select}
-                  value={userDraft.role}
-                  onChange={(e) => setUserDraft((p) => ({ ...p, role: e.target.value }))}
-                >
+                <select style={styles.select} value={userDraft.role} onChange={(e) => setUserDraft((p) => ({ ...p, role: e.target.value }))}>
                   <option value="supervisor">supervisor</option>
                   <option value="admin">admin</option>
                 </select>
               </div>
               <div>
                 <div style={styles.tiny}>PIN</div>
-                <input
-                  style={styles.input}
-                  value={userDraft.pin}
-                  onChange={(e) => setUserDraft((p) => ({ ...p, pin: e.target.value }))}
-                />
+                <input style={styles.input} value={userDraft.pin} onChange={(e) => setUserDraft((p) => ({ ...p, pin: e.target.value }))} />
               </div>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
               <button style={styles.btn} onClick={saveUser}>Save User</button>
             </div>
 
             <div style={styles.hr} />
 
             <div style={{ display: "grid", gap: 10 }}>
-              {state.users.map((u) => (
+              {(state.users || []).map((u) => (
                 <div key={u.id} style={styles.shift}>
                   <div style={styles.shiftTop}>
                     <div>
                       <div style={styles.shiftTitle}>{u.name}</div>
-                      <div style={styles.shiftMeta}>ID: {u.id} • Role: {u.role}</div>
+                      <div style={styles.shiftMeta}>ID: <b>{u.id}</b> • Role: <b>{u.role}</b></div>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
                       <button style={styles.btn2} onClick={() => setUserDraft({ ...u })}>Edit</button>
@@ -2651,14 +2377,15 @@ export default function Page() {
           </div>
         )}
 
+        {/* ================= Settings (Admin) ================= */}
         {tab === "settings" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Settings</h3>
 
-            <label style={styles.checkboxRow}>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
               <input
                 type="checkbox"
-                checked={!!state.settings.includeUnassignedForSupervisors}
+                checked={!!state.settings?.includeUnassignedForSupervisors}
                 onChange={(e) =>
                   setState((p) => ({
                     ...p,
@@ -2669,10 +2396,10 @@ export default function Page() {
               Supervisors can see unassigned clients
             </label>
 
-            <label style={styles.checkboxRow}>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
               <input
                 type="checkbox"
-                checked={!!state.settings.hardStopConflicts}
+                checked={!!state.settings?.hardStopConflicts}
                 onChange={(e) =>
                   setState((p) => ({
                     ...p,
@@ -2680,49 +2407,7 @@ export default function Page() {
                   }))
                 }
               />
-              Hard-stop shift conflicts
-            </label>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.hardStopOT}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, hardStopOT: e.target.checked },
-                  }))
-                }
-              />
-              Hard-stop over 40 hours
-            </label>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.allowOvertimeOverride}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, allowOvertimeOverride: e.target.checked },
-                  }))
-                }
-              />
-              Allow overtime approval override
-            </label>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.blockExpiredTraining}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, blockExpiredTraining: e.target.checked },
-                  }))
-                }
-              />
-              Block scheduling when training expired
+              Hard-stop conflicts (block overlaps unless same Shared Group block)
             </label>
           </div>
         )}
@@ -2741,17 +2426,6 @@ const styles = {
     borderRadius: 16,
     padding: 14,
     background: "rgba(255,255,255,0.04)",
-  },
-  statCard: {
-    border: "1px solid rgba(255,255,255,0.12)",
-    borderRadius: 14,
-    padding: 12,
-    background: "rgba(255,255,255,0.03)",
-  },
-  statValue: {
-    fontSize: 24,
-    fontWeight: 980,
-    marginTop: 4,
   },
   btn: {
     padding: "10px 12px",
@@ -2789,82 +2463,15 @@ const styles = {
     color: "white",
     outline: "none",
   },
-  grid4: {
-    display: "grid",
-    gridTemplateColumns: "repeat(4, minmax(220px, 1fr))",
-    gap: 10,
-  },
-  twoCol: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 10,
-  },
-  tiny: {
-    fontSize: 12,
-    opacity: 0.8,
-  },
-  shift: {
-    border: "1px solid rgba(255,255,255,0.12)",
-    borderRadius: 14,
-    padding: 10,
-    background: "rgba(255,255,255,0.03)",
-  },
-  shiftTop: {
-    display: "flex",
-    justifyContent: "space-between",
-    gap: 8,
-    alignItems: "flex-start",
-  },
-  shiftTitle: {
-    fontWeight: 950,
-    fontSize: 13,
-    marginBottom: 4,
-  },
-  shiftMeta: {
-    fontSize: 12,
-    opacity: 0.86,
-    lineHeight: 1.35,
-  },
-  hr: {
-    height: 1,
-    background: "rgba(255,255,255,0.10)",
-    margin: "12px 0",
-  },
-  warn: {
-    color: "#f59e0b",
-    fontSize: 13,
-    marginTop: 6,
-  },
-  th: {
-    textAlign: "left",
-    fontSize: 12,
-    opacity: 0.85,
-    padding: "8px 6px",
-    borderBottom: "1px solid rgba(255,255,255,0.10)",
-  },
-  td: {
-    padding: "8px 6px",
-    borderBottom: "1px solid rgba(255,255,255,0.06)",
-    fontSize: 13,
-  },
-  rowBetween: {
-    display: "flex",
-    justifyContent: "space-between",
-    gap: 12,
-    alignItems: "center",
-    flexWrap: "wrap",
-  },
-  checkboxRow: {
-    display: "flex",
-    gap: 8,
-    alignItems: "center",
-  },
-  modalWrap: {
-    position: "fixed",
-    inset: 0,
-    display: "grid",
-    placeItems: "center",
-    background: "rgba(0,0,0,0.6)",
-    zIndex: 50,
-  },
+  grid4: { display: "grid", gridTemplateColumns: "repeat(4, minmax(220px, 1fr))", gap: 10 },
+  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+  tiny: { fontSize: 12, opacity: 0.8 },
+  shift: { border: "1px solid rgba(255,255,255,0.12)", borderRadius: 14, padding: 10, background: "rgba(255,255,255,0.03)" },
+  shiftTop: { display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" },
+  shiftTitle: { fontWeight: 950, fontSize: 13, marginBottom: 4 },
+  shiftMeta: { fontSize: 12, opacity: 0.86, lineHeight: 1.35 },
+  hr: { height: 1, background: "rgba(255,255,255,0.10)", margin: "10px 0" },
+  warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
+  th: { textAlign: "left", fontSize: 12, opacity: 0.85, padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
+  td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
 };
