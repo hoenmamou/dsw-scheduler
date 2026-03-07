@@ -9,12 +9,20 @@ const SUPABASE_CONFIGURED = !!(
 );
 
 let supabaseErrorHandler = null;
+let forceLocalFallback = false;
+
 function setSupabaseErrorHandler(fn) {
   supabaseErrorHandler = fn;
 }
+
 function reportSupabaseError(error) {
+  forceLocalFallback = true;
   console.warn("Supabase request failed; falling back to local storage.", error);
   if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
+}
+
+function canUseSupabase() {
+  return SUPABASE_CONFIGURED && supabase && !forceLocalFallback;
 }
 
 const DAY_START_MIN = 7 * 60;
@@ -163,6 +171,18 @@ function parseJsonSafe(value, fallback) {
     return fallback;
   }
 }
+function normalizeDateInput(value) {
+  if (!value) return "";
+  if (typeof value !== "string") return "";
+  return value.length >= 10 ? value.slice(0, 10) : value;
+}
+function readStaffDate(row, ...keys) {
+  for (const key of keys) {
+    const value = row?.[key];
+    if (value) return normalizeDateInput(value);
+  }
+  return "";
+}
 function todayYMD() {
   return isoLocal(new Date()).slice(0, 10);
 }
@@ -258,11 +278,12 @@ function Tabs({ value, onChange, tabs }) {
 ========================= */
 
 async function sbSelect(table) {
-  if (SUPABASE_CONFIGURED && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from(table).select("*");
     if (!error) return data || [];
     reportSupabaseError(error);
   }
+
   try {
     const raw = localStorage.getItem("dsw_local_db");
     const db = raw ? JSON.parse(raw) : DEFAULT_DB;
@@ -272,11 +293,12 @@ async function sbSelect(table) {
   }
 }
 async function sbUpsert(table, rows) {
-  if (SUPABASE_CONFIGURED && supabase) {
+  if (canUseSupabase()) {
     const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
     if (!error) return;
     reportSupabaseError(error);
   }
+
   try {
     const raw = localStorage.getItem("dsw_local_db");
     const db = raw ? JSON.parse(raw) : { ...DEFAULT_DB };
@@ -292,7 +314,7 @@ async function sbUpsert(table, rows) {
   }
 }
 async function sbDelete(table, id) {
-  if (SUPABASE_CONFIGURED && supabase) {
+  if (canUseSupabase()) {
     const { error } = await supabase.from(table).delete().eq("id", id);
     if (!error) return;
     reportSupabaseError(error);
@@ -366,13 +388,13 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
     })),
     staff: (staff || []).map((s) => ({
       id: s.id,
-      name: s.name,
+      name: s.name || "",
       active: s.active !== false,
       availability: parseJsonSafe(s.availability, makeDefaultAvailability()),
-      cprExp: s.cpr_exp || "",
-      firstAidExp: s.first_aid_exp || "",
-      medExp: s.med_exp || "",
-      canOvertime: !!s.can_overtime,
+      cprExp: readStaffDate(s, "cpr_exp", "cprExp", "cpr_expiration"),
+      firstAidExp: readStaffDate(s, "first_aid_exp", "firstAidExp", "first_aid_expiration"),
+      medExp: readStaffDate(s, "med_exp", "medExp", "med_expiration"),
+      canOvertime: !!(s.can_overtime ?? s.canOvertime),
     })),
     clients: (clients || []).map((c) => ({
       id: c.id,
@@ -389,14 +411,14 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
     })),
     shifts: (shifts || []).map((sh) => ({
       id: sh.id,
-      clientId: sh.client_id,
-      staffId: sh.staff_id,
-      startISO: new Date(sh.start_iso).toISOString(),
-      endISO: new Date(sh.end_iso).toISOString(),
-      createdBy: sh.created_by || "",
-      isShared: !!sh.is_shared,
-      sharedGroupId: sh.shared_group_id || "",
-      overtimeApproved: !!sh.overtime_approved,
+      clientId: sh.client_id || sh.clientId,
+      staffId: sh.staff_id || sh.staffId,
+      startISO: new Date(sh.start_iso || sh.startISO).toISOString(),
+      endISO: new Date(sh.end_iso || sh.endISO).toISOString(),
+      createdBy: sh.created_by || sh.createdBy || "",
+      isShared: !!(sh.is_shared ?? sh.isShared),
+      sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
+      overtimeApproved: !!(sh.overtime_approved ?? sh.overtimeApproved),
     })),
   };
 }
@@ -1409,22 +1431,27 @@ export default function Page() {
 
   async function saveStaff() {
     if (!staffDraft.name.trim()) return alert("Staff name is required.");
+
     const row = {
       id: staffDraft.id || uid("st"),
       name: staffDraft.name.trim(),
       active: staffDraft.active !== false,
       availability: JSON.stringify({
-        days: staffDraft.availabilityDays,
-        start: staffDraft.availabilityStart,
-        end: staffDraft.availabilityEnd,
+        days: Array.isArray(staffDraft.availabilityDays)
+          ? [...staffDraft.availabilityDays].sort((a, b) => a - b)
+          : [1, 2, 3, 4, 5],
+        start: staffDraft.availabilityStart || "07:00",
+        end: staffDraft.availabilityEnd || "23:00",
       }),
-      cpr_exp: staffDraft.cprExp || null,
-      first_aid_exp: staffDraft.firstAidExp || null,
-      med_exp: staffDraft.medExp || null,
+      cpr_exp: normalizeDateInput(staffDraft.cprExp) || null,
+      first_aid_exp: normalizeDateInput(staffDraft.firstAidExp) || null,
+      med_exp: normalizeDateInput(staffDraft.medExp) || null,
       can_overtime: !!staffDraft.canOvertime,
     };
+
     await sbUpsert("staff", [row]);
     await refreshState(setState);
+
     setStaffDraft({
       id: "",
       name: "",
@@ -2429,14 +2456,16 @@ export default function Page() {
                           onClick={() =>
                             setStaffDraft({
                               id: s.id,
-                              name: s.name,
+                              name: s.name || "",
                               active: s.active !== false,
-                              availabilityDays: s.availability?.days || [],
+                              availabilityDays: Array.isArray(s.availability?.days)
+                                ? s.availability.days
+                                : [1, 2, 3, 4, 5],
                               availabilityStart: s.availability?.start || "07:00",
                               availabilityEnd: s.availability?.end || "23:00",
-                              cprExp: s.cprExp || "",
-                              firstAidExp: s.firstAidExp || "",
-                              medExp: s.medExp || "",
+                              cprExp: normalizeDateInput(s.cprExp),
+                              firstAidExp: normalizeDateInput(s.firstAidExp),
+                              medExp: normalizeDateInput(s.medExp),
                               canOvertime: !!s.canOvertime,
                             })
                           }
