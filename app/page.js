@@ -279,7 +279,8 @@ function toClientSnakeCaseRow(row) {
     supervisor_id: row.supervisor_id ?? row.supervisorId ?? null,
     coverage_start: row.coverage_start ?? row.coverageStart ?? "07:00",
     coverage_end: row.coverage_end ?? row.coverageEnd ?? "23:00",
-    weekly_hours: row.weekly_hours ?? row.weeklyHours ?? 40,
+    // Canonical DB column for client weekly hours
+    hours_allotted: row.hours_allotted ?? row.weekly_hours ?? row.weeklyHours ?? 40,
     is_24_hour: row.is_24_hour ?? row.is24Hour ?? false,
     active: row.active !== false,
   };
@@ -292,21 +293,20 @@ function toClientCamelCaseRow(row) {
     supervisorId: row.supervisorId ?? row.supervisor_id ?? null,
     coverageStart: row.coverageStart ?? row.coverage_start ?? "07:00",
     coverageEnd: row.coverageEnd ?? row.coverage_end ?? "23:00",
-    weeklyHours: row.weeklyHours ?? row.weekly_hours ?? 40,
+    weeklyHours: row.weeklyHours ?? row.hours_allotted ?? row.weekly_hours ?? 40,
     is24Hour: row.is24Hour ?? row.is_24_hour ?? false,
     active: row.active !== false,
   };
 }
 
-function toClientLegacyRow(row) {
+function toClientMinimalRow(row) {
   return {
     id: row.id,
     name: row.name,
     supervisor_id: row.supervisor_id ?? row.supervisorId ?? null,
-    "coverage _start": row["coverage _start"] ?? row.coverage_start ?? row.coverageStart ?? "07:00",
+    coverage_start: row.coverage_start ?? row.coverageStart ?? "07:00",
     coverage_end: row.coverage_end ?? row.coverageEnd ?? "23:00",
-    hours_alloted: row.hours_alloted ?? row.weekly_hours ?? row.weeklyHours ?? 40,
-    is_24_hour: row.is_24_hour ?? row.is24Hour ?? false,
+    hours_allotted: row.hours_allotted ?? row.weekly_hours ?? row.weeklyHours ?? 40,
     active: row.active !== false,
   };
 }
@@ -332,10 +332,10 @@ async function sbUpsert(table, rows) {
   if (SUPABASE_CONFIGURED && supabase) {
     let { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
     if (error && table === "clients") {
+      // Retry with progressively simpler payloads for schema variants.
       const clientAttempts = [
         rows.map((row) => toClientSnakeCaseRow(row)),
-        rows.map((row) => toClientCamelCaseRow(row)),
-        rows.map((row) => toClientLegacyRow(row)),
+        rows.map((row) => toClientMinimalRow(row)),
       ];
       for (const attemptRows of clientAttempts) {
         ({ error } = await supabase.from(table).upsert(attemptRows, { onConflict: "id" }));
@@ -389,7 +389,7 @@ const DEFAULT_DB = {
     { id: "st2", name: "Jordan" },
   ],
   clients: [
-    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true, weekly_hours: 40 },
+    { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true, hours_allotted: 40 },
   ],
   shifts: [],
 };
@@ -419,7 +419,11 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       ),
       coverageEnd: normalizeTimeValue(c.coverage_end ?? c.coverageEnd, "23:00"),
       is24Hour: !!(c.is_24_hour ?? c.is24Hour),
-      weeklyHours: typeof c.weekly_hours === "number" ? c.weekly_hours : Number(c.weekly_hours) || 40,
+      // Read canonical hours_allotted first; fall back to legacy weekly_hours if present.
+      weeklyHours:
+        typeof c.hours_allotted === "number"
+          ? c.hours_allotted
+          : Number(c.hours_allotted ?? c.weekly_hours) || 40,
       active: c.active !== false,
     })),
 
@@ -459,7 +463,8 @@ function toDB(state) {
       coverage_start: c.coverageStart || "07:00",
       coverage_end: c.coverageEnd || "23:00",
       is_24_hour: !!c.is24Hour,
-      weekly_hours: Number(c.weeklyHours) || 40,
+      // Canonical DB column for client weekly hours
+      hours_allotted: Number(c.weeklyHours) || 40,
       active: c.active !== false,
     })),
 
@@ -1692,7 +1697,8 @@ export default function Page() {
       supervisor_id: clientDraft.supervisorId || null,
       coverage_start: clientDraft.coverageStart || "07:00",
       coverage_end: clientDraft.coverageEnd || "23:00",
-      weekly_hours: Number(clientDraft.weeklyHours) || 40,
+      // Canonical DB column for client weekly hours
+      hours_allotted: Number(clientDraft.weeklyHours) || 40,
       is_24_hour: !!clientDraft.is24Hour,
       active: clientDraft.active !== false,
     };
@@ -2716,7 +2722,7 @@ export default function Page() {
                               supervisorId: c.supervisorId || "",
                               coverageStart: c.coverageStart || "07:00",
                               coverageEnd: c.coverageEnd || "23:00",
-                              weeklyHours: Number(c.weeklyHours ?? c.weekly_hours) || 40,
+                              weeklyHours: Number(c.weeklyHours ?? c.hours_allotted ?? c.weekly_hours) || 40,
                               is24Hour: !!c.is24Hour,
                               active: c.active !== false,
                             })
