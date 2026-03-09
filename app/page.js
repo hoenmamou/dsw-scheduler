@@ -51,21 +51,71 @@ function isoLocal(date) {
 }
 
 function normalizeDateTimeISO(value) {
-  const d = new Date(value);
+  if (value == null) return null;
+
+  // Keep scheduler wall-clock times as local, timezone-free values.
+  // This avoids UTC offset shifts like 07:00 -> 02:00.
+  const raw = String(value).trim();
+  const isoLike = raw.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (isoLike) {
+    const [, date, hhRaw, mmRaw, ssRaw] = isoLike;
+    const hh = Number(hhRaw);
+    const mm = Number(mmRaw);
+    const ss = Number(ssRaw ?? 0);
+    if (
+      Number.isFinite(hh) && Number.isFinite(mm) && Number.isFinite(ss)
+      && hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59 && ss >= 0 && ss <= 59
+    ) {
+      return `${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    }
+  }
+
+  const d = new Date(raw);
   if (isNaN(d)) return null;
   return isoLocal(d);
 }
 
 function normalizeTimeValue(value, fallback) {
   const raw = String(value ?? "").trim();
-  const match = raw.match(/(\d{1,2}):(\d{2})/);
+  const match = raw.match(/^(\d{1,2}):(\d{2})(?:\s*([AaPp][Mm]))?$/);
   if (!match) return fallback;
   const hour = Number(match[1]);
   const min = Number(match[2]);
-  if (!Number.isFinite(hour) || !Number.isFinite(min)) return fallback;
-  if (hour === 24 && min === 0) return "23:59";
-  if (hour < 0 || hour > 23 || min < 0 || min > 59) return fallback;
-  return `${String(hour).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+  const ampm = (match[3] || "").toUpperCase();
+  if (!Number.isFinite(hour) || !Number.isFinite(min) || min < 0 || min > 59) return fallback;
+
+  let hour24 = hour;
+  if (ampm) {
+    if (hour < 1 || hour > 12) return fallback;
+    hour24 = (hour % 12) + (ampm === "PM" ? 12 : 0);
+  }
+
+  if (!ampm) {
+    if (hour24 === 24 && min === 0) return "23:59";
+    if (hour24 < 0 || hour24 > 23) return fallback;
+  }
+
+  return `${String(hour24).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+function formatTime12(value) {
+  const normalized = normalizeTimeValue(value, null);
+  if (!normalized) return String(value || "");
+  const [hh, mm] = normalized.split(":").map(Number);
+  const suffix = hh >= 12 ? "PM" : "AM";
+  const hour12 = hh % 12 || 12;
+  return `${hour12}:${String(mm).padStart(2, "0")} ${suffix}`;
+}
+
+function formatShiftTimeFromISO(iso) {
+  const m = String(iso || "").match(/T(\d{2}:\d{2})/);
+  return formatTime12(m?.[1] || "");
+}
+
+function formatShiftDateTimeFromISO(iso) {
+  const date = String(iso || "").slice(0, 10);
+  const time = formatShiftTimeFromISO(iso);
+  return `${date} ${time}`.trim();
 }
 
 function addDays(date, n) {
@@ -689,8 +739,8 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
 
   function dayShifts(dateStr) {
-    const dayStart = new Date(`${dateStr}T00:00:00`).toISOString();
-    const dayEnd = new Date(`${dateStr}T23:59:59`).toISOString();
+    const dayStart = `${dateStr}T00:00:00`;
+    const dayEnd = `${dateStr}T23:59:59`;
 
     return shifts
       .filter((sh) => {
@@ -731,7 +781,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
                       <div>
                         <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
                         <div style={styles.shiftMeta}>
-                          {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
+                          {formatShiftTimeFromISO(sh.startISO)} → {formatShiftTimeFromISO(sh.endISO)}
                           <br />
                           Staff: <b>{staffName(sh.staffId)}</b>
                           {sh.isShared ? (
@@ -808,8 +858,8 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
 
   function dayShifts(dateStr) {
-    const dayStart = new Date(`${dateStr}T00:00:00`).toISOString();
-    const dayEnd = new Date(`${dateStr}T23:59:59`).toISOString();
+    const dayStart = `${dateStr}T00:00:00`;
+    const dayEnd = `${dateStr}T23:59:59`;
 
     return shifts
       .filter((sh) => {
@@ -855,7 +905,7 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
                   <div key={sh.id} style={styles.shift}>
                     <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
                     <div style={styles.shiftMeta}>
-                      {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
+                      {formatShiftTimeFromISO(sh.startISO)} → {formatShiftTimeFromISO(sh.endISO)}
                       <br />
                       Staff: <b>{staffName(sh.staffId)}</b>
                       {sh.isShared ? (
@@ -1411,7 +1461,7 @@ export default function Page() {
         `Conflict: staff already scheduled.\n\n` +
         `Client: ${client?.name || "Unknown"}\n` +
         `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
-        `Time: ${first.startISO.slice(0, 16).replace("T", " ")} → ${first.endISO.slice(0, 16).replace("T", " ")}`;
+        `Time: ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}`;
 
       if (state.settings?.hardStopConflicts) return alert(msg);
       if (!confirm(msg + "\n\nContinue anyway?")) return;
@@ -2207,7 +2257,7 @@ export default function Page() {
                             </td>
                           ) : null}
                           <td style={styles.td}>
-                            {sh.startISO.slice(0, 16).replace("T", " ")} → {sh.endISO.slice(0, 16).replace("T", " ")}
+                            {formatShiftDateTimeFromISO(sh.startISO)} → {formatShiftDateTimeFromISO(sh.endISO)}
                           </td>
                           <td style={styles.td}>{client?.name || "(unknown)"}</td>
                         </tr>
@@ -2239,7 +2289,7 @@ export default function Page() {
                     <div key={`${g.clientId}_${idx}`} style={styles.shift}>
                       <div style={styles.shiftTitle}>{c?.name || "Unknown Client"}</div>
                       <div style={styles.shiftMeta}>
-                        {g.startISO.slice(0, 16).replace("T", " ")} → {g.endISO.slice(0, 16).replace("T", " ")}
+                        {formatShiftDateTimeFromISO(g.startISO)} → {formatShiftDateTimeFromISO(g.endISO)}
                       </div>
                     </div>
                   );
@@ -2455,8 +2505,8 @@ export default function Page() {
                             return (
                               <tr key={sh.id}>
                                 <td style={styles.td}>{sh.startISO.slice(0, 10)}</td>
-                                <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
-                                <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
+                                <td style={styles.td}>{formatShiftTimeFromISO(sh.startISO)}</td>
+                                <td style={styles.td}>{formatShiftTimeFromISO(sh.endISO)}</td>
                                 <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
                                 <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
                                 <td style={styles.td}>{sh.sharedGroupId || ""}</td>
