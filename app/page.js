@@ -1643,6 +1643,7 @@ export default function Page() {
   });
   const [clientDraft, setClientDraft] = useState(() => createEmptyClientDraft());
   const lastEditedClientIdRef = useRef(null);
+  const [isSavingClient, setIsSavingClient] = useState(false);
   const [userDraft, setUserDraft] = useState({ id: "", name: "", role: "supervisor", pin: "" });
 
   function resetClientDraft() {
@@ -1681,6 +1682,7 @@ export default function Page() {
   }
 
   async function saveClient() {
+    if (isSavingClient) return;
     const name = clientDraft.name.trim();
     if (!name) return alert("Client name required.");
     const isEditingExisting = !!clientDraft.id;
@@ -1694,18 +1696,31 @@ export default function Page() {
       is_24_hour: !!clientDraft.is24Hour,
       active: clientDraft.active !== false,
     };
-    if (isEditingExisting) lastEditedClientIdRef.current = row.id;
-    await sbUpsert("clients", [row]);
-    await refreshState(setState);
-    resetClientDraft();
+    try {
+      setIsSavingClient(true);
+      if (isEditingExisting) lastEditedClientIdRef.current = row.id;
+      await sbUpsert("clients", [row]);
+      await refreshState(setState);
+      resetClientDraft();
 
-    // UX: after editing, jump back to that client row in the list.
-    if (isEditingExisting) {
-      requestAnimationFrame(() => {
-        const el = document.getElementById(`client-row-${lastEditedClientIdRef.current}`);
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-      });
+      // UX: after editing, jump back to that client row in the list.
+      if (isEditingExisting) {
+        requestAnimationFrame(() => {
+          const el = document.getElementById(`client-row-${lastEditedClientIdRef.current}`);
+          if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
+    } catch (e) {
+      console.error("saveClient failed", e);
+      alert("Unable to save client. Please try again.");
+    } finally {
+      setIsSavingClient(false);
     }
+  }
+
+  async function handleSaveClientClick(e) {
+    e.preventDefault();
+    await saveClient();
   }
 
   async function deleteClient(id) {
@@ -2657,14 +2672,18 @@ export default function Page() {
                 background: "rgba(11,12,16,0.92)",
               }}
             >
-              <button style={styles.btn2} onClick={resetClientDraft}>Cancel</button>
-              <button style={styles.btn} onClick={saveClient}>Save Client</button>
+              <button type="button" style={styles.btn2} onClick={resetClientDraft}>Cancel</button>
+              <button type="button" style={styles.btn} onClick={handleSaveClientClick} disabled={isSavingClient}>
+                {isSavingClient ? "Saving..." : "Save Client"}
+              </button>
             </div>
 
             {/* Bottom actions: duplicate save/cancel near the end of the form */}
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10, gap: 8 }}>
-              <button style={styles.btn2} onClick={resetClientDraft}>Cancel</button>
-              <button style={styles.btn} onClick={saveClient}>Save Client</button>
+              <button type="button" style={styles.btn2} onClick={resetClientDraft}>Cancel</button>
+              <button type="button" style={styles.btn} onClick={handleSaveClientClick} disabled={isSavingClient}>
+                {isSavingClient ? "Saving..." : "Save Client"}
+              </button>
             </div>
 
             <div style={styles.hr} />
