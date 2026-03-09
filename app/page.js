@@ -419,10 +419,7 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       ),
       coverageEnd: normalizeTimeValue(c.coverage_end ?? c.coverageEnd, "23:00"),
       is24Hour: !!(c.is_24_hour ?? c.is24Hour),
-      weeklyHours:
-        typeof (c.weekly_hours ?? c.weeklyHours ?? c.hours_alloted) === "number"
-          ? (c.weekly_hours ?? c.weeklyHours ?? c.hours_alloted)
-          : Number(c.weekly_hours ?? c.weeklyHours ?? c.hours_alloted) || 40,
+      weeklyHours: typeof c.weekly_hours === "number" ? c.weekly_hours : Number(c.weekly_hours) || 40,
       active: c.active !== false,
     })),
 
@@ -2662,7 +2659,7 @@ export default function Page() {
                               supervisorId: c.supervisorId || "",
                               coverageStart: c.coverageStart || "07:00",
                               coverageEnd: c.coverageEnd || "23:00",
-                              weeklyHours: Number(c.weeklyHours) || 40,
+                              weeklyHours: Number(c.weeklyHours ?? c.weekly_hours) || 40,
                               is24Hour: !!c.is24Hour,
                               active: c.active !== false,
                             })
