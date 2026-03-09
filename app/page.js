@@ -349,6 +349,8 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
     settings: {
       includeUnassignedForSupervisors: true,
       hardStopConflicts: true,
+      crossWeekConsecutiveProtection: false,
+      maxConsecutiveDays: 6,
     },
     users: (users || []).map((u) => ({
       id: u.id,
@@ -468,6 +470,93 @@ function staffWeekMinutesDedup(shifts, staffId) {
     total += minutesBetweenISO(sh.startISO, sh.endISO);
   }
   return total;
+}
+
+function localDateKeyFromISO(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function getShiftsForConsecutiveCheck(allShifts, staffId, weekStartDate, weekEndDate, crossWeekProtection) {
+  const baseStart = new Date(weekStartDate);
+  baseStart.setHours(0, 0, 0, 0);
+
+  const baseEnd = new Date(weekEndDate);
+  baseEnd.setHours(0, 0, 0, 0);
+
+  const rangeStart = crossWeekProtection ? addDays(baseStart, -7) : baseStart;
+  const rangeEnd = crossWeekProtection ? addDays(baseEnd, 7) : baseEnd;
+
+  return (allShifts || []).filter((sh) => {
+    if (sh.staffId !== staffId) return false;
+    const start = new Date(sh.startISO);
+    if (isNaN(start)) return false;
+    return start >= rangeStart && start < rangeEnd;
+  });
+}
+
+function getConsecutiveWorkedDaysFromShifts(shifts) {
+  const uniqueDays = Array.from(
+    new Set(
+      (shifts || [])
+        .map((sh) => localDateKeyFromISO(sh.startISO))
+        .filter(Boolean)
+    )
+  )
+    .map((dayKey) => {
+      const d = new Date(`${dayKey}T00:00:00`);
+      return isNaN(d) ? null : d;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a - b);
+
+  let maxStreak = 0;
+  let streak = 0;
+  let prev = null;
+
+  for (const day of uniqueDays) {
+    if (!prev) {
+      streak = 1;
+    } else {
+      const diffDays = Math.round((day - prev) / (24 * 60 * 60 * 1000));
+      streak = diffDays === 1 ? streak + 1 : 1;
+    }
+    if (streak > maxStreak) maxStreak = streak;
+    prev = day;
+  }
+
+  return { uniqueWorkedDays: uniqueDays.length, maxStreak };
+}
+
+function projectedConsecutiveStreak({
+  allShifts,
+  staffId,
+  weekStartDate,
+  weekEndDate,
+  crossWeekProtection,
+  candidateShift,
+}) {
+  const scoped = getShiftsForConsecutiveCheck(
+    allShifts,
+    staffId,
+    weekStartDate,
+    weekEndDate,
+    crossWeekProtection
+  );
+  const includeCandidate = candidateShift
+    && getShiftsForConsecutiveCheck(
+      [candidateShift],
+      staffId,
+      weekStartDate,
+      weekEndDate,
+      crossWeekProtection
+    ).length > 0;
+  const projected = includeCandidate ? [...scoped, candidateShift] : scoped;
+  return getConsecutiveWorkedDaysFromShifts(projected).maxStreak;
 }
 
 /* =========================
@@ -796,7 +885,12 @@ export default function Page() {
 
   // “DB state”
   const [state, setState] = useState({
-    settings: { includeUnassignedForSupervisors: true, hardStopConflicts: true },
+    settings: {
+      includeUnassignedForSupervisors: true,
+      hardStopConflicts: true,
+      crossWeekConsecutiveProtection: false,
+      maxConsecutiveDays: 6,
+    },
     users: [],
     staff: [],
     clients: [],
@@ -995,6 +1089,9 @@ export default function Page() {
     return out;
   }, [state.staff, shiftsInSelectedWeek]);
 
+  const crossWeekConsecutiveProtection = !!state.settings?.crossWeekConsecutiveProtection;
+  const maxConsecutiveDays = Math.max(1, Number(state.settings?.maxConsecutiveDays) || 6);
+
   // Draft shift form (now includes Shared Support)
   const [shiftDraft, setShiftDraft] = useState({
     clientId: "",
@@ -1023,6 +1120,21 @@ export default function Page() {
         sh.staffId === st.id && overlaps(sh.startISO, sh.endISO, startISO, endISO)
       );
       if (hasConflict) continue;
+
+      const projectedStreak = projectedConsecutiveStreak({
+        allShifts: state.shifts || [],
+        staffId: st.id,
+        weekStartDate,
+        weekEndDate,
+        crossWeekProtection: crossWeekConsecutiveProtection,
+        candidateShift: {
+          id: "candidate",
+          staffId: st.id,
+          startISO,
+          endISO,
+        },
+      });
+      if (projectedStreak > maxConsecutiveDays) continue;
       // Compute OT after this shift
       const min = staffWeekMinutesMap[st.id] || 0;
       const addMin = minutesBetweenISO(startISO, endISO);
@@ -1036,7 +1148,16 @@ export default function Page() {
       }
     }
     return best;
-  }, [shiftDraft, state.staff, state.shifts, staffWeekMinutesMap]);
+  }, [
+    shiftDraft,
+    state.staff,
+    state.shifts,
+    staffWeekMinutesMap,
+    weekStartDate,
+    weekEndDate,
+    crossWeekConsecutiveProtection,
+    maxConsecutiveDays,
+  ]);
 
   // 24-Hour Builder UI
   const [builderOpen, setBuilderOpen] = useState(false);
@@ -1117,6 +1238,7 @@ export default function Page() {
     // Track per-staff minutes while building to avoid over-assigning
     const minutesByStaff = { ...staffWeekMinutesMap };
     const pool = (state.staff || []).filter((s) => s.active !== false);
+    const projectedByStaff = {};
     let rotIndex = 0;
 
     const pickStaffForShift = async (startISO, endISO) => {
@@ -1127,10 +1249,43 @@ export default function Page() {
       const checkCandidate = async (st) => {
         const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO, endISO });
         if (conflicts.length) return false;
+
+        const existingProjected = projectedByStaff[st.id]
+          || getShiftsForConsecutiveCheck(
+            state.shifts || [],
+            st.id,
+            weekStartDate,
+            weekEndDate,
+            crossWeekConsecutiveProtection
+          );
+        const candidateShift = {
+          id: uid("cand"),
+          staffId: st.id,
+          startISO,
+          endISO,
+        };
+        const candidateInScope = getShiftsForConsecutiveCheck(
+          [candidateShift],
+          st.id,
+          weekStartDate,
+          weekEndDate,
+          crossWeekConsecutiveProtection
+        ).length > 0;
+        if (candidateInScope) {
+          const projectedStreak = getConsecutiveWorkedDaysFromShifts([
+            ...existingProjected,
+            candidateShift,
+          ]).maxStreak;
+          if (projectedStreak > maxConsecutiveDays) return false;
+        }
+
         const currentMin = minutesByStaff[st.id] || 0;
         // Builder should not auto-assign overtime shifts.
         if (currentMin + addMin > OT_THRESHOLD_MIN) return false;
         minutesByStaff[st.id] = currentMin + addMin;
+        projectedByStaff[st.id] = candidateInScope
+          ? [...existingProjected, candidateShift]
+          : existingProjected;
         return true;
       };
 
@@ -1257,6 +1412,32 @@ export default function Page() {
         `Client: ${client?.name || "Unknown"}\n` +
         `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
         `Time: ${first.startISO.slice(0, 16).replace("T", " ")} → ${first.endISO.slice(0, 16).replace("T", " ")}`;
+
+      if (state.settings?.hardStopConflicts) return alert(msg);
+      if (!confirm(msg + "\n\nContinue anyway?")) return;
+    }
+
+    const workedDaysStreak = projectedConsecutiveStreak({
+      allShifts: state.shifts || [],
+      staffId,
+      weekStartDate,
+      weekEndDate,
+      crossWeekProtection: crossWeekConsecutiveProtection,
+      candidateShift: {
+        id: "candidate",
+        staffId,
+        startISO,
+        endISO,
+      },
+    });
+    if (workedDaysStreak > maxConsecutiveDays) {
+      const msg =
+        `Consecutive-day limit reached.\n\n` +
+        `Projected streak: ${workedDaysStreak} days\n` +
+        `Max allowed: ${maxConsecutiveDays} days\n\n` +
+        (crossWeekConsecutiveProtection
+          ? "Cross-week consecutive protection is ON."
+          : "Only the selected week is included in this check.");
 
       if (state.settings?.hardStopConflicts) return alert(msg);
       if (!confirm(msg + "\n\nContinue anyway?")) return;
@@ -2544,6 +2725,40 @@ export default function Page() {
               />
               Hard-stop conflicts (block overlaps unless same Shared Group block)
             </label>
+
+            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+              <input
+                type="checkbox"
+                checked={!!state.settings?.crossWeekConsecutiveProtection}
+                onChange={(e) =>
+                  setState((p) => ({
+                    ...p,
+                    settings: { ...p.settings, crossWeekConsecutiveProtection: e.target.checked },
+                  }))
+                }
+              />
+              Cross-week consecutive protection (include 7-day buffer before/after selected week)
+            </label>
+
+            <div style={{ marginTop: 10, maxWidth: 280 }}>
+              <div style={styles.tiny}>Max consecutive worked days</div>
+              <input
+                style={styles.input}
+                type="number"
+                min={1}
+                max={14}
+                value={maxConsecutiveDays}
+                onChange={(e) =>
+                  setState((p) => ({
+                    ...p,
+                    settings: {
+                      ...p.settings,
+                      maxConsecutiveDays: Math.max(1, Number(e.target.value) || 1),
+                    },
+                  }))
+                }
+              />
+            </div>
           </div>
         )}
       </div>
