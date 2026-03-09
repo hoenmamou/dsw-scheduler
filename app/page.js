@@ -414,7 +414,7 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       name: c.name,
       supervisorId: c.supervisor_id ?? c.supervisorId ?? "",
       coverageStart: normalizeTimeValue(
-        c.coverage_start ?? c["coverage _start"] ?? c.coverageStart,
+        c.coverage_start ?? c.coverageStart,
         "07:00"
       ),
       coverageEnd: normalizeTimeValue(c.coverage_end ?? c.coverageEnd, "23:00"),
