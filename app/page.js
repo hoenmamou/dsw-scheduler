@@ -14,28 +14,21 @@ let forceLocalFallback = false;
 function setSupabaseErrorHandler(fn) {
   supabaseErrorHandler = fn;
 }
-
 function reportSupabaseError(error) {
   forceLocalFallback = true;
   console.warn("Supabase request failed; falling back to local storage.", error);
   if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
 }
-
 function canUseSupabase() {
   return SUPABASE_CONFIGURED && supabase && !forceLocalFallback;
 }
 
-const DAY_START_MIN = 7 * 60;
-const DAY_END_MIN = 23 * 60;
 const OT_THRESHOLD_MIN = 40 * 60;
 const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
 
 function uid(prefix = "id") {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
-function clamp(n, a, b) {
-  return Math.max(a, Math.min(b, n));
 }
 function isoLocal(date) {
   const d = new Date(date);
@@ -65,11 +58,6 @@ function fmtHoursFromMin(min) {
   const sign = min < 0 ? "-" : "";
   const abs = Math.abs(min);
   return `${sign}${(abs / 60).toFixed(2)}h`;
-}
-function formatDateHuman(dateLike) {
-  const d = new Date(dateLike);
-  if (isNaN(d)) return "";
-  return d.toLocaleDateString();
 }
 function startOfWeekMonday(inputDate = new Date()) {
   const d = new Date(inputDate);
@@ -144,8 +132,10 @@ function splitDayNightMinutes(startISO, endISO) {
       segEndMin = 1440;
     }
 
-    const dayOverlapStart = clamp(segStartMin, DAY_START_MIN, DAY_END_MIN);
-    const dayOverlapEnd = clamp(segEndMin, DAY_START_MIN, DAY_END_MIN);
+    const dayStartMin = 7 * 60;
+    const dayEndMin = 23 * 60;
+    const dayOverlapStart = Math.max(dayStartMin, Math.min(segStartMin, dayEndMin));
+    const dayOverlapEnd = Math.max(dayStartMin, Math.min(segEndMin, dayEndMin));
     const dayOverlap = Math.max(0, dayOverlapEnd - dayOverlapStart);
 
     dayMin += dayOverlap;
@@ -171,46 +161,6 @@ function parseJsonSafe(value, fallback) {
     return fallback;
   }
 }
-function normalizeDateInput(value) {
-  if (!value) return "";
-  if (typeof value !== "string") return "";
-  return value.length >= 10 ? value.slice(0, 10) : value;
-}
-function readStaffDate(row, ...keys) {
-  for (const key of keys) {
-    const value = row?.[key];
-    if (value) return normalizeDateInput(value);
-  }
-  return "";
-}
-function todayYMD() {
-  return isoLocal(new Date()).slice(0, 10);
-}
-function isExpired(dateStr) {
-  if (!dateStr) return false;
-  const d = new Date(`${dateStr}T23:59:59`);
-  if (isNaN(d)) return false;
-  return d < new Date();
-}
-function daysUntil(dateStr) {
-  if (!dateStr) return null;
-  const d = new Date(`${dateStr}T23:59:59`);
-  if (isNaN(d)) return null;
-  return Math.ceil((d - new Date()) / 86400000);
-}
-function getTrainingStatus(staff) {
-  const items = [
-    { key: "cprExp", label: "CPR", value: staff.cprExp },
-    { key: "firstAidExp", label: "First Aid", value: staff.firstAidExp },
-    { key: "medExp", label: "Med Training", value: staff.medExp },
-  ];
-  const expired = items.filter((x) => isExpired(x.value));
-  const dueSoon = items.filter((x) => {
-    const days = daysUntil(x.value);
-    return days !== null && days >= 0 && days <= 30;
-  });
-  return { expired, dueSoon, items };
-}
 function isStaffAvailableForShift(staff, startISO, endISO) {
   const availability = staff.availability || makeDefaultAvailability();
   const start = new Date(startISO);
@@ -235,9 +185,6 @@ function isStaffAvailableForShift(staff, startISO, endISO) {
   return shiftStart >= availStart && shiftEnd <= availEnd;
 }
 function staffShiftUniqueKey(sh) {
-  if (sh.isShared && sh.sharedGroupId) {
-    return `SS|${sh.staffId}|${sh.startISO}|${sh.endISO}|${sh.sharedGroupId}`;
-  }
   return `N|${sh.id}`;
 }
 function staffWeekMinutesDedup(shifts, staffId) {
@@ -252,6 +199,7 @@ function staffWeekMinutesDedup(shifts, staffId) {
   }
   return total;
 }
+
 function Tabs({ value, onChange, tabs }) {
   return (
     <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -292,6 +240,7 @@ async function sbSelect(table) {
     return [];
   }
 }
+
 async function sbUpsert(table, rows) {
   if (canUseSupabase()) {
     const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
@@ -313,6 +262,7 @@ async function sbUpsert(table, rows) {
     console.error(e);
   }
 }
+
 async function sbDelete(table, id) {
   if (canUseSupabase()) {
     const { error } = await supabase.from(table).delete().eq("id", id);
@@ -340,9 +290,6 @@ const DEFAULT_DB = {
       name: "Natasha",
       active: true,
       availability: JSON.stringify(makeDefaultAvailability()),
-      cpr_exp: "",
-      first_aid_exp: "",
-      med_exp: "",
       can_overtime: false,
     },
     {
@@ -350,9 +297,6 @@ const DEFAULT_DB = {
       name: "Jordan",
       active: true,
       availability: JSON.stringify(makeDefaultAvailability()),
-      cpr_exp: "",
-      first_aid_exp: "",
-      med_exp: "",
       can_overtime: false,
     },
   ],
@@ -377,7 +321,6 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       includeUnassignedForSupervisors: true,
       hardStopConflicts: true,
       hardStopOT: true,
-      blockExpiredTraining: true,
       allowOvertimeOverride: true,
     },
     users: (users || []).map((u) => ({
@@ -391,9 +334,6 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       name: s.name || "",
       active: s.active !== false,
       availability: parseJsonSafe(s.availability, makeDefaultAvailability()),
-      cprExp: readStaffDate(s, "cpr_exp", "cprExp", "cpr_expiration"),
-      firstAidExp: readStaffDate(s, "first_aid_exp", "firstAidExp", "first_aid_expiration"),
-      medExp: readStaffDate(s, "med_exp", "medExp", "med_expiration"),
       canOvertime: !!(s.can_overtime ?? s.canOvertime),
     })),
     clients: (clients || []).map((c) => ({
@@ -416,12 +356,11 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       startISO: new Date(sh.start_iso || sh.startISO).toISOString(),
       endISO: new Date(sh.end_iso || sh.endISO).toISOString(),
       createdBy: sh.created_by || sh.createdBy || "",
-      isShared: !!(sh.is_shared ?? sh.isShared),
-      sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
       overtimeApproved: !!(sh.overtime_approved ?? sh.overtimeApproved),
     })),
   };
 }
+
 async function refreshState(setStateLocal) {
   try {
     const [users, staff, clients, shifts] = await Promise.all([
@@ -548,134 +487,6 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
 }
 
 /* =========================
-   Calendar
-========================= */
-
-function CalendarWeek({
-  state,
-  weekStartDate,
-  visibleClients,
-  canSeeAllShifts,
-  setTab,
-  setShiftDraft,
-  deleteShift,
-}) {
-  const shifts = state.shifts || [];
-  const clients = state.clients || [];
-  const staff = state.staff || [];
-  const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
-  const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
-
-  const start = new Date(weekStartDate);
-  start.setHours(0, 0, 0, 0);
-
-  const days = [...Array(7)].map((_, i) => {
-    const d = addDays(start, i);
-    return { d, dateStr: isoLocal(d).slice(0, 10) };
-  });
-
-  const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
-
-  function dayShifts(dateStr) {
-    const dayStart = new Date(`${dateStr}T00:00:00`).toISOString();
-    const dayEnd = new Date(`${dateStr}T23:59:59`).toISOString();
-
-    return shifts
-      .filter((sh) => {
-        if (!canSeeAllShifts && !visibleClientIds.has(sh.clientId)) return false;
-        return overlaps(sh.startISO, sh.endISO, dayStart, dayEnd);
-      })
-      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-  }
-
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div style={{ ...styles.card, marginBottom: 12 }}>
-        <div style={styles.rowBetween}>
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 980 }}>Weekly Calendar</div>
-            <div style={styles.tiny}>Week of {start.toLocaleDateString()}</div>
-          </div>
-          <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
-            Print / Save PDF
-          </button>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(180px, 1fr))", gap: 10, overflowX: "auto" }}>
-        {days.map(({ d, dateStr }) => (
-          <div key={dateStr} style={styles.card}>
-            <div style={{ fontWeight: 950 }}>
-              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
-            </div>
-            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-              {dayShifts(dateStr).length === 0 ? (
-                <div style={{ opacity: 0.75, fontSize: 12 }}>No shifts</div>
-              ) : (
-                dayShifts(dateStr).map((sh) => (
-                  <div key={sh.id} style={styles.shift}>
-                    <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
-                    <div style={styles.shiftMeta}>
-                      {sh.startISO.slice(11, 16)} → {sh.endISO.slice(11, 16)}
-                      <br />
-                      Staff: <b>{staffName(sh.staffId)}</b>
-                      {sh.isShared ? (
-                        <>
-                          <br />
-                          Shared: <b>{sh.sharedGroupId || "Yes"}</b>
-                        </>
-                      ) : null}
-                      {sh.overtimeApproved ? (
-                        <>
-                          <br />
-                          OT Override: <b>Approved</b>
-                        </>
-                      ) : null}
-                    </div>
-                    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                      <button
-                        style={{ ...styles.btn2, padding: "2px 8px", fontSize: 12 }}
-                        onClick={() => {
-                          setTab("schedule");
-                          setShiftDraft({
-                            clientId: sh.clientId,
-                            clientId2: sh.isShared
-                              ? state.shifts.find(
-                                  (s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id
-                                )?.clientId || ""
-                              : "",
-                            staffId: sh.staffId,
-                            startDate: sh.startISO.slice(0, 10),
-                            startTime: sh.startISO.slice(11, 16),
-                            endDate: sh.endISO.slice(0, 10),
-                            endTime: sh.endISO.slice(11, 16),
-                            isShared: !!sh.isShared,
-                            sharedGroupId: sh.sharedGroupId || "",
-                            overtimeApproved: !!sh.overtimeApproved,
-                          });
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        style={{ ...styles.btn2, padding: "2px 8px", fontSize: 12, color: "#ff8b8b" }}
-                        onClick={() => deleteShift(sh.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* =========================
    Main App
 ========================= */
 
@@ -686,7 +497,6 @@ export default function Page() {
       includeUnassignedForSupervisors: true,
       hardStopConflicts: true,
       hardStopOT: true,
-      blockExpiredTraining: true,
       allowOvertimeOverride: true,
     },
     users: [],
@@ -694,9 +504,9 @@ export default function Page() {
     clients: [],
     shifts: [],
   });
+
   const [sessionUserId, setSessionUserId] = useState(null);
   const [supabaseError, setSupabaseError] = useState(null);
-
   const [tab, setTab] = useState("schedule");
 
   const [weekStart, setWeekStart] = useState(() => isoLocal(startOfWeekMonday()).slice(0, 10));
@@ -704,11 +514,12 @@ export default function Page() {
   const weekEndDate = useMemo(() => addDays(weekStartDate, 7), [weekStartDate]);
 
   const [dailyPrintDate, setDailyPrintDate] = useState(() => weekStart);
+
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderClientId, setBuilderClientId] = useState("");
   const [builderTemplate, setBuilderTemplate] = useState("2x12");
   const [builderScheduleSource, setBuilderScheduleSource] = useState("template");
-  const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-15:00\n15:00-23:00");
+  const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-19:00\n19:00-07:00");
   const [builderWeeklyAssignments, setBuilderWeeklyAssignments] = useState({});
   const [builderWeeks, setBuilderWeeks] = useState(1);
 
@@ -722,14 +533,11 @@ export default function Page() {
 
   const [shiftDraft, setShiftDraft] = useState({
     clientId: "",
-    clientId2: "",
     staffId: "",
     startDate: weekStart,
     startTime: "07:00",
     endDate: weekStart,
     endTime: "15:00",
-    isShared: false,
-    sharedGroupId: "",
     overtimeApproved: false,
   });
 
@@ -740,9 +548,6 @@ export default function Page() {
     availabilityDays: [1, 2, 3, 4, 5],
     availabilityStart: "07:00",
     availabilityEnd: "23:00",
-    cprExp: "",
-    firstAidExp: "",
-    medExp: "",
     canOvertime: false,
   });
 
@@ -764,19 +569,13 @@ export default function Page() {
     pin: "",
   });
 
-  const [emergencyFillDraft, setEmergencyFillDraft] = useState({
-    clientId: "",
-    date: weekStart,
-    startTime: "07:00",
-    endTime: "15:00",
-    isShared: false,
-  });
-
   useEffect(() => setMounted(true), []);
+
   useEffect(() => {
     setSupabaseErrorHandler(setSupabaseError);
     return () => setSupabaseErrorHandler(null);
   }, []);
+
   useEffect(() => {
     if (!mounted) return;
     try {
@@ -836,7 +635,6 @@ export default function Page() {
 
   useEffect(() => {
     setShiftDraft((p) => ({ ...p, startDate: weekStart, endDate: weekStart }));
-    setEmergencyFillDraft((p) => ({ ...p, date: weekStart }));
     setDailyPrintDate(weekStart);
   }, [weekStart]);
 
@@ -857,7 +655,9 @@ export default function Page() {
       d.setDate(d.getDate() + 1);
       endDate = isoLocal(d).slice(0, 10);
     }
-    if (shiftDraft.endDate !== endDate) setShiftDraft((p) => ({ ...p, endDate }));
+    if (shiftDraft.endDate !== endDate) {
+      setShiftDraft((p) => ({ ...p, endDate }));
+    }
   }, [shiftDraft.startDate, shiftDraft.startTime, shiftDraft.endTime, shiftDraft.endDate]);
 
   function loginAs(userId) {
@@ -866,12 +666,14 @@ export default function Page() {
     } catch {}
     setSessionUserId(userId);
   }
+
   function logout() {
     try {
       sessionStorage.removeItem("dsw_user_id");
     } catch {}
     setSessionUserId(null);
   }
+
   async function createAdminUser({ id, name, pin }) {
     await sbUpsert("users", [{ id, name, role: "admin", pin }]);
     await refreshState(setState);
@@ -899,10 +701,6 @@ export default function Page() {
     });
   }, [state.shifts, weekStartDate, weekEndDate]);
 
-  const visibleShiftsInWeek = useMemo(() => {
-    return shiftsInSelectedWeek.filter((sh) => (isAdmin ? true : visibleClientIds.has(sh.clientId)));
-  }, [shiftsInSelectedWeek, isAdmin, visibleClientIds]);
-
   const staffWeekMinutesMap = useMemo(() => {
     const out = {};
     for (const st of state.staff || []) {
@@ -925,7 +723,7 @@ export default function Page() {
     return byClient;
   }, [shiftsInSelectedWeek]);
 
-  async function findStaffConflictsDB({ staffId, startISO, endISO }) {
+  async function findStaffConflictsDB({ staffId, startISO, endISO, ignoreShiftId = "" }) {
     const rows = await sbSelect("shifts");
     const all = (rows || []).map((sh) => ({
       id: sh.id,
@@ -933,23 +731,17 @@ export default function Page() {
       clientId: sh.client_id || sh.clientId,
       startISO: new Date(sh.start_iso || sh.startISO).toISOString(),
       endISO: new Date(sh.end_iso || sh.endISO).toISOString(),
-      isShared: !!(sh.is_shared || sh.isShared),
-      sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
     }));
-    return all.filter((sh) => sh.staffId === staffId && overlaps(sh.startISO, sh.endISO, startISO, endISO));
+    return all.filter(
+      (sh) =>
+        sh.staffId === staffId &&
+        sh.id !== ignoreShiftId &&
+        overlaps(sh.startISO, sh.endISO, startISO, endISO)
+    );
   }
 
   function getAllowedVisibleStaff() {
     return (state.staff || []).filter((s) => s.active !== false);
-  }
-
-  function getTrainingBlockReason(staff) {
-    if (!state.settings?.blockExpiredTraining) return "";
-    const status = getTrainingStatus(staff);
-    if (status.expired.length) {
-      return `Expired training: ${status.expired.map((x) => x.label).join(", ")}`;
-    }
-    return "";
   }
 
   const suggestedStaff = useMemo(() => {
@@ -958,22 +750,17 @@ export default function Page() {
 
     const startISO = toISO(startDate, startTime);
     const endISO = toISO(endDate, endTime);
-    const client = state.clients.find((c) => c.id === clientId);
     const candidates = getAllowedVisibleStaff();
 
     let best = null;
     let bestScore = Infinity;
 
     for (const st of candidates) {
-      const trainingBlock = getTrainingBlockReason(st);
-      if (trainingBlock) continue;
       if (!isStaffAvailableForShift(st, startISO, endISO)) continue;
 
       const hasConflict = (state.shifts || []).some((sh) => {
         if (sh.staffId !== st.id) return false;
-        if (!overlaps(sh.startISO, sh.endISO, startISO, endISO)) return false;
-        if (shiftDraft.isShared && sh.isShared && sh.sharedGroupId === shiftDraft.sharedGroupId) return false;
-        return true;
+        return overlaps(sh.startISO, sh.endISO, startISO, endISO);
       });
       if (hasConflict) continue;
 
@@ -981,7 +768,8 @@ export default function Page() {
       const addMin = minutesBetweenISO(startISO, endISO);
       const afterMin = currentMin + addMin;
       const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-      const score = otMin * 10000 + afterMin + (client ? 0 : 10);
+      const score = otMin * 10000 + afterMin;
+
       if (score < bestScore) {
         best = st;
         bestScore = score;
@@ -989,178 +777,7 @@ export default function Page() {
     }
 
     return best;
-  }, [shiftDraft, state.staff, state.shifts, staffWeekMinutesMap, state.settings, state.clients]);
-
-  const coverageGaps = useMemo(() => {
-    const gaps = [];
-    const start = new Date(weekStartDate);
-
-    for (const c of visibleClients) {
-      const covStart = c.coverageStart || "07:00";
-      const covEnd = c.coverageEnd || "23:00";
-
-      for (let d = 0; d < 7; d++) {
-        const day0 = addDays(start, d);
-        day0.setHours(0, 0, 0, 0);
-        const dateStr = isoLocal(day0).slice(0, 10);
-
-        let covStartISO = `${dateStr}T${covStart}:00`;
-        let covEndISO = `${dateStr}T${covEnd}:00`;
-
-        if (c.is24Hour) {
-          covStartISO = `${dateStr}T00:00:00`;
-          const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
-          covEndISO = `${isoLocal(nd).slice(0, 10)}T00:00:00`;
-        } else if (new Date(covEndISO) <= new Date(covStartISO)) {
-          const nd = new Date(`${dateStr}T00:00:00`);
-          nd.setDate(nd.getDate() + 1);
-          covEndISO = `${isoLocal(nd).slice(0, 10)}T${covEnd}:00`;
-        }
-
-        const clientShifts = shiftsInSelectedWeek
-          .filter((sh) => sh.clientId === c.id)
-          .map((sh) => ({ start: sh.startISO, end: sh.endISO }))
-          .sort((a, b) => new Date(a.start) - new Date(b.start));
-
-        const merged = [];
-        for (const s of clientShifts) {
-          if (!merged.length) merged.push({ ...s });
-          else {
-            const last = merged[merged.length - 1];
-            if (new Date(s.start) <= new Date(last.end)) {
-              if (new Date(s.end) > new Date(last.end)) last.end = s.end;
-            } else {
-              merged.push({ ...s });
-            }
-          }
-        }
-
-        let cursor = covStartISO;
-        for (const seg of merged) {
-          if (overlaps(cursor, covEndISO, seg.start, seg.end)) {
-            const segStart = new Date(seg.start) > new Date(cursor) ? seg.start : cursor;
-            if (new Date(segStart) > new Date(cursor)) {
-              gaps.push({ clientId: c.id, dateStr, startISO: cursor, endISO: segStart });
-            }
-            cursor = new Date(seg.end) > new Date(cursor) ? seg.end : cursor;
-          }
-        }
-        if (new Date(cursor) < new Date(covEndISO)) {
-          gaps.push({ clientId: c.id, dateStr, startISO: cursor, endISO: covEndISO });
-        }
-      }
-    }
-
-    return gaps.filter((g) => minutesBetweenISO(g.startISO, g.endISO) >= 5);
-  }, [visibleClients, shiftsInSelectedWeek, weekStartDate]);
-
-  const emergencyFillSuggestions = useMemo(() => {
-    const { clientId, date, startTime, endTime } = emergencyFillDraft;
-    if (!clientId || !date || !startTime || !endTime) return [];
-    const startISO = toISO(date, startTime);
-    let endISO = toISO(date, endTime);
-    if (new Date(endISO) <= new Date(startISO)) {
-      const nd = addDays(new Date(`${date}T00:00:00`), 1);
-      endISO = `${isoLocal(nd).slice(0, 10)}T${endTime}:00`;
-    }
-
-    return (state.staff || [])
-      .filter((st) => st.active !== false)
-      .map((st) => {
-        const conflict = (state.shifts || []).find(
-          (sh) => sh.staffId === st.id && overlaps(sh.startISO, sh.endISO, startISO, endISO)
-        );
-        const available = isStaffAvailableForShift(st, startISO, endISO);
-        const trainingBlock = getTrainingBlockReason(st);
-        const currentMin = staffWeekMinutesMap[st.id] || 0;
-        const addMin = minutesBetweenISO(startISO, endISO);
-        const afterMin = currentMin + addMin;
-        const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-
-        let score = 0;
-        if (conflict) score += 10000;
-        if (!available) score += 5000;
-        if (trainingBlock) score += 7000;
-        score += otMin * 20;
-        score += afterMin;
-
-        return {
-          staff: st,
-          conflict,
-          available,
-          trainingBlock,
-          currentMin,
-          afterMin,
-          otMin,
-          score,
-        };
-      })
-      .sort((a, b) => a.score - b.score);
-  }, [emergencyFillDraft, state.staff, state.shifts, staffWeekMinutesMap, state.settings]);
-
-  const supervisorDashboard = useMemo(() => {
-    const supervisors = (state.users || []).filter(
-      (u) => u.role === "supervisor" || u.role === "admin"
-    );
-
-    return supervisors.map((u) => {
-      const clients = (state.clients || []).filter((c) => c.active !== false && c.supervisorId === u.id);
-      const clientIds = new Set(clients.map((c) => c.id));
-      const clientShifts = shiftsInSelectedWeek.filter((sh) => clientIds.has(sh.clientId));
-      const clientGaps = coverageGaps.filter((g) => clientIds.has(g.clientId));
-
-      const clientCoverageWindows = clients.reduce((sum, c) => {
-        if (c.is24Hour) return sum + 24 * 60 * 7;
-        const start = c.coverageStart || "07:00";
-        const end = c.coverageEnd || "23:00";
-        const s = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
-        const e = Number(end.slice(0, 2)) * 60 + Number(end.slice(3, 5));
-        const mins = e > s ? e - s : 1440 - s + e;
-        return sum + mins * 7;
-      }, 0);
-
-      const gapMin = clientGaps.reduce((sum, g) => sum + minutesBetweenISO(g.startISO, g.endISO), 0);
-      const coveragePct =
-        clientCoverageWindows > 0
-          ? Math.max(0, Math.round(((clientCoverageWindows - gapMin) / clientCoverageWindows) * 100))
-          : 100;
-
-      return {
-        supervisor: u,
-        clientsCount: clients.length,
-        shiftsCount: clientShifts.length,
-        gapsCount: clientGaps.length,
-        coveragePct,
-      };
-    });
-  }, [state.users, state.clients, shiftsInSelectedWeek, coverageGaps]);
-
-  const weeklyHealthScore = useMemo(() => {
-    const overtimeStaff = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > OT_THRESHOLD_MIN).length;
-    const expTrainingCount = (state.staff || []).filter((st) => getTrainingStatus(st).expired.length > 0).length;
-    const openGapCount = coverageGaps.length;
-    const totalVisibleClients = visibleClients.length || 1;
-
-    let score = 100;
-    score -= overtimeStaff * 8;
-    score -= expTrainingCount * 6;
-    score -= Math.min(30, openGapCount);
-    score = Math.max(0, score);
-
-    let label = "Strong";
-    if (score < 85) label = "Watch";
-    if (score < 70) label = "Risk";
-    if (score < 50) label = "Critical";
-
-    return {
-      score,
-      label,
-      overtimeStaff,
-      expTrainingCount,
-      openGapCount,
-      totalVisibleClients,
-    };
-  }, [state.staff, staffWeekMinutesMap, coverageGaps, visibleClients]);
+  }, [shiftDraft, state.staff, state.shifts, staffWeekMinutesMap]);
 
   const dailyPrintRows = useMemo(() => {
     const dayStart = new Date(`${dailyPrintDate}T00:00:00`).toISOString();
@@ -1174,76 +791,42 @@ export default function Page() {
 
   const tabs = [
     { value: "schedule", label: "Schedule" },
-    { value: "calendar", label: "Weekly Calendar" },
     { value: "dailyPrint", label: "Daily Printout" },
-    { value: "gaps", label: "Coverage Gaps" },
     { value: "hours", label: "Hours & OT" },
-    { value: "emergencyFill", label: "Emergency Fill" },
-    { value: "dashboard", label: "Dashboard" },
     ...(canSeeAdminUI
       ? [
           { value: "staff", label: "Staff" },
           { value: "clients", label: "Clients" },
           { value: "users", label: "Users" },
-          { value: "settings", label: "Settings" },
         ]
       : []),
   ];
 
   async function addShift() {
-    const {
-      clientId,
-      clientId2,
-      staffId,
-      startDate,
-      startTime,
-      endDate,
-      endTime,
-      isShared,
-      overtimeApproved,
-    } = shiftDraft;
+    const { clientId, staffId, startDate, startTime, endDate, endTime, overtimeApproved } =
+      shiftDraft;
 
     if (!clientId || !staffId) return alert("Pick a client and staff.");
-    if (isShared && !clientId2) return alert("Pick the 2nd client for shared support.");
-    if (isShared && clientId2 === clientId) return alert("Client 1 and Client 2 cannot be the same.");
 
     const staff = state.staff.find((s) => s.id === staffId);
     if (!staff) return alert("Staff not found.");
 
     const startISO = toISO(startDate, startTime);
     const endISO = toISO(endDate, endTime);
-    if (new Date(endISO) <= new Date(startISO)) return alert("End must be after start.");
 
-    const trainingBlock = getTrainingBlockReason(staff);
-    if (trainingBlock) return alert(trainingBlock);
+    if (new Date(endISO) <= new Date(startISO)) return alert("End must be after start.");
 
     if (!isStaffAvailableForShift(staff, startISO, endISO)) {
       return alert(`${staff.name} is outside availability for this shift.`);
     }
 
-    const sharedGroupId = isShared
-      ? shiftDraft.sharedGroupId.trim() || `SS-${Date.now().toString().slice(-6)}`
-      : "";
-
     const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
-    const illegalConflicts = conflicts.filter((c) => {
-      if (!isShared) return true;
-      return !(
-        c.isShared &&
-        c.sharedGroupId === sharedGroupId &&
-        c.startISO === new Date(startISO).toISOString() &&
-        c.endISO === new Date(endISO).toISOString()
-      );
-    });
-
-    if (illegalConflicts.length) {
-      const first = illegalConflicts[0];
+    if (conflicts.length) {
+      const first = conflicts[0];
       const client = (state.clients || []).find((x) => x.id === first.clientId);
-      const sup = (state.users || []).find((u) => u.id === (client?.supervisorId || ""));
       const msg =
         `Conflict: staff already scheduled.\n\n` +
         `Client: ${client?.name || "Unknown"}\n` +
-        `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
         `Time: ${first.startISO.slice(0, 16).replace("T", " ")} → ${first.endISO
           .slice(0, 16)
           .replace("T", " ")}`;
@@ -1273,41 +856,20 @@ export default function Page() {
     }
 
     const createdBy = currentUser?.id || "unknown";
-    const rows = [
-      {
-        id: uid("sh"),
-        client_id: clientId,
-        staff_id: staffId,
-        start_iso: startISO,
-        end_iso: endISO,
-        created_by: createdBy,
-        is_shared: !!isShared,
-        shared_group_id: sharedGroupId,
-        overtime_approved: !!overtimeApproved,
-      },
-    ];
+    const row = {
+      id: uid("sh"),
+      client_id: clientId,
+      staff_id: staffId,
+      start_iso: startISO,
+      end_iso: endISO,
+      created_by: createdBy,
+      overtime_approved: !!overtimeApproved,
+    };
 
-    if (isShared) {
-      rows.push({
-        id: uid("sh"),
-        client_id: clientId2,
-        staff_id: staffId,
-        start_iso: startISO,
-        end_iso: endISO,
-        created_by: createdBy,
-        is_shared: true,
-        shared_group_id: sharedGroupId,
-        overtime_approved: !!overtimeApproved,
-      });
-    }
-
-    await sbUpsert("shifts", rows);
+    await sbUpsert("shifts", [row]);
     await refreshState(setState);
     setShiftDraft((p) => ({
       ...p,
-      clientId2: "",
-      isShared: false,
-      sharedGroupId: "",
       overtimeApproved: false,
     }));
   }
@@ -1320,6 +882,7 @@ export default function Page() {
 
   async function runBuilder() {
     if (!builderClientId) return alert("Pick a client for the builder.");
+
     const start = new Date(weekStartDate);
     const rows = [];
     let shiftsDef = [];
@@ -1357,7 +920,6 @@ export default function Page() {
       const addMin = minutesBetweenISO(startISO, endISO);
 
       const checkCandidate = (st) => {
-        if (getTrainingBlockReason(st)) return false;
         if (!isStaffAvailableForShift(st, startISO, endISO)) return false;
 
         const hasConflict = (state.shifts || []).some(
@@ -1413,8 +975,6 @@ export default function Page() {
               start_iso: sISO,
               end_iso: eISO,
               created_by: currentUser?.id || "builder",
-              is_shared: false,
-              shared_group_id: "",
               overtime_approved: false,
             });
           }
@@ -1443,9 +1003,6 @@ export default function Page() {
         start: staffDraft.availabilityStart || "07:00",
         end: staffDraft.availabilityEnd || "23:00",
       }),
-      cpr_exp: normalizeDateInput(staffDraft.cprExp) || null,
-      first_aid_exp: normalizeDateInput(staffDraft.firstAidExp) || null,
-      med_exp: normalizeDateInput(staffDraft.medExp) || null,
       can_overtime: !!staffDraft.canOvertime,
     };
 
@@ -1459,9 +1016,6 @@ export default function Page() {
       availabilityDays: [1, 2, 3, 4, 5],
       availabilityStart: "07:00",
       availabilityEnd: "23:00",
-      cprExp: "",
-      firstAidExp: "",
-      medExp: "",
       canOvertime: false,
     });
   }
@@ -1474,6 +1028,7 @@ export default function Page() {
 
   async function saveClient() {
     if (!clientDraft.name.trim()) return alert("Client name required.");
+
     const row = {
       id: clientDraft.id || uid("cl"),
       name: clientDraft.name.trim(),
@@ -1484,8 +1039,10 @@ export default function Page() {
       is_24_hour: !!clientDraft.is24Hour,
       active: clientDraft.active !== false,
     };
+
     await sbUpsert("clients", [row]);
     await refreshState(setState);
+
     setClientDraft({
       id: "",
       name: "",
@@ -1513,6 +1070,7 @@ export default function Page() {
     if (!userDraft.id.trim() || !userDraft.name.trim() || !userDraft.pin.trim()) {
       return alert("User id, name, and PIN required.");
     }
+
     await sbUpsert("users", [
       {
         id: userDraft.id.trim(),
@@ -1531,11 +1089,8 @@ export default function Page() {
     await refreshState(setState);
   }
 
-  function saveAllNow() {
-    alert("Saved / Synced.");
-  }
-
   if (!mounted) return null;
+
   if (!currentUser) {
     return <LoginScreen users={state.users} onLogin={loginAs} onCreateAdmin={createAdminUser} />;
   }
@@ -1558,46 +1113,14 @@ export default function Page() {
 
         <div style={styles.rowBetween}>
           <div>
-            <div style={{ fontSize: 24, fontWeight: 980 }}>DSW Scheduler</div>
+            <div style={{ fontSize: 24, fontWeight: 980 }}>DSW Scheduler — Phase One</div>
             <div style={styles.tiny}>
               Logged in as <b>{currentUser.name}</b> ({currentUser.role})
             </div>
           </div>
           <div className="no-print" style={{ display: "flex", gap: 8 }}>
-            <button style={styles.btn2} onClick={saveAllNow}>Save</button>
+            <button style={styles.btn2} onClick={() => refreshState(setState)}>Refresh</button>
             <button style={styles.btn2} onClick={logout}>Logout</button>
-          </div>
-        </div>
-
-        <div style={{ ...styles.card, marginTop: 12 }}>
-          <div style={styles.rowBetween}>
-            <div>
-              <div style={{ fontWeight: 900, fontSize: 18 }}>Weekly Staffing Health Score</div>
-              <div style={styles.tiny}>Week of {weekStart}</div>
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 28, fontWeight: 980 }}>{weeklyHealthScore.score}</div>
-              <div style={styles.tiny}>{weeklyHealthScore.label}</div>
-            </div>
-          </div>
-
-          <div style={{ ...styles.grid4, marginTop: 12 }}>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Open Gaps</div>
-              <div style={styles.statValue}>{weeklyHealthScore.openGapCount}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Staff in OT</div>
-              <div style={styles.statValue}>{weeklyHealthScore.overtimeStaff}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Expired Training</div>
-              <div style={styles.statValue}>{weeklyHealthScore.expTrainingCount}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.tiny}>Visible Clients</div>
-              <div style={styles.statValue}>{weeklyHealthScore.totalVisibleClients}</div>
-            </div>
           </div>
         </div>
 
@@ -1704,47 +1227,9 @@ export default function Page() {
             </div>
 
             <div style={{ ...styles.grid4, marginTop: 10 }}>
-              <label style={styles.checkboxRow}>
-                <input
-                  type="checkbox"
-                  checked={!!shiftDraft.isShared}
-                  onChange={(e) => setShiftDraft((p) => ({ ...p, isShared: e.target.checked }))}
-                />
-                Shared support
-              </label>
-
-              {shiftDraft.isShared ? (
-                <div>
-                  <div style={styles.tiny}>Shared Client 2</div>
-                  <select
-                    style={styles.select}
-                    value={shiftDraft.clientId2}
-                    onChange={(e) => setShiftDraft((p) => ({ ...p, clientId2: e.target.value }))}
-                  >
-                    <option value="">Select…</option>
-                    {visibleClients
-                      .filter((c) => c.id !== shiftDraft.clientId)
-                      .map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              ) : (
-                <div />
-              )}
-
-              <div>
-                <div style={styles.tiny}>Shared Group ID</div>
-                <input
-                  style={styles.input}
-                  value={shiftDraft.sharedGroupId}
-                  onChange={(e) => setShiftDraft((p) => ({ ...p, sharedGroupId: e.target.value }))}
-                  placeholder="Optional"
-                />
-              </div>
-
+              <div />
+              <div />
+              <div />
               <label style={styles.checkboxRow}>
                 <input
                   type="checkbox"
@@ -1759,7 +1244,6 @@ export default function Page() {
             {shiftDraft.staffId ? (() => {
               const st = state.staff.find((s) => s.id === shiftDraft.staffId);
               if (!st) return null;
-              const training = getTrainingStatus(st);
               const currentMin = staffWeekMinutesMap[st.id] || 0;
               const proposedMin =
                 currentMin +
@@ -1767,6 +1251,7 @@ export default function Page() {
                   toISO(shiftDraft.startDate, shiftDraft.startTime),
                   toISO(shiftDraft.endDate, shiftDraft.endTime)
                 );
+
               return (
                 <div style={{ marginTop: 12, ...styles.card }}>
                   <div style={{ fontWeight: 900 }}>{st.name} Weekly Summary</div>
@@ -1781,14 +1266,6 @@ export default function Page() {
                       {st.availability?.start || "00:00"} - {st.availability?.end || "23:59"}
                     </b>
                   </div>
-                  {training.expired.length > 0 ? (
-                    <div style={styles.warn}>Expired: {training.expired.map((x) => x.label).join(", ")}</div>
-                  ) : null}
-                  {training.dueSoon.length > 0 ? (
-                    <div style={{ ...styles.tiny, color: "#f59e0b", marginTop: 4 }}>
-                      Due soon: {training.dueSoon.map((x) => `${x.label} (${x.value})`).join(", ")}
-                    </div>
-                  ) : null}
                 </div>
               );
             })() : null}
@@ -1797,6 +1274,40 @@ export default function Page() {
               <button style={styles.btn} onClick={addShift}>
                 Add Shift
               </button>
+            </div>
+
+            <div style={styles.hr} />
+
+            <div style={{ display: "grid", gap: 10 }}>
+              {shiftsInSelectedWeek
+                .filter((sh) => (isAdmin ? true : visibleClientIds.has(sh.clientId)))
+                .sort((a, b) => new Date(a.startISO) - new Date(b.startISO))
+                .map((sh) => {
+                  const client = state.clients.find((c) => c.id === sh.clientId);
+                  const staff = state.staff.find((s) => s.id === sh.staffId);
+
+                  return (
+                    <div key={sh.id} style={styles.shift}>
+                      <div style={styles.shiftTop}>
+                        <div>
+                          <div style={styles.shiftTitle}>{client?.name || "Unknown Client"}</div>
+                          <div style={styles.shiftMeta}>
+                            Staff: <b>{staff?.name || "Unknown"}</b>
+                            <br />
+                            {sh.startISO.slice(0, 16).replace("T", " ")} → {sh.endISO
+                              .slice(0, 16)
+                              .replace("T", " ")}
+                            <br />
+                            OT Override: {sh.overtimeApproved ? "Approved" : "No"}
+                          </div>
+                        </div>
+                        <button style={styles.btn2} onClick={() => deleteShift(sh.id)}>
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
             </div>
 
             {builderOpen ? (
@@ -1969,18 +1480,6 @@ export default function Page() {
           </div>
         )}
 
-        {tab === "calendar" && (
-          <CalendarWeek
-            state={state}
-            weekStartDate={weekStartDate}
-            visibleClients={visibleClients}
-            canSeeAllShifts={isAdmin}
-            setTab={setTab}
-            setShiftDraft={setShiftDraft}
-            deleteShift={deleteShift}
-          />
-        )}
-
         {tab === "dailyPrint" && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <div style={styles.rowBetween}>
@@ -2011,14 +1510,13 @@ export default function Page() {
                     <th style={styles.th}>Staff</th>
                     <th style={styles.th}>Start</th>
                     <th style={styles.th}>End</th>
-                    <th style={styles.th}>Shared</th>
                     <th style={styles.th}>OT Override</th>
                   </tr>
                 </thead>
                 <tbody>
                   {dailyPrintRows.length === 0 ? (
                     <tr>
-                      <td style={styles.td} colSpan={6}>
+                      <td style={styles.td} colSpan={5}>
                         No shifts for {dailyPrintDate}
                       </td>
                     </tr>
@@ -2032,7 +1530,6 @@ export default function Page() {
                           <td style={styles.td}>{staff?.name || "Unknown"}</td>
                           <td style={styles.td}>{sh.startISO.slice(11, 16)}</td>
                           <td style={styles.td}>{sh.endISO.slice(11, 16)}</td>
-                          <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
                           <td style={styles.td}>{sh.overtimeApproved ? "Approved" : ""}</td>
                         </tr>
                       );
@@ -2044,58 +1541,9 @@ export default function Page() {
           </div>
         )}
 
-        {tab === "gaps" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Coverage Gaps</h3>
-            {coverageGaps.length === 0 ? (
-              <div style={styles.tiny}>No gaps detected for this week.</div>
-            ) : (
-              <div style={{ display: "grid", gap: 10 }}>
-                {coverageGaps.map((g, idx) => {
-                  const c = state.clients.find((x) => x.id === g.clientId);
-                  return (
-                    <div key={`${g.clientId}_${idx}`} style={styles.shift}>
-                      <div style={styles.shiftTitle}>{c?.name || "Unknown Client"}</div>
-                      <div style={styles.shiftMeta}>
-                        {g.startISO.slice(0, 16).replace("T", " ")} → {g.endISO.slice(0, 16).replace("T", " ")}
-                      </div>
-                      <div style={{ marginTop: 8 }}>
-                        <button
-                          style={styles.btn2}
-                          onClick={() => {
-                            setEmergencyFillDraft({
-                              clientId: g.clientId,
-                              date: g.startISO.slice(0, 10),
-                              startTime: g.startISO.slice(11, 16),
-                              endTime: g.endISO.slice(11, 16),
-                              isShared: false,
-                            });
-                            setTab("emergencyFill");
-                          }}
-                        >
-                          Find Replacement Staff
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
         {tab === "hours" && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Hours & Overtime</h3>
-
-            <div style={{ ...styles.card, marginBottom: 12 }}>
-              <div style={{ fontWeight: 900 }}>Weekly Summary</div>
-              <div style={styles.tiny}>
-                Staff over 40 hours:{" "}
-                <b>{(state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > OT_THRESHOLD_MIN).length}</b>
-                {" "}• Coverage gaps: <b>{coverageGaps.length}</b>
-              </div>
-            </div>
 
             <div style={{ marginTop: 10, overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -2105,14 +1553,12 @@ export default function Page() {
                     <th style={styles.th}>Week Hours</th>
                     <th style={styles.th}>OT Hours</th>
                     <th style={styles.th}>OT Allowed</th>
-                    <th style={styles.th}>Training Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {state.staff.map((st) => {
                     const min = staffWeekMinutesMap[st.id] || 0;
                     const otMin = Math.max(0, min - OT_THRESHOLD_MIN);
-                    const training = getTrainingStatus(st);
                     return (
                       <tr key={st.id}>
                         <td style={styles.td}><b>{st.name}</b></td>
@@ -2121,13 +1567,6 @@ export default function Page() {
                           {fmtHoursFromMin(otMin)}
                         </td>
                         <td style={styles.td}>{st.canOvertime ? "Yes" : "No"}</td>
-                        <td style={styles.td}>
-                          {training.expired.length
-                            ? `Expired: ${training.expired.map((x) => x.label).join(", ")}`
-                            : training.dueSoon.length
-                            ? `Due soon: ${training.dueSoon.map((x) => x.label).join(", ")}`
-                            : "OK"}
-                        </td>
                       </tr>
                     );
                   })}
@@ -2170,156 +1609,6 @@ export default function Page() {
                   </tbody>
                 </table>
               </div>
-            </div>
-          </div>
-        )}
-
-        {tab === "emergencyFill" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Call-In / Emergency Fill System</h3>
-
-            <div style={{ ...styles.grid4, marginTop: 10 }}>
-              <div>
-                <div style={styles.tiny}>Client</div>
-                <select
-                  style={styles.select}
-                  value={emergencyFillDraft.clientId}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, clientId: e.target.value }))}
-                >
-                  <option value="">Select…</option>
-                  {visibleClients.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <div style={styles.tiny}>Date</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={emergencyFillDraft.date}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, date: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <div style={styles.tiny}>Start</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={emergencyFillDraft.startTime}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, startTime: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <div style={styles.tiny}>End</div>
-                <input
-                  style={styles.input}
-                  type="time"
-                  value={emergencyFillDraft.endTime}
-                  onChange={(e) => setEmergencyFillDraft((p) => ({ ...p, endTime: e.target.value }))}
-                />
-              </div>
-            </div>
-
-            <div style={{ marginTop: 14, overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Staff</th>
-                    <th style={styles.th}>Status</th>
-                    <th style={styles.th}>Week Hours</th>
-                    <th style={styles.th}>After Fill</th>
-                    <th style={styles.th}>Notes</th>
-                    <th style={styles.th}>Use</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {emergencyFillSuggestions.map((row) => (
-                    <tr key={row.staff.id}>
-                      <td style={styles.td}><b>{row.staff.name}</b></td>
-                      <td style={styles.td}>
-                        {row.conflict
-                          ? "Conflict"
-                          : !row.available
-                          ? "Unavailable"
-                          : row.trainingBlock
-                          ? "Training Block"
-                          : row.otMin > 0
-                          ? "OT Risk"
-                          : "Best Fit"}
-                      </td>
-                      <td style={styles.td}>{fmtHoursFromMin(row.currentMin)}</td>
-                      <td style={styles.td}>{fmtHoursFromMin(row.afterMin)}</td>
-                      <td style={styles.td}>
-                        {row.conflict
-                          ? "Already scheduled"
-                          : !row.available
-                          ? "Outside availability"
-                          : row.trainingBlock
-                          ? row.trainingBlock
-                          : row.otMin > 0
-                          ? `Would add ${fmtHoursFromMin(row.otMin)} OT`
-                          : "No conflict, in availability"}
-                      </td>
-                      <td style={styles.td}>
-                        <button
-                          style={styles.btn2}
-                          onClick={() => {
-                            setTab("schedule");
-                            setShiftDraft((p) => ({
-                              ...p,
-                              clientId: emergencyFillDraft.clientId,
-                              staffId: row.staff.id,
-                              startDate: emergencyFillDraft.date,
-                              startTime: emergencyFillDraft.startTime,
-                              endDate: emergencyFillDraft.date,
-                              endTime: emergencyFillDraft.endTime,
-                              overtimeApproved: row.otMin > 0,
-                            }));
-                          }}
-                        >
-                          Use
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {tab === "dashboard" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Supervisor Dashboard</h3>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Supervisor</th>
-                    <th style={styles.th}>Clients</th>
-                    <th style={styles.th}>Shifts</th>
-                    <th style={styles.th}>Gaps</th>
-                    <th style={styles.th}>Coverage %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {supervisorDashboard.map((row) => (
-                    <tr key={row.supervisor.id}>
-                      <td style={styles.td}><b>{row.supervisor.name}</b></td>
-                      <td style={styles.td}>{row.clientsCount}</td>
-                      <td style={styles.td}>{row.shiftsCount}</td>
-                      <td style={styles.td}>{row.gapsCount}</td>
-                      <td style={styles.td}>{row.coveragePct}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
           </div>
         )}
@@ -2392,33 +1681,9 @@ export default function Page() {
             </div>
 
             <div style={{ ...styles.grid4, marginTop: 10 }}>
-              <div>
-                <div style={styles.tiny}>CPR Expiration</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={staffDraft.cprExp}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, cprExp: e.target.value }))}
-                />
-              </div>
-              <div>
-                <div style={styles.tiny}>First Aid Expiration</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={staffDraft.firstAidExp}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, firstAidExp: e.target.value }))}
-                />
-              </div>
-              <div>
-                <div style={styles.tiny}>Med Training Expiration</div>
-                <input
-                  style={styles.input}
-                  type="date"
-                  value={staffDraft.medExp}
-                  onChange={(e) => setStaffDraft((p) => ({ ...p, medExp: e.target.value }))}
-                />
-              </div>
+              <div />
+              <div />
+              <div />
               <div style={{ display: "flex", alignItems: "end", justifyContent: "flex-end" }}>
                 <button style={styles.btn} onClick={saveStaff}>Save Staff</button>
               </div>
@@ -2427,57 +1692,44 @@ export default function Page() {
             <div style={styles.hr} />
 
             <div style={{ display: "grid", gap: 10 }}>
-              {state.staff.map((s) => {
-                const training = getTrainingStatus(s);
-                return (
-                  <div key={s.id} style={styles.shift}>
-                    <div style={styles.shiftTop}>
-                      <div>
-                        <div style={styles.shiftTitle}>{s.name}</div>
-                        <div style={styles.shiftMeta}>
-                          Status: <b>{s.active !== false ? "Active" : "Inactive"}</b>
-                          <br />
-                          Availability: {(s.availability?.days || []).map((d) => WEEKDAY_NAMES[d]).join(", ")} •{" "}
-                          {s.availability?.start || "00:00"} - {s.availability?.end || "23:59"}
-                          <br />
-                          CPR: {s.cprExp || "—"} • First Aid: {s.firstAidExp || "—"} • Med: {s.medExp || "—"}
-                          <br />
-                          OT Permission: <b>{s.canOvertime ? "Yes" : "No"}</b>
-                        </div>
-                        {training.expired.length ? (
-                          <div style={styles.warn}>
-                            Training expired: {training.expired.map((x) => x.label).join(", ")}
-                          </div>
-                        ) : null}
-                      </div>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button
-                          style={styles.btn2}
-                          onClick={() =>
-                            setStaffDraft({
-                              id: s.id,
-                              name: s.name || "",
-                              active: s.active !== false,
-                              availabilityDays: Array.isArray(s.availability?.days)
-                                ? s.availability.days
-                                : [1, 2, 3, 4, 5],
-                              availabilityStart: s.availability?.start || "07:00",
-                              availabilityEnd: s.availability?.end || "23:00",
-                              cprExp: normalizeDateInput(s.cprExp),
-                              firstAidExp: normalizeDateInput(s.firstAidExp),
-                              medExp: normalizeDateInput(s.medExp),
-                              canOvertime: !!s.canOvertime,
-                            })
-                          }
-                        >
-                          Edit
-                        </button>
-                        <button style={styles.btn2} onClick={() => removeStaff(s.id)}>Remove</button>
+              {state.staff.map((s) => (
+                <div key={s.id} style={styles.shift}>
+                  <div style={styles.shiftTop}>
+                    <div>
+                      <div style={styles.shiftTitle}>{s.name}</div>
+                      <div style={styles.shiftMeta}>
+                        Status: <b>{s.active !== false ? "Active" : "Inactive"}</b>
+                        <br />
+                        Availability: {(s.availability?.days || []).map((d) => WEEKDAY_NAMES[d]).join(", ")} •{" "}
+                        {s.availability?.start || "00:00"} - {s.availability?.end || "23:59"}
+                        <br />
+                        OT Permission: <b>{s.canOvertime ? "Yes" : "No"}</b>
                       </div>
                     </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        style={styles.btn2}
+                        onClick={() =>
+                          setStaffDraft({
+                            id: s.id,
+                            name: s.name || "",
+                            active: s.active !== false,
+                            availabilityDays: Array.isArray(s.availability?.days)
+                              ? s.availability.days
+                              : [1, 2, 3, 4, 5],
+                            availabilityStart: s.availability?.start || "07:00",
+                            availabilityEnd: s.availability?.end || "23:00",
+                            canOvertime: !!s.canOvertime,
+                          })
+                        }
+                      >
+                        Edit
+                      </button>
+                      <button style={styles.btn2} onClick={() => removeStaff(s.id)}>Remove</button>
+                    </div>
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -2679,82 +1931,6 @@ export default function Page() {
             </div>
           </div>
         )}
-
-        {tab === "settings" && canSeeAdminUI && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Settings</h3>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.includeUnassignedForSupervisors}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, includeUnassignedForSupervisors: e.target.checked },
-                  }))
-                }
-              />
-              Supervisors can see unassigned clients
-            </label>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.hardStopConflicts}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, hardStopConflicts: e.target.checked },
-                  }))
-                }
-              />
-              Hard-stop shift conflicts
-            </label>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.hardStopOT}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, hardStopOT: e.target.checked },
-                  }))
-                }
-              />
-              Hard-stop over 40 hours
-            </label>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.allowOvertimeOverride}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, allowOvertimeOverride: e.target.checked },
-                  }))
-                }
-              />
-              Allow overtime approval override
-            </label>
-
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={!!state.settings.blockExpiredTraining}
-                onChange={(e) =>
-                  setState((p) => ({
-                    ...p,
-                    settings: { ...p.settings, blockExpiredTraining: e.target.checked },
-                  }))
-                }
-              />
-              Block scheduling when training expired
-            </label>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -2770,17 +1946,6 @@ const styles = {
     borderRadius: 16,
     padding: 14,
     background: "rgba(255,255,255,0.04)",
-  },
-  statCard: {
-    border: "1px solid rgba(255,255,255,0.12)",
-    borderRadius: 14,
-    padding: 12,
-    background: "rgba(255,255,255,0.03)",
-  },
-  statValue: {
-    fontSize: 24,
-    fontWeight: 980,
-    marginTop: 4,
   },
   btn: {
     padding: "10px 12px",
@@ -2858,11 +2023,6 @@ const styles = {
     height: 1,
     background: "rgba(255,255,255,0.10)",
     margin: "12px 0",
-  },
-  warn: {
-    color: "#f59e0b",
-    fontSize: 13,
-    marginTop: 6,
   },
   th: {
     textAlign: "left",
