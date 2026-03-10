@@ -1124,6 +1124,21 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
                             <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
                               {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 10)} / {shortLabel(staffName(sh.staffId), 10)}
+                              {sh.isShared ? (
+                                <span
+                                  style={{
+                                    marginLeft: 6,
+                                    fontSize: 10,
+                                    fontWeight: 900,
+                                    color: "#4cc9f0",
+                                    border: "1px solid rgba(76,201,240,0.45)",
+                                    borderRadius: 999,
+                                    padding: "0 6px",
+                                  }}
+                                >
+                                  Shared
+                                </span>
+                              ) : null}
                             </div>
                             <div style={{ display: "flex", gap: 4 }}>
                               <button
@@ -1267,6 +1282,21 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
                       {preview.map((sh) => (
                         <div key={sh.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
                           {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 8)} / {shortLabel(staffName(sh.staffId), 8)}
+                          {sh.isShared ? (
+                            <span
+                              style={{
+                                marginLeft: 5,
+                                fontSize: 9,
+                                fontWeight: 900,
+                                color: "#4cc9f0",
+                                border: "1px solid rgba(76,201,240,0.45)",
+                                borderRadius: 999,
+                                padding: "0 5px",
+                              }}
+                            >
+                              Shared
+                            </span>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -2494,6 +2524,60 @@ export default function Page() {
         <div style={styles.tiny}>
           Auto bump end date if end time is earlier than start.
         </div>
+      </div>
+
+      <div style={{ gridColumn: "1 / -1", display: "grid", gap: 8 }}>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            type="checkbox"
+            checked={!!shiftDraft.isShared}
+            onChange={(e) =>
+              setShiftDraft((p) => ({
+                ...p,
+                isShared: e.target.checked,
+                clientId2: e.target.checked ? p.clientId2 : "",
+                sharedGroupId: e.target.checked ? p.sharedGroupId : "",
+              }))
+            }
+          />
+          <span style={{ fontSize: 13, fontWeight: 700 }}>Shared Support</span>
+        </label>
+
+        {shiftDraft.isShared ? (
+          <div style={{ ...styles.grid4, gap: 8 }}>
+            <div>
+              <div style={styles.tiny}>Client 2</div>
+              <select
+                style={styles.select}
+                value={shiftDraft.clientId2 || ""}
+                onChange={(e) =>
+                  setShiftDraft((p) => ({ ...p, clientId2: e.target.value }))
+                }
+              >
+                <option value="">Select…</option>
+                {visibleClients
+                  .filter((c) => c.id !== shiftDraft.clientId)
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div>
+              <div style={styles.tiny}>Shared Group ID (optional)</div>
+              <input
+                style={styles.input}
+                value={shiftDraft.sharedGroupId || ""}
+                onChange={(e) =>
+                  setShiftDraft((p) => ({ ...p, sharedGroupId: e.target.value }))
+                }
+                placeholder="Auto-generated if empty"
+              />
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
 
