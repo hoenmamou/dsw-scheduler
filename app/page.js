@@ -21,6 +21,8 @@ function reportSupabaseError(error) {
    Notes
    - This version is "dynamic": Supabase is the source of truth.
    - If Supabase env vars are missing, it will show an error banner.
+  - SQL (run once):
+    alter table public.clients add column if not exists assigned_staff_ids text;
 ========================= */
 
 const DAY_START_MIN = 7 * 60;  // 07:00
@@ -189,7 +191,41 @@ function fmtHoursFromMin(min) {
 
 const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
-const CLIENT_ASSIGNED_STAFF_STORAGE_KEY = "dsw_client_assigned_staff";
+
+function parseAssignedStaffIds(value) {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(value.map((id) => String(id || "").trim()).filter(Boolean)));
+  }
+
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (!raw) return [];
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return Array.from(new Set(parsed.map((id) => String(id || "").trim()).filter(Boolean)));
+      }
+    } catch {
+      // Fallback for comma-separated values in legacy rows.
+      return Array.from(new Set(raw.split(",").map((id) => id.trim()).filter(Boolean)));
+    }
+  }
+
+  return [];
+}
+
+function serializeAssignedStaffIds(ids) {
+  return JSON.stringify(parseAssignedStaffIds(ids));
+}
+
+function getClientAssignedStaff(client, allStaff) {
+  const activeStaff = (allStaff || []).filter((s) => s?.active !== false);
+  const assignedIds = parseAssignedStaffIds(client?.assignedStaffIds ?? client?.assigned_staff_ids);
+  if (!assignedIds.length) return activeStaff;
+  const assignedSet = new Set(assignedIds);
+  return activeStaff.filter((s) => assignedSet.has(s.id));
+}
 
 function parseShiftPattern(input) {
   // Accept newline or comma separated entries like "07:00-15:00"
@@ -227,35 +263,6 @@ function saveClientSchedule(clientId, shifts) {
     const map = raw ? JSON.parse(raw) : {};
     map[clientId] = { shifts };
     localStorage.setItem(CLIENT_SCHEDULE_STORAGE_KEY, JSON.stringify(map));
-  } catch {
-    // ignore
-  }
-}
-
-function loadClientAssignedStaffMap() {
-  try {
-    const raw = localStorage.getItem(CLIENT_ASSIGNED_STAFF_STORAGE_KEY);
-    const map = raw ? JSON.parse(raw) : {};
-    if (!map || typeof map !== "object") return {};
-    const normalized = {};
-    for (const [clientId, ids] of Object.entries(map)) {
-      if (!Array.isArray(ids)) continue;
-      normalized[clientId] = Array.from(
-        new Set(ids.map((id) => String(id || "").trim()).filter(Boolean))
-      );
-    }
-    return normalized;
-  } catch {
-    return {};
-  }
-}
-
-function saveClientAssignedStaffMap(map) {
-  try {
-    localStorage.setItem(
-      CLIENT_ASSIGNED_STAFF_STORAGE_KEY,
-      JSON.stringify(map || {})
-    );
   } catch {
     // ignore
   }
@@ -311,6 +318,7 @@ function toClientSnakeCaseRow(row) {
     coverage_end: row.coverage_end ?? row.coverageEnd ?? "23:00",
     // Canonical DB column for client weekly hours
     hours_allotted: row.hours_allotted ?? row.weekly_hours ?? row.weeklyHours ?? 40,
+    assigned_staff_ids: row.assigned_staff_ids ?? serializeAssignedStaffIds(row.assignedStaffIds ?? []),
     is_24_hour: row.is_24_hour ?? row.is24Hour ?? false,
     active: row.active !== false,
   };
@@ -324,6 +332,7 @@ function toClientCamelCaseRow(row) {
     coverageStart: row.coverageStart ?? row.coverage_start ?? "07:00",
     coverageEnd: row.coverageEnd ?? row.coverage_end ?? "23:00",
     weeklyHours: row.weeklyHours ?? row.hours_allotted ?? row.weekly_hours ?? 40,
+    assignedStaffIds: parseAssignedStaffIds(row.assignedStaffIds ?? row.assigned_staff_ids),
     is24Hour: row.is24Hour ?? row.is_24_hour ?? false,
     active: row.active !== false,
   };
@@ -337,6 +346,7 @@ function toClientMinimalRow(row) {
     coverage_start: row.coverage_start ?? row.coverageStart ?? "07:00",
     coverage_end: row.coverage_end ?? row.coverageEnd ?? "23:00",
     hours_allotted: row.hours_allotted ?? row.weekly_hours ?? row.weeklyHours ?? 40,
+    assigned_staff_ids: row.assigned_staff_ids ?? serializeAssignedStaffIds(row.assignedStaffIds ?? []),
     active: row.active !== false,
   };
 }
@@ -454,6 +464,7 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
         typeof c.hours_allotted === "number"
           ? c.hours_allotted
           : Number(c.hours_allotted ?? c.weekly_hours) || 40,
+      assignedStaffIds: parseAssignedStaffIds(c.assigned_staff_ids ?? c.assignedStaffIds),
       active: c.active !== false,
     })),
 
@@ -495,6 +506,7 @@ function toDB(state) {
       is_24_hour: !!c.is24Hour,
       // Canonical DB column for client weekly hours
       hours_allotted: Number(c.weeklyHours) || 40,
+      assigned_staff_ids: serializeAssignedStaffIds(c.assignedStaffIds ?? []),
       active: c.active !== false,
     })),
 
@@ -1250,10 +1262,13 @@ export default function Page() {
   const [builderBlockAssignments, setBuilderBlockAssignments] = useState({});
   const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
   const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
-  const [clientAssignedStaffMap, setClientAssignedStaffMap] = useState({});
   const clientSchedule = useMemo(() => {
     return builderClientId ? loadClientSchedule(builderClientId) : null;
   }, [builderClientId]);
+  const builderClient = useMemo(
+    () => (state.clients || []).find((c) => c.id === builderClientId) || null,
+    [state.clients, builderClientId]
+  );
   const activeStaff = useMemo(
     () => (state.staff || []).filter((s) => s.active !== false),
     [state.staff]
@@ -1291,13 +1306,15 @@ export default function Page() {
   }, [builderScheduleSource, builderTemplate, builderCustomTemplate, clientSchedule]);
 
   const builderClientAssignedStaffIds = useMemo(() => {
-    if (!builderClientId) return [];
-    const assigned = Array.isArray(clientAssignedStaffMap[builderClientId])
-      ? clientAssignedStaffMap[builderClientId]
-      : [];
-    const activeIds = new Set(activeStaff.map((s) => s.id));
-    return assigned.filter((id) => activeIds.has(id));
-  }, [builderClientId, clientAssignedStaffMap, activeStaff]);
+    if (!builderClient) return [];
+    return parseAssignedStaffIds(builderClient.assignedStaffIds ?? builderClient.assigned_staff_ids);
+  }, [builderClient]);
+
+  const builderUsesAssignedPool = builderClientAssignedStaffIds.length > 0;
+  const builderStaffPool = useMemo(
+    () => getClientAssignedStaff(builderClient, activeStaff),
+    [builderClient, activeStaff]
+  );
 
   // keep startDate aligned with week when week changes
   useEffect(() => {
@@ -1313,23 +1330,6 @@ export default function Page() {
       setBuilderScheduleSource((prev) => (prev === "custom" ? "custom" : "client"));
     }
   }, [builderClientId]);
-
-  useEffect(() => {
-    if (!mounted) return;
-    setClientAssignedStaffMap(loadClientAssignedStaffMap());
-  }, [mounted]);
-
-  function setClientAssignedStaff(clientId, staffIds) {
-    if (!clientId) return;
-    const normalized = Array.from(
-      new Set((staffIds || []).map((id) => String(id || "").trim()).filter(Boolean))
-    );
-    setClientAssignedStaffMap((prev) => {
-      const next = { ...prev, [clientId]: normalized };
-      saveClientAssignedStaffMap(next);
-      return next;
-    });
-  }
 
   // Auto bump endDate if endTime earlier than startTime
   useEffect(() => {
@@ -1359,8 +1359,11 @@ export default function Page() {
 
   async function runBuilder() {
     if (!builderClientId) return alert("Pick a client for the builder.");
+    const client = (state.clients || []).find((c) => c.id === builderClientId);
+    if (!client) return alert("Selected client was not found.");
     const start = new Date(weekStartDate);
     const rows = [];
+    const unfilled = [];
 
     // Determine shift definitions based on selected source
     const shiftsDef = builderShiftInfo.shifts;
@@ -1369,11 +1372,7 @@ export default function Page() {
 
     // Track per-staff minutes while building to avoid over-assigning
     const minutesByStaff = { ...staffWeekMinutesMap };
-    const pool = activeStaff;
-    const assignedIdSet = new Set(builderClientAssignedStaffIds);
-    const assignedPool = pool.filter((s) => assignedIdSet.has(s.id));
-    const fallbackPool = pool.filter((s) => !assignedIdSet.has(s.id));
-    const preferredPool = assignedPool.length ? [...assignedPool, ...fallbackPool] : pool;
+    const pool = getClientAssignedStaff(client, activeStaff);
     const projectedByStaff = {};
     let rotIndex = 0;
 
@@ -1430,9 +1429,9 @@ export default function Page() {
         if (forced && (await checkCandidate(forced))) return forced;
       }
 
-      for (let i = 0; i < preferredPool.length; i++) {
-        const idx = (rotIndex + i) % preferredPool.length;
-        const st = preferredPool[idx];
+      for (let i = 0; i < pool.length; i++) {
+        const idx = (rotIndex + i) % pool.length;
+        const st = pool[idx];
         if (await checkCandidate(st)) {
           rotIndex = idx + 1;
           return st;
@@ -1469,16 +1468,27 @@ export default function Page() {
               is_shared: false,
               shared_group_id: "",
             });
+          } else {
+            const dayName = WEEKDAY_NAMES[new Date(`${dateStr}T00:00:00`).getDay()] || "?";
+            unfilled.push(`${dayName} ${sTime}-${eTime}`);
           }
         }
       }
     }
 
-    if (!rows.length) return alert("Builder did not create any shifts (no available staff).");
-    await sbUpsert("shifts", rows);
-    await refreshState(setState);
-    setBuilderOpen(false);
-    alert(`Builder created ${rows.length} shift rows.`);
+    if (rows.length) {
+      await sbUpsert("shifts", rows);
+      await refreshState(setState);
+      setBuilderOpen(false);
+    }
+
+    const summary =
+      `Builder created ${rows.length} shifts. `
+      + `${unfilled.length} shifts were unfilled`
+      + (unfilled.length
+        ? `: ${unfilled.join(", ")}`
+        : ".");
+    alert(summary);
   }
 
   // Cross-supervisor (global) staff conflict check
@@ -1728,6 +1738,7 @@ export default function Page() {
     coverageStart: "07:00",
     coverageEnd: "23:00",
     weeklyHours: 40,
+    assignedStaffIds: [],
     is24Hour: false,
     active: true,
   });
@@ -1784,6 +1795,7 @@ export default function Page() {
       coverage_end: clientDraft.coverageEnd || "23:00",
       // Canonical DB column for client weekly hours
       hours_allotted: Number(clientDraft.weeklyHours) || 40,
+      assigned_staff_ids: serializeAssignedStaffIds(clientDraft.assignedStaffIds || []),
       is_24_hour: !!clientDraft.is24Hour,
       active: clientDraft.active !== false,
     };
@@ -1917,10 +1929,8 @@ export default function Page() {
 
   const selectedClientAssignedStaffIds = useMemo(() => {
     if (!selectedClientId) return [];
-    return Array.isArray(clientAssignedStaffMap[selectedClientId])
-      ? clientAssignedStaffMap[selectedClientId]
-      : [];
-  }, [selectedClientId, clientAssignedStaffMap]);
+    return parseAssignedStaffIds(selectedClient?.assignedStaffIds ?? selectedClient?.assigned_staff_ids);
+  }, [selectedClientId, selectedClient]);
 
   const selectedClientAssignedStaff = useMemo(() => {
     return selectedClientAssignedStaffIds
@@ -2111,10 +2121,20 @@ export default function Page() {
     </div>
 
     {builderOpen ? (
-      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.6)" }} className="no-print">
-        <div style={{ width: 720, maxWidth: "95%", ...styles.card }}>
+      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.75)", zIndex: 1000, padding: 12 }} className="no-print">
+        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: "#0f1118", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 16, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <div style={{ padding: "14px 14px 8px 14px", borderBottom: "1px solid rgba(255,255,255,0.10)" }}>
           <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
-          <div style={{ display: "grid", gap: 8 }}>
+            <div style={styles.tiny}>
+              {builderClientId
+                ? (builderUsesAssignedPool
+                    ? "Using assigned staff for this client"
+                    : "No assigned staff found — using all active staff")
+                : "Pick a client to load staff source"}
+            </div>
+          </div>
+
+          <div style={{ padding: 14, overflowY: "auto", display: "grid", gap: 8 }}>
             <div>
               <div style={styles.tiny}>Client</div>
               <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
@@ -2284,7 +2304,7 @@ export default function Page() {
                                 }
                               >
                                 <option value="">Auto</option>
-                                {activeStaff.map((s) => (
+                                {builderStaffPool.map((s) => (
                                   <option key={s.id} value={s.id}>
                                     {s.name}
                                   </option>
@@ -2327,8 +2347,9 @@ export default function Page() {
                 )}
               </div>
             </div>
+          </div>
 
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <div style={{ position: "sticky", bottom: 0, display: "flex", gap: 8, justifyContent: "flex-end", padding: 12, borderTop: "1px solid rgba(255,255,255,0.10)", background: "#0f1118" }}>
               <button
                 style={styles.btn2}
                 onClick={() => setBuilderOpen(false)}
@@ -2370,7 +2391,6 @@ export default function Page() {
               <button style={styles.btn} onClick={runBuilder}>
                 Generate
               </button>
-            </div>
           </div>
         </div>
       </div>
@@ -2682,7 +2702,17 @@ export default function Page() {
                               const next = e.target.checked
                                 ? [...selectedClientAssignedStaffIds, st.id]
                                 : selectedClientAssignedStaffIds.filter((id) => id !== st.id);
-                              setClientAssignedStaff(selectedClient.id, next);
+                              sbUpsert("clients", [
+                                {
+                                  id: selectedClient.id,
+                                  assigned_staff_ids: serializeAssignedStaffIds(next),
+                                },
+                              ])
+                                .then(() => refreshState(setState))
+                                .catch((err) => {
+                                  console.error("save assigned staff failed", err);
+                                  alert("Unable to save assigned staff.");
+                                });
                             }}
                           />
                           <span>{st.name}</span>
@@ -2844,6 +2874,30 @@ export default function Page() {
                 <div style={styles.tiny}>Coverage End</div>
                 <input style={styles.input} type="time" value={clientDraft.coverageEnd || "23:00"} onChange={(e) => setClientDraft((p) => ({ ...p, coverageEnd: e.target.value }))} />
               </div>
+
+              <div style={{ gridColumn: "1 / -1" }}>
+                <div style={styles.tiny}>Assigned Staff</div>
+                <div style={{ marginTop: 6, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+                  {activeStaff.map((st) => {
+                    const checked = (clientDraft.assignedStaffIds || []).includes(st.id);
+                    return (
+                      <label key={st.id} style={{ ...styles.shift, display: "flex", gap: 8, alignItems: "center", padding: "8px 10px" }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? [...(clientDraft.assignedStaffIds || []), st.id]
+                              : (clientDraft.assignedStaffIds || []).filter((id) => id !== st.id);
+                            setClientDraft((p) => ({ ...p, assignedStaffIds: parseAssignedStaffIds(next) }));
+                          }}
+                        />
+                        <span>{st.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
 
             {/* Sticky actions: keep save/cancel visible while scrolling the long form/list */}
@@ -2907,6 +2961,7 @@ export default function Page() {
                               coverageStart: c.coverageStart || "07:00",
                               coverageEnd: c.coverageEnd || "23:00",
                               weeklyHours: Number(c.weeklyHours ?? c.hours_allotted ?? c.weekly_hours) || 40,
+                              assignedStaffIds: parseAssignedStaffIds(c.assignedStaffIds ?? c.assigned_staff_ids),
                               is24Hour: !!c.is24Hour,
                               active: c.active !== false,
                             })
