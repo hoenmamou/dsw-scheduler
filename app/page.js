@@ -148,6 +148,14 @@ function addDays(date, n) {
   return d;
 }
 
+function startOfWeekSunday(dateInput) {
+  const d = new Date(dateInput);
+  if (isNaN(d)) return null;
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - d.getDay());
+  return d;
+}
+
 function minutesBetweenISO(aISO, bISO) {
   const a = new Date(aISO);
   const b = new Date(bISO);
@@ -892,6 +900,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
+  const [expandedDays, setExpandedDays] = useState({});
 
   const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
   const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
@@ -906,6 +915,10 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
 
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
   const PREVIEW_LIMIT = 3;
+
+  function toggleDayExpanded(dateStr) {
+    setExpandedDays((prev) => ({ ...prev, [dateStr]: !prev[dateStr] }));
+  }
 
   function dayShifts(dateStr) {
     const dayStart = `${dateStr}T00:00:00`;
@@ -940,53 +953,73 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
 
-            <div style={{ display: "grid", gap: 4, marginTop: 6, fontSize: 11, lineHeight: 1.25, overflow: "hidden" }}>
+            <div style={{ display: "grid", gap: 4, marginTop: 6, fontSize: 11, lineHeight: 1.25, flex: 1, minHeight: 0 }}>
               {(() => {
                 const all = dayShifts(dateStr);
-                const preview = all.slice(0, PREVIEW_LIMIT);
+                const isExpanded = !!expandedDays[dateStr];
+                const preview = isExpanded ? all : all.slice(0, PREVIEW_LIMIT);
                 const hiddenCount = Math.max(0, all.length - PREVIEW_LIMIT);
 
                 if (all.length === 0) return <div style={{ opacity: 0.75, fontSize: 11 }}>No shifts</div>;
 
                 return (
                   <>
-                    {preview.map((sh) => (
-                      <div key={sh.id} style={{ border: "1px solid rgba(255,255,255,0.10)", borderRadius: 8, padding: "4px 6px", background: "rgba(255,255,255,0.02)" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
-                          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
-                            {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(staffName(sh.staffId), 10)}
-                          </div>
-                          <div style={{ display: "flex", gap: 4 }}>
-                            <button
-                              style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px" }}
-                              title="Edit shift"
-                              onClick={() => {
-                                setTab && setTab("schedule");
-                                setShiftDraft && setShiftDraft({
-                                  clientId: sh.clientId,
-                                  staffId: sh.staffId,
-                                  startDate: sh.startISO.slice(0, 10),
-                                  startTime: sh.startISO.slice(11, 16),
-                                  endDate: sh.endISO.slice(0, 10),
-                                  endTime: sh.endISO.slice(11, 16),
-                                  isShared: !!sh.isShared,
-                                  clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
-                                  sharedGroupId: sh.sharedGroupId || "",
-                                });
-                              }}
-                            >E</button>
-                            <button
-                              style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px", color: "#ff8b8b" }}
-                              title="Delete shift"
-                              onClick={() => {
-                                if (typeof deleteShift === "function") deleteShift(sh.id);
-                              }}
-                            >D</button>
+                    <div style={{ display: "grid", gap: 4, overflowY: isExpanded ? "auto" : "hidden", minHeight: 0 }}>
+                      {preview.map((sh) => (
+                        <div key={sh.id} style={{ border: "1px solid rgba(255,255,255,0.10)", borderRadius: 8, padding: "4px 6px", background: "rgba(255,255,255,0.02)" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
+                            <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
+                              {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 10)} / {shortLabel(staffName(sh.staffId), 10)}
+                            </div>
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <button
+                                style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px" }}
+                                title="Edit shift"
+                                onClick={() => {
+                                  setTab && setTab("schedule");
+                                  setShiftDraft && setShiftDraft({
+                                    clientId: sh.clientId,
+                                    staffId: sh.staffId,
+                                    startDate: sh.startISO.slice(0, 10),
+                                    startTime: sh.startISO.slice(11, 16),
+                                    endDate: sh.endISO.slice(0, 10),
+                                    endTime: sh.endISO.slice(11, 16),
+                                    isShared: !!sh.isShared,
+                                    clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
+                                    sharedGroupId: sh.sharedGroupId || "",
+                                  });
+                                }}
+                              >E</button>
+                              <button
+                                style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px", color: "#ff8b8b" }}
+                                title="Delete shift"
+                                onClick={() => {
+                                  if (typeof deleteShift === "function") deleteShift(sh.id);
+                                }}
+                              >D</button>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
-                    {hiddenCount > 0 ? <div style={{ opacity: 0.85, fontSize: 11 }}>+{hiddenCount} more</div> : null}
+                      ))}
+                    </div>
+                    {hiddenCount > 0 && !isExpanded ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px", justifySelf: "start" }}
+                        onClick={() => toggleDayExpanded(dateStr)}
+                      >
+                        +{hiddenCount} more
+                      </button>
+                    ) : null}
+                    {isExpanded && all.length > PREVIEW_LIMIT ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px", justifySelf: "start" }}
+                        onClick={() => toggleDayExpanded(dateStr)}
+                      >
+                        Show less
+                      </button>
+                    ) : null}
                   </>
                 );
               })()}
@@ -1002,6 +1035,7 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
+  const [expandedDays, setExpandedDays] = useState({});
 
   const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
   const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
@@ -1009,12 +1043,11 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
   const monthStart = new Date(monthStartDate);
   monthStart.setHours(0, 0, 0, 0);
 
-  // Align the month view to a Monday-start calendar grid
+  // Align the month view to a Sunday-start calendar grid
   const firstOfMonth = new Date(monthStart);
   firstOfMonth.setDate(1);
-  const firstWeekday = firstOfMonth.getDay(); // 0=Sun, 1=Mon
-  const offsetToMon = firstWeekday === 0 ? -6 : 1 - firstWeekday;
-  const gridStart = addDays(firstOfMonth, offsetToMon);
+  const firstWeekday = firstOfMonth.getDay(); // 0=Sun
+  const gridStart = addDays(firstOfMonth, -firstWeekday);
 
   const days = [...Array(42)].map((_, i) => {
     const d = addDays(gridStart, i);
@@ -1023,6 +1056,10 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
 
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
   const PREVIEW_LIMIT = 2;
+
+  function toggleDayExpanded(dateStr) {
+    setExpandedDays((prev) => ({ ...prev, [dateStr]: !prev[dateStr] }));
+  }
 
   function dayShifts(dateStr) {
     const dayStart = `${dateStr}T00:00:00`;
@@ -1064,22 +1101,42 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
             <div style={{ fontWeight: 900, fontSize: 11 }}>
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
-            <div style={{ display: "grid", gap: 3, marginTop: 4, fontSize: 10, lineHeight: 1.2, overflow: "hidden" }}>
+            <div style={{ display: "grid", gap: 3, marginTop: 4, fontSize: 10, lineHeight: 1.2, flex: 1, minHeight: 0 }}>
               {(() => {
                 const all = dayShifts(dateStr);
-                const preview = all.slice(0, PREVIEW_LIMIT);
+                const isExpanded = !!expandedDays[dateStr];
+                const preview = isExpanded ? all : all.slice(0, PREVIEW_LIMIT);
                 const hiddenCount = Math.max(0, all.length - PREVIEW_LIMIT);
 
                 if (all.length === 0) return <div style={{ opacity: 0.7, fontSize: 10 }}>No shifts</div>;
 
                 return (
                   <>
-                    {preview.map((sh) => (
-                      <div key={sh.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
-                        {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 10)}
-                      </div>
-                    ))}
-                    {hiddenCount > 0 ? <div style={{ opacity: 0.85 }}>+{hiddenCount} more</div> : null}
+                    <div style={{ display: "grid", gap: 3, overflowY: isExpanded ? "auto" : "hidden", minHeight: 0 }}>
+                      {preview.map((sh) => (
+                        <div key={sh.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
+                          {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 8)} / {shortLabel(staffName(sh.staffId), 8)}
+                        </div>
+                      ))}
+                    </div>
+                    {hiddenCount > 0 && !isExpanded ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px", justifySelf: "start" }}
+                        onClick={() => toggleDayExpanded(dateStr)}
+                      >
+                        +{hiddenCount} more
+                      </button>
+                    ) : null}
+                    {isExpanded && all.length > PREVIEW_LIMIT ? (
+                      <button
+                        type="button"
+                        style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px", justifySelf: "start" }}
+                        onClick={() => toggleDayExpanded(dateStr)}
+                      >
+                        Show less
+                      </button>
+                    ) : null}
                   </>
                 );
               })()}
@@ -1122,13 +1179,9 @@ export default function Page() {
   // UI
   const [tab, setTab] = useState("schedule");
 
-  // Week selection (Monday start)
+  // Week selection (Sunday start)
   const [weekStart, setWeekStart] = useState(() => {
-    const d = new Date();
-    const day = d.getDay(); // 0 Sun
-    const diffToMon = (day === 0 ? -6 : 1) - day;
-    d.setDate(d.getDate() + diffToMon);
-    d.setHours(0, 0, 0, 0);
+    const d = startOfWeekSunday(new Date()) || new Date();
     return isoLocal(d).slice(0, 10);
   });
 
@@ -1817,74 +1870,6 @@ export default function Page() {
     await refreshState(setState);
   }
 
-  // Coverage gaps (uses visible clients + their coverage windows; supports 24h clients)
-  const coverageGaps = useMemo(() => {
-    const gaps = [];
-    const start = new Date(weekStartDate);
-
-    for (const c of visibleClients) {
-      const covStart = c.coverageStart || "07:00";
-      const covEnd = c.coverageEnd || "23:00";
-
-      for (let d = 0; d < 7; d++) {
-        const day0 = addDays(start, d);
-        day0.setHours(0, 0, 0, 0);
-        const dateStr = isoLocal(day0).slice(0, 10);
-
-        let covStartISO = `${dateStr}T${covStart}:00`;
-        let covEndISO = `${dateStr}T${covEnd}:00`;
-
-        // 24h client overrides
-        if (c.is24Hour) {
-          covStartISO = `${dateStr}T00:00:00`;
-          const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
-          covEndISO = `${isoLocal(nd).slice(0, 10)}T00:00:00`;
-        } else {
-          // if coverage wraps past midnight
-          if (new Date(covEndISO) <= new Date(covStartISO)) {
-            const nd = new Date(`${dateStr}T00:00:00`);
-            nd.setDate(nd.getDate() + 1);
-            covEndISO = `${isoLocal(nd).slice(0, 10)}T${covEnd}:00`;
-          }
-        }
-
-        const clientShifts = shiftsInSelectedWeek
-          .filter((sh) => sh.clientId === c.id)
-          .map((sh) => ({ start: sh.startISO, end: sh.endISO }))
-          .sort((a, b) => new Date(a.start) - new Date(b.start));
-
-        // Merge overlaps
-        const merged = [];
-        for (const s of clientShifts) {
-          if (!merged.length) merged.push({ ...s });
-          else {
-            const last = merged[merged.length - 1];
-            if (new Date(s.start) <= new Date(last.end)) {
-              if (new Date(s.end) > new Date(last.end)) last.end = s.end;
-            } else merged.push({ ...s });
-          }
-        }
-
-        // Find gaps inside coverage window
-        let cursor = covStartISO;
-
-        for (const seg of merged) {
-          if (overlaps(cursor, covEndISO, seg.start, seg.end)) {
-            const segStart = new Date(seg.start) > new Date(cursor) ? seg.start : cursor;
-            if (new Date(segStart) > new Date(cursor)) {
-              gaps.push({ clientId: c.id, dateStr, startISO: cursor, endISO: segStart });
-            }
-            cursor = new Date(seg.end) > new Date(cursor) ? seg.end : cursor;
-          }
-        }
-
-        if (new Date(cursor) < new Date(covEndISO)) gaps.push({ clientId: c.id, dateStr, startISO: cursor, endISO: covEndISO });
-      }
-    }
-
-    return gaps.filter((g) => minutesBetweenISO(g.startISO, g.endISO) >= 5);
-  }, [visibleClients, shiftsInSelectedWeek, weekStartDate]);
-
   // Admin: drafts
   const [staffDraftName, setStaffDraftName] = useState("");
   const createEmptyClientDraft = () => ({
@@ -2021,7 +2006,6 @@ export default function Page() {
     { value: "calendar", label: "Weekly Calendar" },
     { value: "month", label: "Monthly Calendar" },
     { value: "staffSchedule", label: "Staff Schedule" },
-    { value: "gaps", label: "Coverage Gaps" },
     { value: "hours", label: "Hours & OT" },
     // --- Client Profiles tab for users who can see clients ---
     ...(visibleClients.length > 0 ? [
@@ -2141,7 +2125,16 @@ export default function Page() {
           <Tabs value={tab} onChange={setTab} tabs={tabs} />
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <div style={styles.tiny}>Week start</div>
-            <input style={styles.input} type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)} />
+            <input
+              style={styles.input}
+              type="date"
+              value={weekStart}
+              onChange={(e) => {
+                const sunday = startOfWeekSunday(`${e.target.value}T00:00:00`);
+                if (!sunday) return;
+                setWeekStart(isoLocal(sunday).slice(0, 10));
+              }}
+            />
           </div>
         </div>
 
@@ -2628,36 +2621,6 @@ export default function Page() {
                 </tbody>
               </table>
             </div>
-          </div>
-        )}
-
-        {/* ================= Coverage Gaps ================= */}
-        {tab === "gaps" && (
-          <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Coverage Gaps (visible clients)</h3>
-            <div style={styles.tiny}>
-              Based on coverage window (default 7:00a–11:00p). 24-hour clients use 00:00–24:00.
-            </div>
-            <div style={styles.hr} />
-
-            {coverageGaps.length === 0 ? (
-              <div style={styles.tiny}>No gaps detected for the selected week.</div>
-            ) : (
-              <div style={{ display: "grid", gap: 10 }}>
-                {coverageGaps.slice(0, 300).map((g, idx) => {
-                  const c = (state.clients || []).find((x) => x.id === g.clientId);
-                  return (
-                    <div key={`${g.clientId}_${idx}`} style={styles.shift}>
-                      <div style={styles.shiftTitle}>{c?.name || "Unknown Client"}</div>
-                      <div style={styles.shiftMeta}>
-                        {formatShiftDateTimeFromISO(g.startISO)} → {formatShiftDateTimeFromISO(g.endISO)}
-                      </div>
-                    </div>
-                  );
-                })}
-                {coverageGaps.length > 300 && <div style={styles.warn}>Showing first 300 gaps.</div>}
-              </div>
-            )}
           </div>
         )}
 
