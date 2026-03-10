@@ -958,8 +958,8 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
 
   if (!users || users.length === 0) {
     return (
-      <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
-        <div style={{ maxWidth: 520, margin: "40px auto", ...styles.card }}>
+      <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 16 }}>
+        <div style={{ maxWidth: 520, margin: "28px auto", ...styles.card }}>
           <h2 style={{ marginTop: 0 }}>DSW Scheduler — Create Admin</h2>
 
           <div style={{ ...styles.twoCol, marginTop: 10 }}>
@@ -998,8 +998,8 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 20 }}>
-      <div style={{ maxWidth: 520, margin: "40px auto", ...styles.card }}>
+    <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 16 }}>
+      <div style={{ maxWidth: 520, margin: "28px auto", ...styles.card }}>
         <h2 style={{ marginTop: 0 }}>DSW Scheduler Login</h2>
 
         <div style={{ ...styles.twoCol, marginTop: 10 }}>
@@ -1100,9 +1100,9 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(180px, 1fr))", gap: 10, overflowX: "auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(170px, 1fr))", gap: 8, overflowX: "auto" }}>
         {days.map(({ d, dateStr }) => (
-          <div key={dateStr} style={{ ...styles.card, padding: 8, minHeight: 180, maxHeight: 180, display: "flex", flexDirection: "column" }}>
+          <div key={dateStr} style={{ ...styles.card, padding: 8, minHeight: 170, maxHeight: 170, display: "flex", flexDirection: "column" }}>
             <div style={{ fontWeight: 900, fontSize: 12 }}>
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
@@ -1120,7 +1120,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
                   <>
                     <div style={{ display: "grid", gap: 4, overflowY: isExpanded ? "auto" : "hidden", minHeight: 0 }}>
                       {preview.map((sh) => (
-                        <div key={sh.id} style={{ border: "1px solid rgba(255,255,255,0.10)", borderRadius: 8, padding: "4px 6px", background: "rgba(255,255,255,0.02)" }}>
+                        <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 8, padding: "3px 6px", background: UI.panelAlt }}>
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
                             <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
                               {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 10)} / {shortLabel(staffName(sh.staffId), 10)}
@@ -1160,7 +1160,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
                                 }}
                               >E</button>
                               <button
-                                style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px", color: "#ff8b8b" }}
+                                style={{ ...styles.btnDanger, fontSize: 10, padding: "1px 6px" }}
                                 title="Delete shift"
                                 onClick={() => {
                                   if (typeof deleteShift === "function") deleteShift(sh.id);
@@ -1253,7 +1253,7 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 8, overflowX: "auto" }}>
         {WEEKDAY_NAMES.map((w) => (
           <div key={w} style={{ ...styles.card, fontWeight: 900, textAlign: "center" }}>
             {w}
@@ -1261,9 +1261,9 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
         ))}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 8, overflowX: "auto" }}>
         {days.map(({ d, dateStr, inMonth }) => (
-          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45, padding: 8, minHeight: 122, maxHeight: 122, display: "flex", flexDirection: "column" }}>
+          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45, padding: 8, minHeight: 116, maxHeight: 116, display: "flex", flexDirection: "column" }}>
             <div style={{ fontWeight: 900, fontSize: 11 }}>
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
@@ -2357,8 +2357,8 @@ export default function Page() {
   const canSeeAllShifts = isAdmin; // supervisors see their clients + optional unassigned (via visibleClients)
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 12 }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+    <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 10 }}>
+      <div style={{ maxWidth: 1220, margin: "0 auto" }}>
         {!SUPABASE_CONFIGURED ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
             <strong>Warning:</strong> Supabase is not configured. The app is using localStorage fallback. To enable cloud sync set <b>NEXT_PUBLIC_SUPABASE_URL</b> and <b>NEXT_PUBLIC_SUPABASE_ANON_KEY</b>.
@@ -2371,9 +2371,9 @@ export default function Page() {
             </div>
           </div>
         ) : null}
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 2 }}>
           <div>
-            <div style={{ fontSize: 19, fontWeight: 980, lineHeight: 1.15 }}>DSW Scheduler (Dynamic)</div>
+            <div style={{ fontSize: 22, fontWeight: 980, lineHeight: 1.12, letterSpacing: "0.01em" }}>DSW Scheduler</div>
             <div style={styles.tiny}>
               Logged in as <b>{currentUser.name}</b> ({currentUser.role})
             </div>
@@ -2385,7 +2385,7 @@ export default function Page() {
           </div>
         </div>
 
-        <div className="no-print" style={{ marginTop: 6, display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <div className="no-print" style={{ marginTop: 4, display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center", paddingBottom: 2 }}>
           <Tabs value={tab} onChange={setTab} tabs={tabs} />
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <div style={styles.tiny}>Week start</div>
@@ -2588,9 +2588,9 @@ export default function Page() {
     </div>
 
     {builderOpen ? (
-      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.75)", zIndex: 1000, padding: 12 }} className="no-print">
-        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: "#0f1118", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 16, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <div style={{ padding: "14px 14px 8px 14px", borderBottom: "1px solid rgba(255,255,255,0.10)" }}>
+      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(4,8,16,0.76)", zIndex: 1000, padding: 14 }} className="no-print">
+        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: UI.panel, border: `1px solid ${UI.border}`, borderRadius: 14, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 18px 44px rgba(0,0,0,0.42)" }}>
+          <div style={{ padding: "12px 14px 8px 14px", borderBottom: `1px solid ${UI.borderSoft}` }}>
           <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
             <div style={styles.tiny}>
               {builderClientId
@@ -2601,7 +2601,7 @@ export default function Page() {
             </div>
           </div>
 
-          <div style={{ padding: 14, overflowY: "auto", display: "grid", gap: 8 }}>
+          <div style={{ padding: 14, overflowY: "auto", display: "grid", gap: 10 }}>
             <div>
               <div style={styles.tiny}>Client</div>
               <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
@@ -2816,7 +2816,7 @@ export default function Page() {
             </div>
           </div>
 
-          <div style={{ position: "sticky", bottom: 0, display: "flex", gap: 8, justifyContent: "flex-end", padding: 12, borderTop: "1px solid rgba(255,255,255,0.10)", background: "#0f1118" }}>
+          <div style={{ position: "sticky", bottom: 0, display: "flex", gap: 8, justifyContent: "flex-end", padding: 12, borderTop: `1px solid ${UI.borderSoft}`, background: UI.panel }}>
               <button
                 style={styles.btn2}
                 onClick={() => setBuilderOpen(false)}
@@ -3004,8 +3004,8 @@ export default function Page() {
                     {staffHoursRows.map(({ st, min, otMin }) => (
                       <tr key={st.id}>
                         <td style={styles.tdCompact}><b>{st.name}</b></td>
-                        <td style={styles.tdCompact}>{fmtHoursFromMin(min)}</td>
-                        <td style={{ ...styles.tdCompact, color: otMin > 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(min)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums", color: otMin > 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
                       </tr>
                     ))}
                     {staffHoursRows.length === 0 ? (
@@ -3053,11 +3053,11 @@ export default function Page() {
                     {clientHoursRows.map(({ c, h, allottedMin, remainingMin }) => (
                       <tr key={c.id}>
                         <td style={styles.tdCompact}><b>{c.name}</b></td>
-                        <td style={styles.tdCompact}>{fmtHoursFromMin(allottedMin)}</td>
-                        <td style={styles.tdCompact}>{fmtHoursFromMin(h.totalMin)}</td>
-                        <td style={{ ...styles.tdCompact, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(remainingMin)}</td>
-                        <td style={styles.tdCompact}>{fmtHoursFromMin(h.dayMin)}</td>
-                        <td style={styles.tdCompact}>{fmtHoursFromMin(h.nightMin)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(allottedMin)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(h.totalMin)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums", color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(remainingMin)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(h.dayMin)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(h.nightMin)}</td>
                       </tr>
                     ))}
                     {clientHoursRows.length === 0 ? (
@@ -3425,7 +3425,7 @@ export default function Page() {
                         >
                           Schedule
                         </button>
-                        <button style={styles.btn2} onClick={() => deleteClient(c.id)}>Delete</button>
+                        <button style={styles.btnDanger} onClick={() => deleteClient(c.id)}>Delete</button>
                       </div>
                     </div>
                   </div>
@@ -3478,7 +3478,7 @@ export default function Page() {
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
                       <button style={styles.btn2} onClick={() => setUserDraft({ ...u })}>Edit</button>
-                      <button style={styles.btn2} onClick={() => deleteUser(u.id)}>Delete</button>
+                      <button style={styles.btnDanger} onClick={() => deleteUser(u.id)}>Delete</button>
                     </div>
                   </div>
                 </div>
@@ -3564,60 +3564,79 @@ export default function Page() {
    Styles
 ========================= */
 
+const UI = {
+  bg: "#0b1018",
+  panel: "#131a24",
+  panelAlt: "#101722",
+  border: "rgba(226,232,240,0.14)",
+  borderSoft: "rgba(226,232,240,0.08)",
+  text: "#e6edf7",
+  textMuted: "rgba(230,237,247,0.72)",
+};
+
 const styles = {
   card: {
-    border: "1px solid rgba(255,255,255,0.12)",
-    borderRadius: 16,
-    padding: 14,
-    background: "rgba(255,255,255,0.04)",
+    border: `1px solid ${UI.border}`,
+    borderRadius: 12,
+    padding: 12,
+    background: UI.panel,
   },
   btn: {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(31,111,235,0.7)",
-    background: "#1f6feb",
-    color: "white",
+    padding: "8px 11px",
+    borderRadius: 10,
+    border: "1px solid rgba(81,124,230,0.55)",
+    background: "#3f73d8",
+    color: UI.text,
     fontWeight: 900,
     cursor: "pointer",
   },
   btn2: {
     padding: "7px 10px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "transparent",
-    color: "white",
+    borderRadius: 10,
+    border: `1px solid ${UI.border}`,
+    background: UI.panelAlt,
+    color: UI.text,
+    fontWeight: 850,
+    cursor: "pointer",
+  },
+  btnDanger: {
+    padding: "7px 10px",
+    borderRadius: 10,
+    border: "1px solid rgba(228,95,112,0.45)",
+    background: "rgba(228,95,112,0.14)",
+    color: "#ffb3be",
     fontWeight: 850,
     cursor: "pointer",
   },
   input: {
     width: "100%",
     padding: "8px 9px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(255,255,255,0.03)",
-    color: "white",
+    borderRadius: 10,
+    border: `1px solid ${UI.border}`,
+    background: "rgba(255,255,255,0.025)",
+    color: UI.text,
     outline: "none",
   },
   select: {
     width: "100%",
     padding: "8px 9px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(15,15,20,0.9)",
-    color: "white",
+    borderRadius: 10,
+    border: `1px solid ${UI.border}`,
+    background: "rgba(255,255,255,0.02)",
+    color: UI.text,
     outline: "none",
   },
-  grid4: { display: "grid", gridTemplateColumns: "repeat(4, minmax(220px, 1fr))", gap: 10 },
-  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
-  tiny: { fontSize: 12, opacity: 0.8 },
-  shift: { border: "1px solid rgba(255,255,255,0.12)", borderRadius: 14, padding: 10, background: "rgba(255,255,255,0.03)" },
+  grid4: { display: "grid", gridTemplateColumns: "repeat(4, minmax(220px, 1fr))", gap: 8 },
+  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
+  tiny: { fontSize: 11, color: UI.textMuted, lineHeight: 1.35 },
+  shift: { border: `1px solid ${UI.border}`, borderRadius: 12, padding: 9, background: UI.panelAlt },
   shiftTop: { display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" },
-  shiftTitle: { fontWeight: 950, fontSize: 13, marginBottom: 4 },
-  shiftMeta: { fontSize: 12, opacity: 0.86, lineHeight: 1.35 },
-  hr: { height: 1, background: "rgba(255,255,255,0.10)", margin: "10px 0" },
+  shiftTitle: { fontWeight: 900, fontSize: 13, marginBottom: 3 },
+  shiftMeta: { fontSize: 11, color: UI.textMuted, lineHeight: 1.35 },
+  hr: { height: 1, background: UI.borderSoft, margin: "10px 0" },
   warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
-  th: { textAlign: "left", fontSize: 12, opacity: 0.85, padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
-  td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
-  thCompact: { textAlign: "left", fontSize: 11, opacity: 0.85, padding: "6px 5px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
-  tdCompact: { padding: "6px 5px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 12 },
+  th: { textAlign: "left", fontSize: 11, color: UI.textMuted, padding: "7px 6px", borderBottom: `1px solid ${UI.border}` },
+  td: { padding: "7px 6px", borderBottom: `1px solid ${UI.borderSoft}`, fontSize: 12 },
+  thCompact: { textAlign: "left", fontSize: 10, color: UI.textMuted, padding: "5px 5px", borderBottom: `1px solid ${UI.border}` },
+  tdCompact: { padding: "5px 5px", borderBottom: `1px solid ${UI.borderSoft}`, fontSize: 11 },
 };
