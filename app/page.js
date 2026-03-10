@@ -1031,15 +1031,48 @@ function calculateUnassignedShiftHours(shifts) {
   return (shifts || []).reduce((sum, sh) => sum + minutesBetweenISO(sh.startISO, sh.endISO), 0);
 }
 
-function calculateAdditionalStaffNeeded(unassignedMinutes) {
-  if (!unassignedMinutes || unassignedMinutes <= 0) return 0;
-  return Math.ceil(unassignedMinutes / OT_THRESHOLD_MIN);
+function calculateMinimumStaffRequired(totalMinutes) {
+  if (!totalMinutes || totalMinutes <= 0) return 0;
+  return Math.ceil(totalMinutes / OT_THRESHOLD_MIN);
+}
+
+function calculateRemainingCapacityByStaff(weeklyHoursMap, staffIds, staffList) {
+  const uniqueStaffIds = Array.from(new Set((staffIds || []).filter(Boolean)));
+  const entries = uniqueStaffIds.map((staffId) => {
+    const minutes = weeklyHoursMap[staffId] || 0;
+    const remainingMinutes = Math.max(0, OT_THRESHOLD_MIN - minutes);
+    const staff = (staffList || []).find((st) => st.id === staffId);
+    return {
+      id: staffId,
+      name: staff?.name || staffId,
+      assignedMinutes: minutes,
+      remainingMinutes,
+      isAt40: minutes === OT_THRESHOLD_MIN,
+      isOver40: minutes > OT_THRESHOLD_MIN,
+      isUsable: remainingMinutes > 0,
+    };
+  });
+
+  return {
+    entries,
+    usableStaffCount: entries.filter((entry) => entry.isUsable).length,
+    totalRemainingMinutes: entries.reduce((sum, entry) => sum + entry.remainingMinutes, 0),
+  };
+}
+
+function calculateAdditionalStaffNeeded(totalMinutes, assignedMinutes, remainingCapacityMinutes, currentUsableStaff, minimumStaffRequired) {
+  const uncoveredMinutes = Math.max(0, totalMinutes - assignedMinutes - remainingCapacityMinutes);
+  const extraFromHours = Math.ceil(uncoveredMinutes / OT_THRESHOLD_MIN);
+  const extraFromHeadcount = Math.max(0, minimumStaffRequired - currentUsableStaff);
+  return Math.max(extraFromHours, extraFromHeadcount);
 }
 
 function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList }) {
   const generated = generatedShifts || [];
   const assignedGenerated = generated.filter((sh) => !!sh.staffId);
   const unassignedGenerated = generated.filter((sh) => !sh.staffId);
+  const totalScheduledMinutes = calculateUnassignedShiftHours(generated);
+  const assignedScheduledMinutes = calculateUnassignedShiftHours(assignedGenerated);
   const weekKeys = Array.from(
     new Set(generated.map((sh) => getWeekStartKey(sh.startISO)).filter(Boolean))
   ).sort();
@@ -1055,17 +1088,38 @@ function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList
     const staffOver40 = (staffList || []).filter((st) => weeklyHoursMap[st.id] > OT_THRESHOLD_MIN);
     const weekUnassigned = unassignedGenerated.filter((sh) => getWeekStartKey(sh.startISO) === weekKey);
     const unassignedMinutes = calculateUnassignedShiftHours(weekUnassigned);
+    const weekGenerated = generated.filter((sh) => getWeekStartKey(sh.startISO) === weekKey);
+    const weekAssigned = assignedGenerated.filter((sh) => getWeekStartKey(sh.startISO) === weekKey);
+    const weekTotalScheduledMinutes = calculateUnassignedShiftHours(weekGenerated);
+    const weekAssignedScheduledMinutes = calculateUnassignedShiftHours(weekAssigned);
+    const assignedStaffIds = weekAssigned.map((sh) => sh.staffId).filter(Boolean);
+    const remainingCapacity = calculateRemainingCapacityByStaff(weeklyHoursMap, assignedStaffIds, staffList);
+    const minimumStaffRequired = calculateMinimumStaffRequired(weekTotalScheduledMinutes);
+    const additionalStaffNeeded = calculateAdditionalStaffNeeded(
+      weekTotalScheduledMinutes,
+      weekAssignedScheduledMinutes,
+      remainingCapacity.totalRemainingMinutes,
+      remainingCapacity.usableStaffCount,
+      minimumStaffRequired
+    );
 
     for (const st of staffAt40) at40Set.add(st.id);
     for (const st of staffOver40) over40Set.add(st.id);
 
     weeklyBreakdown.push({
       weekStart: weekKey,
+      totalScheduledMinutes: weekTotalScheduledMinutes,
+      assignedScheduledMinutes: weekAssignedScheduledMinutes,
       unassignedCount: weekUnassigned.length,
       unassignedHours: unassignedMinutes,
-      additionalStaffNeeded: calculateAdditionalStaffNeeded(unassignedMinutes),
+      minimumStaffRequired,
+      currentUsableStaff: remainingCapacity.usableStaffCount,
+      remainingCapacityMinutes: remainingCapacity.totalRemainingMinutes,
+      currentStaffingEnough: additionalStaffNeeded === 0,
+      additionalStaffNeeded,
       staffAt40: staffAt40.map((st) => ({ id: st.id, name: st.name, minutes: weeklyHoursMap[st.id] || 0 })),
       staffOver40: staffOver40.map((st) => ({ id: st.id, name: st.name, minutes: weeklyHoursMap[st.id] || 0 })),
+      remainingCapacityByStaff: remainingCapacity.entries,
       staffHours: (staffList || [])
         .map((st) => ({ id: st.id, name: st.name, minutes: weeklyHoursMap[st.id] || 0 }))
         .filter((entry) => entry.minutes > 0)
@@ -1078,12 +1132,45 @@ function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList
     });
   }
 
+  const combinedWeeklyHoursMap = weekKeys.reduce((acc, weekKey) => {
+    acc[weekKey] = getStaffWeeklyHoursMap([...(existingShifts || []), ...assignedGenerated], staffList, weekKey);
+    return acc;
+  }, {});
+  const allAssignedStaffIds = assignedGenerated.map((sh) => sh.staffId).filter(Boolean);
+  const overallRemainingCapacityEntries = Array.from(new Set(allAssignedStaffIds)).map((staffId) => {
+    const minutesByWeek = weekKeys.map((weekKey) => combinedWeeklyHoursMap[weekKey]?.[staffId] || 0);
+    const remainingByWeek = minutesByWeek.map((minutes) => Math.max(0, OT_THRESHOLD_MIN - minutes));
+    const staff = (staffList || []).find((st) => st.id === staffId);
+    return {
+      id: staffId,
+      name: staff?.name || staffId,
+      remainingMinutes: remainingByWeek.reduce((sum, minutes) => sum + minutes, 0),
+      isUsable: remainingByWeek.some((minutes) => minutes > 0),
+    };
+  });
+  const currentUsableStaff = overallRemainingCapacityEntries.filter((entry) => entry.isUsable).length;
+  const totalRemainingCapacityMinutes = overallRemainingCapacityEntries.reduce((sum, entry) => sum + entry.remainingMinutes, 0);
+  const minimumStaffRequired = calculateMinimumStaffRequired(totalScheduledMinutes);
+  const additionalStaffNeeded = calculateAdditionalStaffNeeded(
+    totalScheduledMinutes,
+    assignedScheduledMinutes,
+    totalRemainingCapacityMinutes,
+    currentUsableStaff,
+    minimumStaffRequired
+  );
+
   return {
     totalShiftsCreated: generated.length,
+    totalScheduledMinutes,
+    assignedScheduledMinutes,
     assignedShifts: assignedGenerated.length,
     unassignedShifts: unassignedGenerated.length,
     unassignedHours: calculateUnassignedShiftHours(unassignedGenerated),
-    additionalStaffNeeded: weeklyBreakdown.reduce((sum, week) => sum + week.additionalStaffNeeded, 0),
+    minimumStaffRequired,
+    currentUsableStaff,
+    totalRemainingCapacityMinutes,
+    currentStaffingEnough: additionalStaffNeeded === 0,
+    additionalStaffNeeded,
     staffAt40Count: at40Set.size,
     staffOver40Count: over40Set.size,
     staffAtOrAbove40Count: new Set([...at40Set, ...over40Set]).size,
@@ -1908,11 +1995,17 @@ export default function Page() {
 
     const summaryText = [
       `Created ${summary.totalShiftsCreated} shifts.`,
+      `Total scheduled hours: ${fmtHoursFromMin(summary.totalScheduledMinutes)}.`,
+      `Assigned staff hours: ${fmtHoursFromMin(summary.assignedScheduledMinutes)}.`,
+      `Open hours: ${fmtHoursFromMin(summary.unassignedHours)}.`,
+      `Minimum staff required at 40h max: ${summary.minimumStaffRequired}.`,
+      `Current usable staff: ${summary.currentUsableStaff}.`,
       `Assigned: ${summary.assignedShifts}.`,
       `Unassigned: ${summary.unassignedShifts}.`,
       `Staff at 40h: ${summary.staffAt40Count}.`,
       `Staff over 40h: ${summary.staffOver40Count}.`,
-      `Additional staff needed for uncovered hours: ${summary.additionalStaffNeeded}.`,
+      `${summary.currentStaffingEnough ? "Current staffing is enough." : "Current staffing is not enough."}`,
+      `Additional staff needed: ${summary.additionalStaffNeeded}.`,
     ].join(" ");
 
     alert(summaryText);
@@ -2851,8 +2944,24 @@ export default function Page() {
                     <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.totalShiftsCreated}</div>
                   </div>
                   <div style={{ ...styles.shift, padding: 8 }}>
-                    <div style={styles.tiny}>Assigned / Unassigned</div>
-                    <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.assignedShifts} / {builderSummary.unassignedShifts}</div>
+                    <div style={styles.tiny}>Total Scheduled Hours</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.totalScheduledMinutes)}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Assigned Staff Hours</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.assignedScheduledMinutes)}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Open Hours</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.unassignedHours)}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Minimum Staff Required</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.minimumStaffRequired}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Current Usable Staff</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.currentUsableStaff}</div>
                   </div>
                   <div style={{ ...styles.shift, padding: 8 }}>
                     <div style={styles.tiny}>Additional Staff Needed</div>
@@ -2867,8 +2976,10 @@ export default function Page() {
                     <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? "#ff8b8b" : "inherit" }}>{builderSummary.staffOver40Count}</div>
                   </div>
                   <div style={{ ...styles.shift, padding: 8 }}>
-                    <div style={styles.tiny}>Open Hours</div>
-                    <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.unassignedHours)}</div>
+                    <div style={styles.tiny}>Staffing Status</div>
+                    <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.currentStaffingEnough ? "inherit" : "#ffcf7a" }}>
+                      {builderSummary.currentStaffingEnough ? "Enough" : "Need more staff"}
+                    </div>
                   </div>
                 </div>
 
@@ -2877,7 +2988,13 @@ export default function Page() {
                     <div key={week.weekStart} style={{ ...styles.shift, padding: 8 }}>
                       <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Week of {week.weekStart}</div>
                       <div style={styles.tiny}>
-                        Unassigned shifts: {week.unassignedCount} | Open hours: {fmtHoursFromMin(week.unassignedHours)} | Additional staff needed: {week.additionalStaffNeeded}
+                        Total scheduled hours: {fmtHoursFromMin(week.totalScheduledMinutes)} | Assigned staff hours: {fmtHoursFromMin(week.assignedScheduledMinutes)} | Open hours: {fmtHoursFromMin(week.unassignedHours)}
+                      </div>
+                      <div style={{ ...styles.tiny, marginTop: 2 }}>
+                        Minimum staff required to keep everyone at 40 hours max: {week.minimumStaffRequired} | Current usable staff: {week.currentUsableStaff} | Additional staff needed: {week.additionalStaffNeeded}
+                      </div>
+                      <div style={{ ...styles.tiny, marginTop: 2 }}>
+                        Staffing status: {week.currentStaffingEnough ? "Current staffing is enough." : "Current staffing is not enough."}
                       </div>
                       <div style={{ ...styles.tiny, marginTop: 4 }}>
                         Staff at 40h: {week.staffAt40.length ? week.staffAt40.map((st) => st.name).join(", ") : "None"}
@@ -2993,8 +3110,24 @@ export default function Page() {
             <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.totalShiftsCreated}</div>
           </div>
           <div style={{ ...styles.shift, padding: 8 }}>
-            <div style={styles.tiny}>Assigned / Unassigned</div>
-            <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.assignedShifts} / {builderSummary.unassignedShifts}</div>
+            <div style={styles.tiny}>Total Scheduled Hours</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.totalScheduledMinutes)}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Assigned Staff Hours</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.assignedScheduledMinutes)}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Open Hours</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.unassignedHours)}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Minimum Staff Required</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.minimumStaffRequired}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Current Usable Staff</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.currentUsableStaff}</div>
           </div>
           <div style={{ ...styles.shift, padding: 8 }}>
             <div style={styles.tiny}>Additional Staff Needed</div>
@@ -3009,8 +3142,10 @@ export default function Page() {
             <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? "#ff8b8b" : "inherit" }}>{builderSummary.staffOver40Count}</div>
           </div>
           <div style={{ ...styles.shift, padding: 8 }}>
-            <div style={styles.tiny}>Unassigned Hours</div>
-            <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.unassignedHours)}</div>
+            <div style={styles.tiny}>Staffing Status</div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.currentStaffingEnough ? "inherit" : "#ffcf7a" }}>
+              {builderSummary.currentStaffingEnough ? "Enough" : "Need more staff"}
+            </div>
           </div>
         </div>
 
@@ -3019,7 +3154,13 @@ export default function Page() {
             <div key={`summary_${week.weekStart}`} style={{ ...styles.shift, padding: 8 }}>
               <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Week of {week.weekStart}</div>
               <div style={styles.tiny}>
-                Unassigned shifts: {week.unassignedCount} | Open hours: {fmtHoursFromMin(week.unassignedHours)} | Additional staff needed: {week.additionalStaffNeeded}
+                Total scheduled hours: {fmtHoursFromMin(week.totalScheduledMinutes)} | Assigned staff hours: {fmtHoursFromMin(week.assignedScheduledMinutes)} | Open hours: {fmtHoursFromMin(week.unassignedHours)}
+              </div>
+              <div style={{ ...styles.tiny, marginTop: 2 }}>
+                Minimum staff required to keep everyone at 40 hours max: {week.minimumStaffRequired} | Current usable staff: {week.currentUsableStaff} | Additional staff needed: {week.additionalStaffNeeded}
+              </div>
+              <div style={{ ...styles.tiny, marginTop: 2 }}>
+                Staffing status: {week.currentStaffingEnough ? "Current staffing is enough." : "Current staffing is not enough."}
               </div>
               <div style={{ ...styles.tiny, marginTop: 4 }}>
                 Staff at 40h: {week.staffAt40.length ? week.staffAt40.map((st) => st.name).join(", ") : "None"}
