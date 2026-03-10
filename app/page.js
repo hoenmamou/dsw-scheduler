@@ -28,6 +28,7 @@ function reportSupabaseError(error) {
 const DAY_START_MIN = 7 * 60;  // 07:00
 const DAY_END_MIN = 23 * 60;   // 23:00
 const OT_THRESHOLD_MIN = 40 * 60;
+const MAX_HOURS_PER_24_MIN = 16 * 60;
 
 function normalizeRole(role) {
   return String(role || "").trim().toLowerCase();
@@ -161,6 +162,12 @@ function minutesBetweenISO(aISO, bISO) {
   const b = new Date(bISO);
   if (isNaN(a) || isNaN(b) || b <= a) return 0;
   return Math.round((b - a) / 60000);
+}
+
+function addMinutes(date, minutes) {
+  const d = new Date(date);
+  d.setMinutes(d.getMinutes() + minutes);
+  return d;
 }
 
 function overlaps(aStart, aEnd, bStart, bEnd) {
@@ -335,6 +342,129 @@ function buildSeparateDailyShifts(startDate, endDate, startTime, endTime) {
   return windows;
 }
 
+function normalizeShiftForSchedulingRule(sh, idx = 0) {
+  const startISO = normalizeDateTimeISO(sh?.startISO ?? sh?.start_iso);
+  const endISO = normalizeDateTimeISO(sh?.endISO ?? sh?.end_iso);
+  const staffId = sh?.staffId ?? sh?.staff_id;
+  if (!startISO || !endISO || !staffId) return null;
+  return {
+    id: sh?.id ?? `rule_${idx}_${staffId}`,
+    staffId,
+    startISO,
+    endISO,
+    isShared: !!(sh?.isShared ?? sh?.is_shared),
+    sharedGroupId: sh?.sharedGroupId ?? sh?.shared_group_id ?? "",
+  };
+}
+
+function getStaffShiftsInRange(allShifts, staffId, rangeStartISO, rangeEndISO) {
+  const rangeStart = new Date(rangeStartISO);
+  const rangeEnd = new Date(rangeEndISO);
+  if (isNaN(rangeStart) || isNaN(rangeEnd) || rangeEnd <= rangeStart) return [];
+
+  return (allShifts || [])
+    .map((sh, idx) => normalizeShiftForSchedulingRule(sh, idx))
+    .filter(Boolean)
+    .filter((sh) => sh.staffId === staffId)
+    .filter((sh) => overlaps(sh.startISO, sh.endISO, rangeStartISO, rangeEndISO));
+}
+
+function splitShiftIntoWindowMinutes(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
+  const shiftStart = new Date(shiftStartISO);
+  const shiftEnd = new Date(shiftEndISO);
+  const windowStart = new Date(windowStartISO);
+  const windowEnd = new Date(windowEndISO);
+  if (
+    isNaN(shiftStart) || isNaN(shiftEnd)
+    || isNaN(windowStart) || isNaN(windowEnd)
+    || shiftEnd <= shiftStart
+    || windowEnd <= windowStart
+  ) {
+    return 0;
+  }
+
+  const start = shiftStart > windowStart ? shiftStart : windowStart;
+  const end = shiftEnd < windowEnd ? shiftEnd : windowEnd;
+  if (end <= start) return 0;
+  return Math.round((end - start) / 60000);
+}
+
+function wouldExceed16HoursIn24(staffId, candidateStartISO, candidateEndISO, allShifts) {
+  const candidateStart = new Date(candidateStartISO);
+  const candidateEnd = new Date(candidateEndISO);
+  if (isNaN(candidateStart) || isNaN(candidateEnd) || candidateEnd <= candidateStart) return false;
+
+  const candidate = {
+    id: "candidate_24h",
+    staffId,
+    startISO: candidateStartISO,
+    endISO: candidateEndISO,
+    isShared: false,
+    sharedGroupId: "",
+  };
+
+  const scanStart = addMinutes(candidateStart, -24 * 60);
+  const scanEnd = addMinutes(candidateEnd, 24 * 60);
+  const scanStartISO = isoLocal(scanStart);
+  const scanEndISO = isoLocal(scanEnd);
+
+  const relevant = getStaffShiftsInRange(
+    [...(allShifts || []), candidate],
+    staffId,
+    scanStartISO,
+    scanEndISO
+  );
+
+  const anchors = [];
+  for (const sh of relevant) {
+    anchors.push(new Date(sh.startISO));
+    anchors.push(new Date(sh.endISO));
+  }
+  anchors.push(candidateStart, candidateEnd);
+
+  for (const anchor of anchors) {
+    if (isNaN(anchor)) continue;
+
+    const windows = [
+      {
+        start: addMinutes(anchor, -24 * 60),
+        end: anchor,
+      },
+      {
+        start: anchor,
+        end: addMinutes(anchor, 24 * 60),
+      },
+    ];
+
+    for (const win of windows) {
+      const winStartISO = isoLocal(win.start);
+      const winEndISO = isoLocal(win.end);
+      let totalMin = 0;
+      const seen = new Set();
+
+      for (const sh of relevant) {
+        const key = staffShiftUniqueKey(sh);
+        if (seen.has(key)) continue;
+
+        const overlapMin = splitShiftIntoWindowMinutes(
+          sh.startISO,
+          sh.endISO,
+          winStartISO,
+          winEndISO
+        );
+
+        if (overlapMin > 0) {
+          seen.add(key);
+          totalMin += overlapMin;
+          if (totalMin > MAX_HOURS_PER_24_MIN) return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 function loadClientSchedule(clientId) {
   try {
     const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
@@ -358,13 +488,16 @@ function saveClientSchedule(clientId, shifts) {
 
 function Tabs({ value, onChange, tabs }) {
   return (
-    <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+    <div className="no-print" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
       {tabs.map((t) => (
         <button
           key={t.value}
           onClick={() => onChange(t.value)}
           style={{
             ...styles.btn2,
+            padding: "6px 9px",
+            fontSize: 12,
+            lineHeight: 1.2,
             background: value === t.value ? "rgba(31,111,235,0.18)" : "transparent",
             borderColor: value === t.value ? "rgba(31,111,235,0.55)" : "rgba(255,255,255,0.18)",
           }}
@@ -1377,6 +1510,10 @@ export default function Page() {
 
   const crossWeekConsecutiveProtection = !!state.settings?.crossWeekConsecutiveProtection;
   const maxConsecutiveDays = Math.max(1, Number(state.settings?.maxConsecutiveDays) || 6);
+  const [staffHoursSearch, setStaffHoursSearch] = useState("");
+  const [staffHoursFilter, setStaffHoursFilter] = useState("worked"); // all | worked | ot
+  const [clientHoursSearch, setClientHoursSearch] = useState("");
+  const [showAllClientHours, setShowAllClientHours] = useState(false);
 
   // Draft shift form (now includes Shared Support)
   const [shiftDraft, setShiftDraft] = useState({
@@ -1569,6 +1706,7 @@ export default function Page() {
     const minutesByStaff = { ...staffWeekMinutesMap };
     const pool = getClientAssignedStaff(client, activeStaff);
     const projectedByStaff = {};
+    const builderProjectedShifts = [];
     let rotIndex = 0;
 
     const pickStaffForShift = async (startISO, endISO, blockIdx) => {
@@ -1609,6 +1747,17 @@ export default function Page() {
           if (projectedStreak > maxConsecutiveDays) return false;
         }
 
+        if (
+          wouldExceed16HoursIn24(
+            st.id,
+            startISO,
+            endISO,
+            [...(state.shifts || []), ...builderProjectedShifts]
+          )
+        ) {
+          return false;
+        }
+
         const currentMin = minutesByStaff[st.id] || 0;
         // Builder should not auto-assign overtime shifts.
         if (currentMin + addMin > OT_THRESHOLD_MIN) return false;
@@ -1616,6 +1765,14 @@ export default function Page() {
         projectedByStaff[st.id] = candidateInScope
           ? [...existingProjected, candidateShift]
           : existingProjected;
+        builderProjectedShifts.push({
+          id: uid("proj"),
+          staffId: st.id,
+          startISO,
+          endISO,
+          isShared: false,
+          sharedGroupId: "",
+        });
         return true;
       };
 
@@ -1822,6 +1979,19 @@ export default function Page() {
       }
 
       const newMin = minutesBetweenISO(startISO, endISO);
+
+      if (
+        wouldExceed16HoursIn24(
+          staffId,
+          startISO,
+          endISO,
+          [...(state.shifts || []), ...planned]
+        )
+      ) {
+        alert("This staff cannot be scheduled because it would exceed 16 hours in a 24-hour period.");
+        return;
+      }
+
       const afterMin = projectedMinutes + newMin;
       const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
       if (otMin > 0) {
@@ -2102,6 +2272,49 @@ export default function Page() {
   const clientAssignedStaffIdSet = useMemo(() => {
     return new Set(selectedClientAssignedStaffIds);
   }, [selectedClientAssignedStaffIds]);
+
+  const staffHoursRows = useMemo(() => {
+    const q = staffHoursSearch.trim().toLowerCase();
+    return (state.staff || [])
+      .map((st) => {
+        const min = staffWeekMinutesMap[st.id] || 0;
+        const otMin = Math.max(0, min - OT_THRESHOLD_MIN);
+        return { st, min, otMin };
+      })
+      .filter(({ st, min, otMin }) => {
+        if (staffHoursFilter === "worked" && min <= 0) return false;
+        if (staffHoursFilter === "ot" && otMin <= 0) return false;
+        if (!q) return true;
+        return String(st.name || "").toLowerCase().includes(q);
+      })
+      .sort((a, b) => b.min - a.min || String(a.st.name || "").localeCompare(String(b.st.name || "")));
+  }, [state.staff, staffWeekMinutesMap, staffHoursSearch, staffHoursFilter]);
+
+  const clientHoursRows = useMemo(() => {
+    const q = clientHoursSearch.trim().toLowerCase();
+    return (visibleClients || [])
+      .map((c) => {
+        const h = weekClientHours[c.id] || { totalMin: 0, dayMin: 0, nightMin: 0 };
+        const allottedMin = (Number(c.weeklyHours) || 0) * 60;
+        const remainingMin = allottedMin - h.totalMin;
+        return { c, h, allottedMin, remainingMin };
+      })
+      .filter(({ c, h, allottedMin }) => {
+        if (!showAllClientHours && !(h.totalMin > 0 || allottedMin > 0)) return false;
+        if (!q) return true;
+        return String(c.name || "").toLowerCase().includes(q);
+      })
+      .sort((a, b) => b.h.totalMin - a.h.totalMin || String(a.c.name || "").localeCompare(String(b.c.name || "")));
+  }, [visibleClients, weekClientHours, clientHoursSearch, showAllClientHours]);
+
+  const hoursSummary = useMemo(() => {
+    const staffWorking = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > 0).length;
+    const staffInOt = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > OT_THRESHOLD_MIN).length;
+    const clientsWithHours = (visibleClients || []).filter((c) => (weekClientHours[c.id]?.totalMin || 0) > 0).length;
+    const totalClientMin = (visibleClients || []).reduce((sum, c) => sum + (weekClientHours[c.id]?.totalMin || 0), 0);
+    return { staffWorking, staffInOt, clientsWithHours, totalClientMin };
+  }, [state.staff, staffWeekMinutesMap, visibleClients, weekClientHours]);
+
   if (!mounted) return null;
 
   // If Supabase isn't configured we'll show a banner inside the UI and
@@ -2114,7 +2327,7 @@ export default function Page() {
   const canSeeAllShifts = isAdmin; // supervisors see their clients + optional unassigned (via visibleClients)
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 16 }}>
+    <div style={{ minHeight: "100vh", background: "#0b0c10", color: "white", padding: 12 }}>
       <div style={{ maxWidth: 1200, margin: "0 auto" }}>
         {!SUPABASE_CONFIGURED ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
@@ -2128,9 +2341,9 @@ export default function Page() {
             </div>
           </div>
         ) : null}
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <div>
-            <div style={{ fontSize: 22, fontWeight: 980 }}>DSW Scheduler (Dynamic)</div>
+            <div style={{ fontSize: 19, fontWeight: 980, lineHeight: 1.15 }}>DSW Scheduler (Dynamic)</div>
             <div style={styles.tiny}>
               Logged in as <b>{currentUser.name}</b> ({currentUser.role})
             </div>
@@ -2142,12 +2355,12 @@ export default function Page() {
           </div>
         </div>
 
-        <div className="no-print" style={{ marginTop: 10, display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+        <div className="no-print" style={{ marginTop: 6, display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <Tabs value={tab} onChange={setTab} tabs={tabs} />
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <div style={styles.tiny}>Week start</div>
             <input
-              style={styles.input}
+              style={{ ...styles.input, width: 160, padding: "7px 9px" }}
               type="date"
               value={weekStart}
               onChange={(e) => {
@@ -2648,94 +2861,130 @@ export default function Page() {
         {/* ================= Hours & OT ================= */}
         {tab === "hours" && (
           <div style={{ marginTop: 12, ...styles.card }}>
-            <h3 style={{ marginTop: 0 }}>Hours & Overtime</h3>
-            <div style={styles.tiny}>Shared Support counts once for staff OT, but counts for each client.</div>
+            <h3 style={{ marginTop: 0, marginBottom: 6 }}>Hours & Overtime</h3>
+            <div style={styles.tiny}>Shared support counts once for staff OT, and client totals stay unchanged.</div>
 
-            {(currentUser?.role === "supervisor" || isAdmin) &&
-            (state.staff || []).some((st) => (staffWeekMinutesMap[st.id] || 0) >= OT_THRESHOLD_MIN) ? (
-              <div style={styles.warn}>
-                ⚠️ One or more staff have reached 40 hours this week. Review assignments or adjust shifts.
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(150px, 1fr))", gap: 8, marginTop: 10 }}>
+              <div style={{ ...styles.card, padding: 8 }}>
+                <div style={styles.tiny}>Staff Working This Week</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>{hoursSummary.staffWorking}</div>
               </div>
-            ) : null}
-
-            <div style={{ marginTop: 10, overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Staff</th>
-                    <th style={styles.th}>Week Hours</th>
-                    <th style={styles.th}>OT Hours</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(state.staff || []).map((st) => {
-                    const min = staffWeekMinutesMap[st.id] || 0;
-                    const otMin = Math.max(0, min - OT_THRESHOLD_MIN);
-                    return (
-                      <tr key={st.id}>
-                        <td style={styles.td}><b>{st.name}</b></td>
-                        <td style={styles.td}>{fmtHoursFromMin(min)}</td>
-                        <td style={styles.td}>{fmtHoursFromMin(otMin)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              <div style={{ ...styles.card, padding: 8 }}>
+                <div style={styles.tiny}>Staff In OT</div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: hoursSummary.staffInOt ? "#ff8b8b" : "inherit" }}>{hoursSummary.staffInOt}</div>
+              </div>
+              <div style={{ ...styles.card, padding: 8 }}>
+                <div style={styles.tiny}>Clients With Hours</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>{hoursSummary.clientsWithHours}</div>
+              </div>
+              <div style={{ ...styles.card, padding: 8 }}>
+                <div style={styles.tiny}>Total Scheduled Client Hours</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>{fmtHoursFromMin(hoursSummary.totalClientMin)}</div>
+              </div>
             </div>
 
-            <div style={{ marginTop: 16, ...styles.card }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                <h3 style={{ margin: 0 }}>Client Weekly Hours</h3>
-                <div style={styles.tiny}>Day: 7:00a–11:00p • Night: 11:00p–7:00a</div>
+            {(currentUser?.role === "supervisor" || isAdmin) && hoursSummary.staffInOt > 0 ? (
+              <div style={styles.warn}>One or more staff have reached 40 hours this week.</div>
+            ) : null}
+
+            <details open style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 900 }}>Staff Hours</summary>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(200px, 1fr) auto", gap: 8, marginTop: 8, alignItems: "center" }}>
+                <input
+                  style={{ ...styles.input, padding: "7px 9px" }}
+                  placeholder="Search staff..."
+                  value={staffHoursSearch}
+                  onChange={(e) => setStaffHoursSearch(e.target.value)}
+                />
+                <select
+                  style={{ ...styles.select, width: 180, padding: "7px 9px" }}
+                  value={staffHoursFilter}
+                  onChange={(e) => setStaffHoursFilter(e.target.value)}
+                >
+                  <option value="worked">Worked This Week</option>
+                  <option value="ot">Overtime Only</option>
+                  <option value="all">All Staff</option>
+                </select>
               </div>
 
-              <div style={{ marginTop: 10, overflowX: "auto" }}>
+              <div style={{ marginTop: 8, overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>
-                      <th style={styles.th}>Client</th>
-                      <th style={styles.th}>Allotted</th>
-                      <th style={styles.th}>Weekly Total</th>
-                      <th style={styles.th}>Remaining</th>
-                      <th style={styles.th}>Day Hours</th>
-                      <th style={styles.th}>Night Hours</th>
+                      <th style={styles.thCompact}>Staff</th>
+                      <th style={styles.thCompact}>Week Hours</th>
+                      <th style={styles.thCompact}>OT Hours</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(visibleClients || []).map((c) => {
-                      const h = weekClientHours[c.id] || { totalMin: 0, dayMin: 0, nightMin: 0 };
-                      const allottedMin = (Number(c.weeklyHours) || 0) * 60;
-                      const remainingMin = allottedMin - h.totalMin;
-                      return (
-                        <tr key={c.id}>
-                          <td style={styles.td}><b>{c.name}</b></td>
-                          <td style={styles.td}>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                              <div style={{ fontSize: 12, opacity: 0.8 }}>{fmtHoursFromMin(allottedMin)}</div>
-                              <div style={{ height: 8, width: 120, background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
-                                <div
-                                  style={{
-                                    height: "100%",
-                                    width: `${Math.min(100, allottedMin ? Math.round((h.totalMin / allottedMin) * 100) : 0)}%`,
-                                    background: remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
-                                  }}
-                                />
-                              </div>
-                            </div>
-                          </td>
-                          <td style={styles.td}>{fmtHoursFromMin(h.totalMin)}</td>
-                          <td style={{ ...styles.td, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
-                            {fmtHoursFromMin(remainingMin)}
-                          </td>
-                          <td style={styles.td}>{fmtHoursFromMin(h.dayMin)}</td>
-                          <td style={styles.td}>{fmtHoursFromMin(h.nightMin)}</td>
-                        </tr>
-                      );
-                    })}
+                    {staffHoursRows.map(({ st, min, otMin }) => (
+                      <tr key={st.id}>
+                        <td style={styles.tdCompact}><b>{st.name}</b></td>
+                        <td style={styles.tdCompact}>{fmtHoursFromMin(min)}</td>
+                        <td style={{ ...styles.tdCompact, color: otMin > 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
+                      </tr>
+                    ))}
+                    {staffHoursRows.length === 0 ? (
+                      <tr>
+                        <td style={styles.tdCompact} colSpan={3}>No staff rows match this filter.</td>
+                      </tr>
+                    ) : null}
                   </tbody>
                 </table>
               </div>
-            </div>
+            </details>
+
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 900 }}>Client Weekly Hours</summary>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(200px, 1fr) auto", gap: 8, marginTop: 8, alignItems: "center" }}>
+                <input
+                  style={{ ...styles.input, padding: "7px 9px" }}
+                  placeholder="Search clients..."
+                  value={clientHoursSearch}
+                  onChange={(e) => setClientHoursSearch(e.target.value)}
+                />
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={showAllClientHours}
+                    onChange={(e) => setShowAllClientHours(e.target.checked)}
+                  />
+                  Show All Clients
+                </label>
+              </div>
+
+              <div style={{ marginTop: 8, overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th style={styles.thCompact}>Client</th>
+                      <th style={styles.thCompact}>Allotted</th>
+                      <th style={styles.thCompact}>Weekly Total</th>
+                      <th style={styles.thCompact}>Remaining</th>
+                      <th style={styles.thCompact}>Day</th>
+                      <th style={styles.thCompact}>Night</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {clientHoursRows.map(({ c, h, allottedMin, remainingMin }) => (
+                      <tr key={c.id}>
+                        <td style={styles.tdCompact}><b>{c.name}</b></td>
+                        <td style={styles.tdCompact}>{fmtHoursFromMin(allottedMin)}</td>
+                        <td style={styles.tdCompact}>{fmtHoursFromMin(h.totalMin)}</td>
+                        <td style={{ ...styles.tdCompact, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(remainingMin)}</td>
+                        <td style={styles.tdCompact}>{fmtHoursFromMin(h.dayMin)}</td>
+                        <td style={styles.tdCompact}>{fmtHoursFromMin(h.nightMin)}</td>
+                      </tr>
+                    ))}
+                    {clientHoursRows.length === 0 ? (
+                      <tr>
+                        <td style={styles.tdCompact} colSpan={6}>No client rows match this filter.</td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </details>
           </div>
         )}
 
@@ -3248,7 +3497,7 @@ const styles = {
     cursor: "pointer",
   },
   btn2: {
-    padding: "9px 12px",
+    padding: "7px 10px",
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,0.18)",
     background: "transparent",
@@ -3258,7 +3507,7 @@ const styles = {
   },
   input: {
     width: "100%",
-    padding: "10px 10px",
+    padding: "8px 9px",
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,0.18)",
     background: "rgba(255,255,255,0.03)",
@@ -3267,7 +3516,7 @@ const styles = {
   },
   select: {
     width: "100%",
-    padding: "10px 10px",
+    padding: "8px 9px",
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,0.18)",
     background: "rgba(15,15,20,0.9)",
@@ -3285,4 +3534,6 @@ const styles = {
   warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
   th: { textAlign: "left", fontSize: 12, opacity: 0.85, padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
   td: { padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 13 },
+  thCompact: { textAlign: "left", fontSize: 11, opacity: 0.85, padding: "6px 5px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
+  tdCompact: { padding: "6px 5px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 12 },
 };
