@@ -942,6 +942,157 @@ function projectedConsecutiveStreak({
   return getConsecutiveWorkedDaysFromShifts(projected).maxStreak;
 }
 
+function getWeekStartKey(dateInput) {
+  const start = startOfWeekSunday(dateInput);
+  return start ? isoLocal(start).slice(0, 10) : null;
+}
+
+function getGeneratedShiftEndISO(dateStr, startTime, endTime) {
+  const startISO = `${dateStr}T${startTime}:00`;
+  let endISO = `${dateStr}T${endTime}:00`;
+  if (new Date(endISO) <= new Date(startISO)) {
+    const nextDay = addDays(new Date(`${dateStr}T00:00:00`), 1);
+    endISO = `${isoLocal(nextDay).slice(0, 10)}T${endTime}:00`;
+  }
+  return { startISO, endISO };
+}
+
+function createShiftRowsFromTemplate({
+  clientId,
+  weekStartDate,
+  shiftsDef,
+  weeks,
+  repeatInterval,
+  assignments,
+  createdBy,
+}) {
+  const rows = [];
+  const generatedShifts = [];
+  const start = new Date(weekStartDate);
+
+  for (let w = 0; w < weeks; w += repeatInterval) {
+    const weekStartForRun = addDays(start, w * 7);
+    for (let d = 0; d < 7; d++) {
+      const day = addDays(weekStartForRun, d);
+      const dateStr = isoLocal(day).slice(0, 10);
+
+      for (let blockIdx = 0; blockIdx < shiftsDef.length; blockIdx++) {
+        const { start: startTime, end: endTime } = shiftsDef[blockIdx];
+        const { startISO, endISO } = getGeneratedShiftEndISO(dateStr, startTime, endTime);
+        const weekday = new Date(`${dateStr}T00:00:00`).getDay();
+        const assignedStaffId = assignments[`${weekday}_${blockIdx}`] || null;
+
+        const row = {
+          id: uid("sh"),
+          client_id: clientId,
+          staff_id: assignedStaffId,
+          start_iso: startISO,
+          end_iso: endISO,
+          created_by: createdBy,
+          is_shared: false,
+          shared_group_id: "",
+        };
+
+        rows.push(row);
+        generatedShifts.push({
+          id: row.id,
+          clientId,
+          staffId: assignedStaffId,
+          startISO,
+          endISO,
+          createdBy,
+          isShared: false,
+          sharedGroupId: "",
+        });
+      }
+    }
+  }
+
+  return { rows, generatedShifts };
+}
+
+function getStaffWeeklyHoursMap(shifts, staffList, weekStartValue) {
+  const weekStartDate = new Date(`${weekStartValue}T00:00:00`);
+  const weekEndDate = addDays(weekStartDate, 7);
+  const shiftsInWeek = (shifts || []).filter((sh) => {
+    if (!sh?.staffId) return false;
+    const start = new Date(sh.startISO);
+    return !isNaN(start) && start >= weekStartDate && start < weekEndDate;
+  });
+
+  const out = {};
+  for (const st of staffList || []) {
+    out[st.id] = staffWeekMinutesDedup(shiftsInWeek, st.id);
+  }
+  return out;
+}
+
+function calculateUnassignedShiftHours(shifts) {
+  return (shifts || []).reduce((sum, sh) => sum + minutesBetweenISO(sh.startISO, sh.endISO), 0);
+}
+
+function calculateAdditionalStaffNeeded(unassignedMinutes) {
+  if (!unassignedMinutes || unassignedMinutes <= 0) return 0;
+  return Math.ceil(unassignedMinutes / OT_THRESHOLD_MIN);
+}
+
+function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList }) {
+  const generated = generatedShifts || [];
+  const assignedGenerated = generated.filter((sh) => !!sh.staffId);
+  const unassignedGenerated = generated.filter((sh) => !sh.staffId);
+  const weekKeys = Array.from(
+    new Set(generated.map((sh) => getWeekStartKey(sh.startISO)).filter(Boolean))
+  ).sort();
+
+  const at40Set = new Set();
+  const over40Set = new Set();
+  const weeklyBreakdown = [];
+
+  for (const weekKey of weekKeys) {
+    const combinedShifts = [...(existingShifts || []), ...assignedGenerated];
+    const weeklyHoursMap = getStaffWeeklyHoursMap(combinedShifts, staffList, weekKey);
+    const staffAt40 = (staffList || []).filter((st) => weeklyHoursMap[st.id] === OT_THRESHOLD_MIN);
+    const staffOver40 = (staffList || []).filter((st) => weeklyHoursMap[st.id] > OT_THRESHOLD_MIN);
+    const weekUnassigned = unassignedGenerated.filter((sh) => getWeekStartKey(sh.startISO) === weekKey);
+    const unassignedMinutes = calculateUnassignedShiftHours(weekUnassigned);
+
+    for (const st of staffAt40) at40Set.add(st.id);
+    for (const st of staffOver40) over40Set.add(st.id);
+
+    weeklyBreakdown.push({
+      weekStart: weekKey,
+      unassignedCount: weekUnassigned.length,
+      unassignedHours: unassignedMinutes,
+      additionalStaffNeeded: calculateAdditionalStaffNeeded(unassignedMinutes),
+      staffAt40: staffAt40.map((st) => ({ id: st.id, name: st.name, minutes: weeklyHoursMap[st.id] || 0 })),
+      staffOver40: staffOver40.map((st) => ({ id: st.id, name: st.name, minutes: weeklyHoursMap[st.id] || 0 })),
+      staffHours: (staffList || [])
+        .map((st) => ({ id: st.id, name: st.name, minutes: weeklyHoursMap[st.id] || 0 }))
+        .filter((entry) => entry.minutes > 0)
+        .sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name)),
+      unassignedShifts: weekUnassigned.map((sh) => ({
+        id: sh.id,
+        startISO: sh.startISO,
+        endISO: sh.endISO,
+      })),
+    });
+  }
+
+  return {
+    totalShiftsCreated: generated.length,
+    assignedShifts: assignedGenerated.length,
+    unassignedShifts: unassignedGenerated.length,
+    unassignedHours: calculateUnassignedShiftHours(unassignedGenerated),
+    additionalStaffNeeded: weeklyBreakdown.reduce((sum, week) => sum + week.additionalStaffNeeded, 0),
+    staffAt40Count: at40Set.size,
+    staffOver40Count: over40Set.size,
+    staffAtOrAbove40Count: new Set([...at40Set, ...over40Set]).size,
+    hasStaffAtOrAbove40: at40Set.size > 0 || over40Set.size > 0,
+    hasStaffOver40: over40Set.size > 0,
+    weeklyBreakdown,
+  };
+}
+
 /* =========================
    Login
 ========================= */
@@ -1621,6 +1772,7 @@ export default function Page() {
   const [builderBlockAssignments, setBuilderBlockAssignments] = useState({});
   const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
   const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
+  const [builderSummary, setBuilderSummary] = useState(null);
   const clientSchedule = useMemo(() => {
     return builderClientId ? loadClientSchedule(builderClientId) : null;
   }, [builderClientId]);
@@ -1670,10 +1822,11 @@ export default function Page() {
   }, [builderClient]);
 
   const builderUsesAssignedPool = builderClientAssignedStaffIds.length > 0;
-  const builderStaffPool = useMemo(
-    () => getClientAssignedStaff(builderClient, activeStaff),
-    [builderClient, activeStaff]
+  const builderAssignedStaffIdSet = useMemo(
+    () => new Set(builderClientAssignedStaffIds),
+    [builderClientAssignedStaffIds]
   );
+  const builderStaffPool = useMemo(() => activeStaff, [activeStaff]);
 
   // keep startDate aligned with week when week changes, but preserve endDate if user set it differently
   useEffect(() => {
@@ -1723,154 +1876,46 @@ export default function Page() {
     if (!builderClientId) return alert("Pick a client for the builder.");
     const client = (state.clients || []).find((c) => c.id === builderClientId);
     if (!client) return alert("Selected client was not found.");
-    const start = new Date(weekStartDate);
-    const rows = [];
-    const unfilled = [];
 
     // Determine shift definitions based on selected source
     const shiftsDef = builderShiftInfo.shifts;
     if (builderShiftInfo.error) return alert(builderShiftInfo.error);
     if (!shiftsDef.length) return alert("No shift blocks found for the selected schedule source.");
 
-    // Track per-staff minutes while building to avoid over-assigning
-    const minutesByStaff = { ...staffWeekMinutesMap };
-    const pool = getClientAssignedStaff(client, activeStaff);
-    const projectedByStaff = {};
-    const builderProjectedShifts = [];
-    let rotIndex = 0;
+    const { rows, generatedShifts } = createShiftRowsFromTemplate({
+      clientId: client.id,
+      weekStartDate,
+      shiftsDef,
+      weeks: builderWeeks,
+      repeatInterval: builderRepeatInterval,
+      assignments: builderBlockAssignments,
+      createdBy: currentUser?.id || "builder",
+    });
 
-    const pickStaffForShift = async (startISO, endISO, blockIdx) => {
-      const weekday = new Date(startISO).getDay();
-      const forcedStaffId = builderBlockAssignments[`${weekday}_${blockIdx}`];
-      const addMin = minutesBetweenISO(startISO, endISO);
+    if (!rows.length) return alert("No shifts were generated from the selected template.");
 
-      const checkCandidate = async (st) => {
-        const conflicts = await findStaffConflictsDB({ staffId: st.id, startISO, endISO });
-        if (conflicts.length) return false;
+    await sbUpsert("shifts", rows);
+    await refreshState(setState);
 
-        const existingProjected = projectedByStaff[st.id]
-          || getShiftsForConsecutiveCheck(
-            state.shifts || [],
-            st.id,
-            weekStartDate,
-            weekEndDate,
-            crossWeekConsecutiveProtection
-          );
-        const candidateShift = {
-          id: uid("cand"),
-          staffId: st.id,
-          startISO,
-          endISO,
-        };
-        const candidateInScope = getShiftsForConsecutiveCheck(
-          [candidateShift],
-          st.id,
-          weekStartDate,
-          weekEndDate,
-          crossWeekConsecutiveProtection
-        ).length > 0;
-        if (candidateInScope) {
-          const projectedStreak = getConsecutiveWorkedDaysFromShifts([
-            ...existingProjected,
-            candidateShift,
-          ]).maxStreak;
-          if (projectedStreak > maxConsecutiveDays) return false;
-        }
+    const summary = analyzeWeeklyStaffingNeeds({
+      existingShifts: state.shifts || [],
+      generatedShifts,
+      staffList: activeStaff,
+    });
 
-        if (
-          wouldExceed16HoursIn24(
-            st.id,
-            startISO,
-            endISO,
-            [...(state.shifts || []), ...builderProjectedShifts]
-          )
-        ) {
-          return false;
-        }
+    setBuilderSummary(summary);
+    setBuilderOpen(false);
 
-        const currentMin = minutesByStaff[st.id] || 0;
-        // Builder should not auto-assign overtime shifts.
-        if (currentMin + addMin > OT_THRESHOLD_MIN) return false;
-        minutesByStaff[st.id] = currentMin + addMin;
-        projectedByStaff[st.id] = candidateInScope
-          ? [...existingProjected, candidateShift]
-          : existingProjected;
-        builderProjectedShifts.push({
-          id: uid("proj"),
-          staffId: st.id,
-          startISO,
-          endISO,
-          isShared: false,
-          sharedGroupId: "",
-        });
-        return true;
-      };
+    const summaryText = [
+      `Created ${summary.totalShiftsCreated} shifts.`,
+      `Assigned: ${summary.assignedShifts}.`,
+      `Unassigned: ${summary.unassignedShifts}.`,
+      `Staff at 40h: ${summary.staffAt40Count}.`,
+      `Staff over 40h: ${summary.staffOver40Count}.`,
+      `Additional staff needed for uncovered hours: ${summary.additionalStaffNeeded}.`,
+    ].join(" ");
 
-      if (forcedStaffId) {
-        const forced = pool.find((s) => s.id === forcedStaffId);
-        if (forced && (await checkCandidate(forced))) return forced;
-      }
-
-      for (let i = 0; i < pool.length; i++) {
-        const idx = (rotIndex + i) % pool.length;
-        const st = pool[idx];
-        if (await checkCandidate(st)) {
-          rotIndex = idx + 1;
-          return st;
-        }
-      }
-      return null;
-    };
-
-    // Build for N weeks (1=week, 4=month) using the repeat interval
-    for (let w = 0; w < builderWeeks; w += builderRepeatInterval) {
-      const weekStartForRun = addDays(start, w * 7);
-      for (let d = 0; d < 7; d++) {
-        const day = addDays(weekStartForRun, d);
-        const dateStr = isoLocal(day).slice(0, 10);
-
-        for (let blockIdx = 0; blockIdx < shiftsDef.length; blockIdx++) {
-          const { start: sTime, end: eTime } = shiftsDef[blockIdx];
-          const sISO = toISO(dateStr, sTime);
-          let eISO = toISO(dateStr, eTime);
-          if (new Date(eISO) <= new Date(sISO)) {
-            const nd = addDays(new Date(`${dateStr}T00:00:00`), 1);
-            eISO = `${isoLocal(nd).slice(0, 10)}T${eTime}:00`;
-          }
-
-          const chosen = await pickStaffForShift(sISO, eISO, blockIdx);
-          if (chosen) {
-            rows.push({
-              id: uid("sh"),
-              client_id: builderClientId,
-              staff_id: chosen.id,
-              start_iso: sISO,
-              end_iso: eISO,
-              created_by: currentUser?.id || "builder",
-              is_shared: false,
-              shared_group_id: "",
-            });
-          } else {
-            const dayName = WEEKDAY_NAMES[new Date(`${dateStr}T00:00:00`).getDay()] || "?";
-            unfilled.push(`${dayName} ${sTime}-${eTime}`);
-          }
-        }
-      }
-    }
-
-    if (rows.length) {
-      await sbUpsert("shifts", rows);
-      await refreshState(setState);
-      setBuilderOpen(false);
-    }
-
-    const summary =
-      `Builder created ${rows.length} shifts. `
-      + `${unfilled.length} shifts were unfilled`
-      + (unfilled.length
-        ? `: ${unfilled.join(", ")}`
-        : ".");
-    alert(summary);
+    alert(summaryText);
   }
 
   // Cross-supervisor (global) staff conflict check
@@ -2595,9 +2640,9 @@ export default function Page() {
             <div style={styles.tiny}>
               {builderClientId
                 ? (builderUsesAssignedPool
-                    ? "Using assigned staff for this client"
-                    : "No assigned staff found — using all active staff")
-                : "Pick a client to load staff source"}
+                    ? "Assigned client staff are available as options, but blank slots stay unassigned."
+                    : "No client-specific staff saved. Assign staff manually or leave slots unassigned.")
+                : "Pick a client to configure slot assignments."}
             </div>
           </div>
 
@@ -2738,9 +2783,9 @@ export default function Page() {
             </div>
 
             <div>
-              <div style={styles.tiny}>Shift-block assignment overrides (optional)</div>
+              <div style={styles.tiny}>Optional slot assignments</div>
               <div style={{ ...styles.tiny, marginBottom: 6 }}>
-                Builder uses assigned staff from client profile first, then falls back to other active staff.
+                The builder creates every shift block exactly as entered. Only explicitly selected staff are assigned.
               </div>
 
               {builderShiftInfo.error ? (
@@ -2770,10 +2815,10 @@ export default function Page() {
                                   }))
                                 }
                               >
-                                <option value="">Auto</option>
+                                <option value="">Unassigned</option>
                                 {builderStaffPool.map((s) => (
                                   <option key={s.id} value={s.id}>
-                                    {s.name}
+                                    {builderAssignedStaffIdSet.has(s.id) ? `${s.name} (Assigned)` : s.name}
                                   </option>
                                 ))}
                               </select>
@@ -2796,6 +2841,82 @@ export default function Page() {
                   : "None selected"}
               </div>
             </div>
+
+            {builderSummary ? (
+              <div style={{ ...styles.card, padding: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 900, marginBottom: 8 }}>Latest Builder Summary</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(140px, 1fr))", gap: 8 }}>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Total Shifts</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.totalShiftsCreated}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Assigned / Unassigned</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.assignedShifts} / {builderSummary.unassignedShifts}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Additional Staff Needed</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.additionalStaffNeeded}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Staff At 40h</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.staffAt40Count}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Staff Over 40h</div>
+                    <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? "#ff8b8b" : "inherit" }}>{builderSummary.staffOver40Count}</div>
+                  </div>
+                  <div style={{ ...styles.shift, padding: 8 }}>
+                    <div style={styles.tiny}>Open Hours</div>
+                    <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.unassignedHours)}</div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                  {builderSummary.weeklyBreakdown.map((week) => (
+                    <div key={week.weekStart} style={{ ...styles.shift, padding: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Week of {week.weekStart}</div>
+                      <div style={styles.tiny}>
+                        Unassigned shifts: {week.unassignedCount} | Open hours: {fmtHoursFromMin(week.unassignedHours)} | Additional staff needed: {week.additionalStaffNeeded}
+                      </div>
+                      <div style={{ ...styles.tiny, marginTop: 4 }}>
+                        Staff at 40h: {week.staffAt40.length ? week.staffAt40.map((st) => st.name).join(", ") : "None"}
+                      </div>
+                      <div style={{ ...styles.tiny, marginTop: 2 }}>
+                        Staff over 40h: {week.staffOver40.length ? week.staffOver40.map((st) => st.name).join(", ") : "None"}
+                      </div>
+                      <div style={{ marginTop: 6, overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr>
+                              <th style={styles.thCompact}>Staff</th>
+                              <th style={styles.thCompact}>Week Hours</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {week.staffHours.length ? week.staffHours.map((entry) => (
+                              <tr key={`${week.weekStart}_${entry.id}`}>
+                                <td style={styles.tdCompact}>{entry.name}</td>
+                                <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(entry.minutes)}</td>
+                              </tr>
+                            )) : (
+                              <tr>
+                                <td style={styles.tdCompact} colSpan={2}>No assigned staff hours for this week.</td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{ ...styles.tiny, marginTop: 6 }}>
+                        Unassigned shifts: {week.unassignedShifts.length
+                          ? week.unassignedShifts.map((sh) => `${formatShiftDateTimeFromISO(sh.startISO)} → ${formatShiftDateTimeFromISO(sh.endISO)}`).join(" | ")
+                          : "None"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <div>
               <div style={styles.tiny}>Current week assigned staff on client profile</div>
@@ -2859,6 +2980,55 @@ export default function Page() {
                 Generate
               </button>
           </div>
+        </div>
+      </div>
+    ) : null}
+
+    {builderSummary ? (
+      <div style={{ marginTop: 12, ...styles.card }}>
+        <div style={{ fontSize: 14, fontWeight: 900, marginBottom: 8 }}>Builder Staffing Summary</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(140px, 1fr))", gap: 8 }}>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Total Shifts Created</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.totalShiftsCreated}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Assigned / Unassigned</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.assignedShifts} / {builderSummary.unassignedShifts}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Additional Staff Needed</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.additionalStaffNeeded}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Staff At 40h</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{builderSummary.staffAt40Count}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Staff Over 40h</div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? "#ff8b8b" : "inherit" }}>{builderSummary.staffOver40Count}</div>
+          </div>
+          <div style={{ ...styles.shift, padding: 8 }}>
+            <div style={styles.tiny}>Unassigned Hours</div>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>{fmtHoursFromMin(builderSummary.unassignedHours)}</div>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+          {builderSummary.weeklyBreakdown.map((week) => (
+            <div key={`summary_${week.weekStart}`} style={{ ...styles.shift, padding: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Week of {week.weekStart}</div>
+              <div style={styles.tiny}>
+                Unassigned shifts: {week.unassignedCount} | Open hours: {fmtHoursFromMin(week.unassignedHours)} | Additional staff needed: {week.additionalStaffNeeded}
+              </div>
+              <div style={{ ...styles.tiny, marginTop: 4 }}>
+                Staff at 40h: {week.staffAt40.length ? week.staffAt40.map((st) => st.name).join(", ") : "None"}
+              </div>
+              <div style={{ ...styles.tiny, marginTop: 2 }}>
+                Staff over 40h: {week.staffOver40.length ? week.staffOver40.map((st) => st.name).join(", ") : "None"}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     ) : null}
@@ -3345,29 +3515,7 @@ export default function Page() {
               </div>
             </div>
 
-            {/* Sticky actions: keep save/cancel visible while scrolling the long form/list */}
-            <div
-              style={{
-                position: "sticky",
-                top: 8,
-                zIndex: 5,
-                display: "flex",
-                justifyContent: "flex-end",
-                gap: 8,
-                marginTop: 10,
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(11,12,16,0.92)",
-              }}
-            >
-              <button type="button" style={styles.btn2} onClick={resetClientDraft}>Cancel</button>
-              <button type="button" style={styles.btn} onClick={handleSaveClientClick} disabled={isSavingClient}>
-                {isSavingClient ? "Saving..." : "Save Client"}
-              </button>
-            </div>
-
-            {/* Bottom actions: duplicate save/cancel near the end of the form */}
+            {/* Form actions */}
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10, gap: 8 }}>
               <button type="button" style={styles.btn2} onClick={resetClientDraft}>Cancel</button>
               <button type="button" style={styles.btn} onClick={handleSaveClientClick} disabled={isSavingClient}>
