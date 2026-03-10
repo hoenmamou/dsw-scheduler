@@ -120,6 +120,28 @@ function formatShiftDateTimeFromISO(iso) {
   return `${date} ${time}`.trim();
 }
 
+function formatTimeCompact(value) {
+  const normalized = normalizeTimeValue(value, null);
+  if (!normalized) return "";
+  const [hh, mm] = normalized.split(":").map(Number);
+  const suffix = hh >= 12 ? "p" : "a";
+  const hour12 = hh % 12 || 12;
+  if (mm === 0) return `${hour12}${suffix}`;
+  return `${hour12}:${String(mm).padStart(2, "0")}${suffix}`;
+}
+
+function compactShiftRange(startISO, endISO) {
+  const m1 = String(startISO || "").match(/T(\d{2}:\d{2})/);
+  const m2 = String(endISO || "").match(/T(\d{2}:\d{2})/);
+  return `${formatTimeCompact(m1?.[1] || "")}-${formatTimeCompact(m2?.[1] || "")}`;
+}
+
+function shortLabel(value, max = 12) {
+  const text = String(value || "").trim();
+  if (!text) return "Unknown";
+  return text.length <= max ? text : `${text.slice(0, max - 1)}...`;
+}
+
 function addDays(date, n) {
   const d = new Date(date);
   d.setDate(d.getDate() + n);
@@ -247,6 +269,40 @@ function parseShiftPattern(input) {
   return out;
 }
 
+function shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime) {
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  if (isNaN(start) || isNaN(end) || end <= start) return false;
+
+  const overnight = String(endTime || "") <= String(startTime || "");
+  const dayDiff = Math.round((end - start) / (24 * 60 * 60 * 1000));
+
+  // Keep true single overnight shifts as one row when the end date is next day.
+  if (dayDiff === 1 && overnight) return false;
+  return true;
+}
+
+function buildSeparateDailyShifts(startDate, endDate, startTime, endTime) {
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  if (isNaN(start) || isNaN(end) || end < start) return [];
+
+  const overnight = String(endTime || "") <= String(startTime || "");
+  const windows = [];
+
+  for (let cursor = new Date(start); cursor <= end; cursor = addDays(cursor, 1)) {
+    const dateStr = isoLocal(cursor).slice(0, 10);
+    const startISO = `${dateStr}T${startTime}:00`;
+    const endDateObj = overnight ? addDays(new Date(`${dateStr}T00:00:00`), 1) : new Date(`${dateStr}T00:00:00`);
+    const endISO = `${isoLocal(endDateObj).slice(0, 10)}T${endTime}:00`;
+    if (new Date(endISO) > new Date(startISO)) {
+      windows.push({ startISO, endISO, dateStr });
+    }
+  }
+
+  return windows;
+}
+
 function loadClientSchedule(clientId) {
   try {
     const raw = localStorage.getItem(CLIENT_SCHEDULE_STORAGE_KEY);
@@ -284,6 +340,74 @@ function Tabs({ value, onChange, tabs }) {
           {t.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+function summarizeAssignedStaffSelection(selectedIds, staffOptions) {
+  const ids = parseAssignedStaffIds(selectedIds);
+  if (!ids.length) return "None selected";
+
+  const names = ids
+    .map((id) => staffOptions.find((s) => s.id === id)?.name || id)
+    .filter(Boolean);
+
+  if (names.length <= 2) return names.join(", ");
+  return `${names.slice(0, 2).join(", ")} +${names.length - 2} more`;
+}
+
+function AssignedStaffDropdown({ label = "Assigned Staff", selectedIds, staffOptions, onChange }) {
+  const ids = parseAssignedStaffIds(selectedIds);
+
+  return (
+    <div style={{ position: "relative" }}>
+      <div style={styles.tiny}>{label}</div>
+      <details style={{ marginTop: 6 }}>
+        <summary style={{ ...styles.select, cursor: "pointer", userSelect: "none" }}>
+          {ids.length
+            ? `${ids.length} staff selected (${summarizeAssignedStaffSelection(ids, staffOptions)})`
+            : "Select staff..."}
+        </summary>
+        <div
+          style={{
+            position: "absolute",
+            zIndex: 30,
+            marginTop: 6,
+            width: "100%",
+            minWidth: 280,
+            maxHeight: 240,
+            overflowY: "auto",
+            border: "1px solid rgba(255,255,255,0.18)",
+            borderRadius: 12,
+            background: "#10131b",
+            padding: 8,
+            boxShadow: "0 10px 28px rgba(0,0,0,0.45)",
+          }}
+        >
+          {staffOptions.length === 0 ? (
+            <div style={styles.tiny}>No active staff.</div>
+          ) : (
+            staffOptions.map((st) => {
+              const checked = ids.includes(st.id);
+              return (
+                <label key={st.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 4px" }}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                        ? [...ids, st.id]
+                        : ids.filter((id) => id !== st.id);
+                      onChange(parseAssignedStaffIds(next));
+                    }}
+                  />
+                  <span>{st.name}</span>
+                </label>
+              );
+            })
+          )}
+        </div>
+      </details>
     </div>
   );
 }
@@ -781,6 +905,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
   });
 
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
+  const PREVIEW_LIMIT = 3;
 
   function dayShifts(dateStr) {
     const dayStart = `${dateStr}T00:00:00`;
@@ -810,64 +935,61 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(180px, 1fr))", gap: 10, overflowX: "auto" }}>
         {days.map(({ d, dateStr }) => (
-          <div key={dateStr} style={styles.card}>
-            <div style={{ fontWeight: 950 }}>
+          <div key={dateStr} style={{ ...styles.card, padding: 8, minHeight: 180, maxHeight: 180, display: "flex", flexDirection: "column" }}>
+            <div style={{ fontWeight: 900, fontSize: 12 }}>
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
 
-            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-              {dayShifts(dateStr).length === 0 ? (
-                <div style={{ opacity: 0.75, fontSize: 12 }}>No shifts</div>
-              ) : (
-                dayShifts(dateStr).map((sh) => (
-                  <div key={sh.id} style={styles.shift}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div>
-                        <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
-                        <div style={styles.shiftMeta}>
-                          {formatShiftTimeFromISO(sh.startISO)} → {formatShiftTimeFromISO(sh.endISO)}
-                          <br />
-                          Staff: <b>{staffName(sh.staffId)}</b>
-                          {sh.isShared ? (
-                            <>
-                              <br />
-                              ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
-                            </>
-                          ) : null}
+            <div style={{ display: "grid", gap: 4, marginTop: 6, fontSize: 11, lineHeight: 1.25, overflow: "hidden" }}>
+              {(() => {
+                const all = dayShifts(dateStr);
+                const preview = all.slice(0, PREVIEW_LIMIT);
+                const hiddenCount = Math.max(0, all.length - PREVIEW_LIMIT);
+
+                if (all.length === 0) return <div style={{ opacity: 0.75, fontSize: 11 }}>No shifts</div>;
+
+                return (
+                  <>
+                    {preview.map((sh) => (
+                      <div key={sh.id} style={{ border: "1px solid rgba(255,255,255,0.10)", borderRadius: 8, padding: "4px 6px", background: "rgba(255,255,255,0.02)" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
+                          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
+                            {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(staffName(sh.staffId), 10)}
+                          </div>
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button
+                              style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px" }}
+                              title="Edit shift"
+                              onClick={() => {
+                                setTab && setTab("schedule");
+                                setShiftDraft && setShiftDraft({
+                                  clientId: sh.clientId,
+                                  staffId: sh.staffId,
+                                  startDate: sh.startISO.slice(0, 10),
+                                  startTime: sh.startISO.slice(11, 16),
+                                  endDate: sh.endISO.slice(0, 10),
+                                  endTime: sh.endISO.slice(11, 16),
+                                  isShared: !!sh.isShared,
+                                  clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
+                                  sharedGroupId: sh.sharedGroupId || "",
+                                });
+                              }}
+                            >E</button>
+                            <button
+                              style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px", color: "#ff8b8b" }}
+                              title="Delete shift"
+                              onClick={() => {
+                                if (typeof deleteShift === "function") deleteShift(sh.id);
+                              }}
+                            >D</button>
+                          </div>
                         </div>
                       </div>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button
-                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px" }}
-                          title="Edit shift"
-                          onClick={() => {
-                            // Load shift into draft for editing
-                            setTab && setTab("schedule");
-                            setShiftDraft && setShiftDraft({
-                              clientId: sh.clientId,
-                              staffId: sh.staffId,
-                              startDate: sh.startISO.slice(0, 10),
-                              startTime: sh.startISO.slice(11, 16),
-                              endDate: sh.endISO.slice(0, 10),
-                              endTime: sh.endISO.slice(11, 16),
-                              isShared: !!sh.isShared,
-                              clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
-                              sharedGroupId: sh.sharedGroupId || "",
-                            });
-                          }}
-                        >Edit</button>
-                        <button
-                          style={{ ...styles.btn2, fontSize: 12, padding: "2px 8px", color: "#ff8b8b" }}
-                          title="Delete shift"
-                          onClick={() => {
-                            if (typeof deleteShift === "function") deleteShift(sh.id);
-                          }}
-                        >Delete</button>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
+                    ))}
+                    {hiddenCount > 0 ? <div style={{ opacity: 0.85, fontSize: 11 }}>+{hiddenCount} more</div> : null}
+                  </>
+                );
+              })()}
             </div>
           </div>
         ))}
@@ -900,6 +1022,7 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
   });
 
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
+  const PREVIEW_LIMIT = 2;
 
   function dayShifts(dateStr) {
     const dayStart = `${dateStr}T00:00:00`;
@@ -937,31 +1060,29 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(120px, 1fr))", gap: 10, overflowX: "auto" }}>
         {days.map(({ d, dateStr, inMonth }) => (
-          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45 }}>
-            <div style={{ fontWeight: 950, fontSize: 12 }}>
+          <div key={dateStr} style={{ ...styles.card, opacity: inMonth ? 1 : 0.45, padding: 8, minHeight: 122, maxHeight: 122, display: "flex", flexDirection: "column" }}>
+            <div style={{ fontWeight: 900, fontSize: 11 }}>
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
-            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-              {dayShifts(dateStr).length === 0 ? (
-                <div style={{ opacity: 0.75, fontSize: 10 }}>No shifts</div>
-              ) : (
-                dayShifts(dateStr).map((sh) => (
-                  <div key={sh.id} style={styles.shift}>
-                    <div style={styles.shiftTitle}>{clientName(sh.clientId)}</div>
-                    <div style={styles.shiftMeta}>
-                      {formatShiftTimeFromISO(sh.startISO)} → {formatShiftTimeFromISO(sh.endISO)}
-                      <br />
-                      Staff: <b>{staffName(sh.staffId)}</b>
-                      {sh.isShared ? (
-                        <>
-                          <br />
-                          ✅ Shared {sh.sharedGroupId ? `(${sh.sharedGroupId})` : ""}
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                ))
-              )}
+            <div style={{ display: "grid", gap: 3, marginTop: 4, fontSize: 10, lineHeight: 1.2, overflow: "hidden" }}>
+              {(() => {
+                const all = dayShifts(dateStr);
+                const preview = all.slice(0, PREVIEW_LIMIT);
+                const hiddenCount = Math.max(0, all.length - PREVIEW_LIMIT);
+
+                if (all.length === 0) return <div style={{ opacity: 0.7, fontSize: 10 }}>No shifts</div>;
+
+                return (
+                  <>
+                    {preview.map((sh) => (
+                      <div key={sh.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
+                        {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 10)}
+                      </div>
+                    ))}
+                    {hiddenCount > 0 ? <div style={{ opacity: 0.85 }}>+{hiddenCount} more</div> : null}
+                  </>
+                );
+              })()}
             </div>
           </div>
         ))}
@@ -1527,105 +1648,140 @@ export default function Page() {
       if (clientId2 === clientId) return alert("Client 1 and Client 2 cannot be the same.");
     }
 
-    const startISO = toISO(startDate, startTime);
-    const endISO = toISO(endDate, endTime);
-    if (new Date(endISO) <= new Date(startISO)) return alert("End must be after start.");
+    const shouldSplitDaily = shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime);
 
-    const sharedGroupId = isShared
+    let windows = [];
+    if (shouldSplitDaily) {
+      windows = buildSeparateDailyShifts(startDate, endDate, startTime, endTime);
+    } else {
+      const startISO = toISO(startDate, startTime);
+      let endISO = toISO(endDate, endTime);
+
+      // Single-day overnight fallback: 19:00 -> 07:00 becomes next day.
+      if (new Date(endISO) <= new Date(startISO) && startDate === endDate) {
+        const nd = addDays(new Date(`${startDate}T00:00:00`), 1);
+        endISO = `${isoLocal(nd).slice(0, 10)}T${endTime}:00`;
+      }
+
+      if (new Date(endISO) <= new Date(startISO)) return alert("End must be after start.");
+      windows = [{ startISO, endISO, dateStr: startDate }];
+    }
+
+    if (!windows.length) return alert("No valid shift windows were generated for the selected date range.");
+
+    const sharedGroupBase = isShared
       ? (shiftDraft.sharedGroupId.trim() || `SS-${Date.now().toString().slice(-6)}`)
       : "";
 
-    // Check conflicts globally
-    const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
-
-    // Allow overlap ONLY when it is the same shared-group/time block
-    const illegalConflicts = conflicts.filter((c) => {
-      if (!isShared) return true; // non-shared can never overlap
-      // shared can overlap only if the conflict is also shared and matches group + exact time
-      return !(
-        c.isShared &&
-        c.sharedGroupId === sharedGroupId &&
-        c.startISO === startISO &&
-        c.endISO === endISO
-      );
-    });
-
-    if (illegalConflicts.length) {
-      const first = illegalConflicts[0];
-      const client = (state.clients || []).find((x) => x.id === first.clientId);
-      const sup = (state.users || []).find((u) => u.id === (client?.supervisorId || ""));
-      const msg =
-        `Conflict: staff already scheduled.\n\n` +
-        `Client: ${client?.name || "Unknown"}\n` +
-        `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
-        `Time: ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}`;
-
-      if (state.settings?.hardStopConflicts) return alert(msg);
-      if (!confirm(msg + "\n\nContinue anyway?")) return;
-    }
-
-    const workedDaysStreak = projectedConsecutiveStreak({
-      allShifts: state.shifts || [],
-      staffId,
-      weekStartDate,
-      weekEndDate,
-      crossWeekProtection: crossWeekConsecutiveProtection,
-      candidateShift: {
-        id: "candidate",
-        staffId,
-        startISO,
-        endISO,
-      },
-    });
-    if (workedDaysStreak > maxConsecutiveDays) {
-      const msg =
-        `Consecutive-day limit reached.\n\n` +
-        `Projected streak: ${workedDaysStreak} days\n` +
-        `Max allowed: ${maxConsecutiveDays} days\n\n` +
-        (crossWeekConsecutiveProtection
-          ? "Cross-week consecutive protection is ON."
-          : "Only the selected week is included in this check.");
-
-      if (state.settings?.hardStopConflicts) return alert(msg);
-      if (!confirm(msg + "\n\nContinue anyway?")) return;
-    }
-
-    // OT warning (dedup shared support)
-    const newMin = minutesBetweenISO(startISO, endISO);
-    const currentMin = staffWeekMinutesMap[staffId] || 0;
-    const afterMin = currentMin + newMin; // shared counts once per staff, so this is fine
-    const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-    if (otMin > 0) {
-      if (!confirm(`This will create overtime: ${fmtHoursFromMin(otMin)}.\n\nContinue?`)) return;
-    }
-
     const createdBy = currentUser?.id || "unknown";
     const rows = [];
+    const planned = [];
+    let projectedMinutes = staffWeekMinutesMap[staffId] || 0;
 
-    // Always create row for primary client
-    rows.push({
-      id: uid("sh"),
-      client_id: clientId,
-      staff_id: staffId,
-      start_iso: startISO,
-      end_iso: endISO,
-      created_by: createdBy,
-      is_shared: !!isShared,
-      shared_group_id: sharedGroupId,
-    });
+    for (let idx = 0; idx < windows.length; idx++) {
+      const { startISO, endISO } = windows[idx];
+      const sharedGroupId = isShared
+        ? (windows.length > 1 ? `${sharedGroupBase}-${startISO.slice(0, 10)}` : sharedGroupBase)
+        : "";
 
-    // Shared support: also create row for client 2
-    if (isShared) {
+      // Check conflicts globally for each generated daily shift.
+      const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
+
+      // Also block conflicts against already-planned windows in this same add action.
+      const localConflicts = planned.filter((p) => overlaps(p.startISO, p.endISO, startISO, endISO));
+      const localAsDbShape = localConflicts.map((p) => ({
+        ...p,
+        clientId,
+        isShared: !!isShared,
+        sharedGroupId,
+      }));
+
+      const illegalConflicts = [...conflicts, ...localAsDbShape].filter((c) => {
+        if (!isShared) return true;
+        return !(
+          c.isShared &&
+          c.sharedGroupId === sharedGroupId &&
+          c.startISO === startISO &&
+          c.endISO === endISO
+        );
+      });
+
+      if (illegalConflicts.length) {
+        const first = illegalConflicts[0];
+        const conflictClient = (state.clients || []).find((x) => x.id === first.clientId);
+        const sup = (state.users || []).find((u) => u.id === (conflictClient?.supervisorId || ""));
+        const msg =
+          `Conflict: staff already scheduled.\n\n` +
+          `Client: ${conflictClient?.name || "Unknown"}\n` +
+          `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
+          `Time: ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}`;
+
+        if (state.settings?.hardStopConflicts) return alert(msg);
+        if (!confirm(msg + "\n\nContinue anyway?")) return;
+      }
+
+      const workedDaysStreak = projectedConsecutiveStreak({
+        allShifts: [...(state.shifts || []), ...planned],
+        staffId,
+        weekStartDate,
+        weekEndDate,
+        crossWeekProtection: crossWeekConsecutiveProtection,
+        candidateShift: {
+          id: `candidate_${idx}`,
+          staffId,
+          startISO,
+          endISO,
+        },
+      });
+      if (workedDaysStreak > maxConsecutiveDays) {
+        const msg =
+          `Consecutive-day limit reached.\n\n` +
+          `Projected streak: ${workedDaysStreak} days\n` +
+          `Max allowed: ${maxConsecutiveDays} days\n` +
+          `Shift: ${formatShiftDateTimeFromISO(startISO)} → ${formatShiftDateTimeFromISO(endISO)}\n\n` +
+          (crossWeekConsecutiveProtection
+            ? "Cross-week consecutive protection is ON."
+            : "Only the selected week is included in this check.");
+
+        if (state.settings?.hardStopConflicts) return alert(msg);
+        if (!confirm(msg + "\n\nContinue anyway?")) return;
+      }
+
+      const newMin = minutesBetweenISO(startISO, endISO);
+      const afterMin = projectedMinutes + newMin;
+      const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
+      if (otMin > 0) {
+        if (!confirm(`This shift will create overtime: ${fmtHoursFromMin(otMin)}.\n\nContinue?`)) return;
+      }
+
+      projectedMinutes = afterMin;
+      planned.push({ id: `planned_${idx}`, staffId, startISO, endISO });
+
+      // Always create row for primary client
       rows.push({
         id: uid("sh"),
-        client_id: clientId2,
+        client_id: clientId,
         staff_id: staffId,
         start_iso: startISO,
         end_iso: endISO,
         created_by: createdBy,
-        is_shared: true,
+        is_shared: !!isShared,
         shared_group_id: sharedGroupId,
       });
+
+      // Shared support: also create row for client 2
+      if (isShared) {
+        rows.push({
+          id: uid("sh"),
+          client_id: clientId2,
+          staff_id: staffId,
+          start_iso: startISO,
+          end_iso: endISO,
+          created_by: createdBy,
+          is_shared: true,
+          shared_group_id: sharedGroupId,
+        });
+      }
     }
 
     await sbUpsert("shifts", rows);
@@ -2689,37 +2845,24 @@ export default function Page() {
 
                 <div style={{ marginTop: 18 }}>
                   <h4 style={{ margin: "10px 0 6px 0" }}>Profile Assigned Staff (used by 24-hour builder first)</h4>
-                  <div style={styles.tiny}>Select all staff that can be auto-assigned for this client.</div>
-                  <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
-                    {activeStaff.map((st) => {
-                      const checked = selectedClientAssignedStaffIds.includes(st.id);
-                      return (
-                        <label key={st.id} style={{ ...styles.shift, display: "flex", gap: 8, alignItems: "center" }}>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(e) => {
-                              const next = e.target.checked
-                                ? [...selectedClientAssignedStaffIds, st.id]
-                                : selectedClientAssignedStaffIds.filter((id) => id !== st.id);
-                              sbUpsert("clients", [
-                                {
-                                  id: selectedClient.id,
-                                  assigned_staff_ids: serializeAssignedStaffIds(next),
-                                },
-                              ])
-                                .then(() => refreshState(setState))
-                                .catch((err) => {
-                                  console.error("save assigned staff failed", err);
-                                  alert("Unable to save assigned staff.");
-                                });
-                            }}
-                          />
-                          <span>{st.name}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
+                  <AssignedStaffDropdown
+                    label="Assigned Staff"
+                    selectedIds={selectedClientAssignedStaffIds}
+                    staffOptions={activeStaff}
+                    onChange={(next) => {
+                      sbUpsert("clients", [
+                        {
+                          id: selectedClient.id,
+                          assigned_staff_ids: serializeAssignedStaffIds(next),
+                        },
+                      ])
+                        .then(() => refreshState(setState))
+                        .catch((err) => {
+                          console.error("save assigned staff failed", err);
+                          alert("Unable to save assigned staff.");
+                        });
+                    }}
+                  />
                   <div style={{ ...styles.tiny, marginTop: 8 }}>
                     Selected: {selectedClientAssignedStaff.length
                       ? selectedClientAssignedStaff.map((s) => s.name).join(", ")
@@ -2876,27 +3019,12 @@ export default function Page() {
               </div>
 
               <div style={{ gridColumn: "1 / -1" }}>
-                <div style={styles.tiny}>Assigned Staff</div>
-                <div style={{ marginTop: 6, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
-                  {activeStaff.map((st) => {
-                    const checked = (clientDraft.assignedStaffIds || []).includes(st.id);
-                    return (
-                      <label key={st.id} style={{ ...styles.shift, display: "flex", gap: 8, alignItems: "center", padding: "8px 10px" }}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) => {
-                            const next = e.target.checked
-                              ? [...(clientDraft.assignedStaffIds || []), st.id]
-                              : (clientDraft.assignedStaffIds || []).filter((id) => id !== st.id);
-                            setClientDraft((p) => ({ ...p, assignedStaffIds: parseAssignedStaffIds(next) }));
-                          }}
-                        />
-                        <span>{st.name}</span>
-                      </label>
-                    );
-                  })}
-                </div>
+                <AssignedStaffDropdown
+                  label="Assigned Staff"
+                  selectedIds={clientDraft.assignedStaffIds || []}
+                  staffOptions={activeStaff}
+                  onChange={(next) => setClientDraft((p) => ({ ...p, assignedStaffIds: parseAssignedStaffIds(next) }))}
+                />
               </div>
             </div>
 
