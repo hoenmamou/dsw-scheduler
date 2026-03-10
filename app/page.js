@@ -945,13 +945,10 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
   }
 
   function dayShifts(dateStr) {
-    const dayStart = `${dateStr}T00:00:00`;
-    const dayEnd = `${dateStr}T23:59:59`;
-
     return shifts
       .filter((sh) => {
         if (!canSeeAllShifts && !visibleClientIds.has(sh.clientId)) return false;
-        return overlaps(sh.startISO, sh.endISO, dayStart, dayEnd);
+        return String(sh.startISO || "").slice(0, 10) === dateStr;
       })
       .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
   }
@@ -1086,13 +1083,10 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
   }
 
   function dayShifts(dateStr) {
-    const dayStart = `${dateStr}T00:00:00`;
-    const dayEnd = `${dateStr}T23:59:59`;
-
     return shifts
       .filter((sh) => {
         if (!canSeeAllShifts && !visibleClientIds.has(sh.clientId)) return false;
-        return overlaps(sh.startISO, sh.endISO, dayStart, dayEnd);
+        return String(sh.startISO || "").slice(0, 10) === dateStr;
       })
       .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
   }
