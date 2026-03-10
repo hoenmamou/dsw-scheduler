@@ -189,6 +189,7 @@ function fmtHoursFromMin(min) {
 
 const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const CLIENT_SCHEDULE_STORAGE_KEY = "dsw_client_schedules";
+const CLIENT_ASSIGNED_STAFF_STORAGE_KEY = "dsw_client_assigned_staff";
 
 function parseShiftPattern(input) {
   // Accept newline or comma separated entries like "07:00-15:00"
@@ -226,6 +227,35 @@ function saveClientSchedule(clientId, shifts) {
     const map = raw ? JSON.parse(raw) : {};
     map[clientId] = { shifts };
     localStorage.setItem(CLIENT_SCHEDULE_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
+
+function loadClientAssignedStaffMap() {
+  try {
+    const raw = localStorage.getItem(CLIENT_ASSIGNED_STAFF_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    if (!map || typeof map !== "object") return {};
+    const normalized = {};
+    for (const [clientId, ids] of Object.entries(map)) {
+      if (!Array.isArray(ids)) continue;
+      normalized[clientId] = Array.from(
+        new Set(ids.map((id) => String(id || "").trim()).filter(Boolean))
+      );
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function saveClientAssignedStaffMap(map) {
+  try {
+    localStorage.setItem(
+      CLIENT_ASSIGNED_STAFF_STORAGE_KEY,
+      JSON.stringify(map || {})
+    );
   } catch {
     // ignore
   }
@@ -1217,12 +1247,57 @@ export default function Page() {
   const [builderTemplate, setBuilderTemplate] = useState("2x12");
   const [builderScheduleSource, setBuilderScheduleSource] = useState("template"); // template | client | custom
   const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-15:00\n15:00-23:00\n23:00-07:00");
-  const [builderWeeklyAssignments, setBuilderWeeklyAssignments] = useState({});
+  const [builderBlockAssignments, setBuilderBlockAssignments] = useState({});
   const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
   const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
+  const [clientAssignedStaffMap, setClientAssignedStaffMap] = useState({});
   const clientSchedule = useMemo(() => {
     return builderClientId ? loadClientSchedule(builderClientId) : null;
   }, [builderClientId]);
+  const activeStaff = useMemo(
+    () => (state.staff || []).filter((s) => s.active !== false),
+    [state.staff]
+  );
+
+  const builderShiftInfo = useMemo(() => {
+    try {
+      if (builderScheduleSource === "client") {
+        const shifts = clientSchedule?.shifts || [];
+        return {
+          shifts,
+          error: shifts.length ? "" : "No saved schedule for this client.",
+        };
+      }
+
+      if (builderScheduleSource === "custom") {
+        return { shifts: parseShiftPattern(builderCustomTemplate), error: "" };
+      }
+
+      const templateShifts =
+        builderTemplate === "2x12"
+          ? [
+              { start: "07:00", end: "19:00" },
+              { start: "19:00", end: "07:00" },
+            ]
+          : [
+              { start: "07:00", end: "15:00" },
+              { start: "15:00", end: "23:00" },
+              { start: "23:00", end: "07:00" },
+            ];
+      return { shifts: templateShifts, error: "" };
+    } catch (e) {
+      return { shifts: [], error: e?.message || "Invalid schedule format." };
+    }
+  }, [builderScheduleSource, builderTemplate, builderCustomTemplate, clientSchedule]);
+
+  const builderClientAssignedStaffIds = useMemo(() => {
+    if (!builderClientId) return [];
+    const assigned = Array.isArray(clientAssignedStaffMap[builderClientId])
+      ? clientAssignedStaffMap[builderClientId]
+      : [];
+    const activeIds = new Set(activeStaff.map((s) => s.id));
+    return assigned.filter((id) => activeIds.has(id));
+  }, [builderClientId, clientAssignedStaffMap, activeStaff]);
 
   // keep startDate aligned with week when week changes
   useEffect(() => {
@@ -1238,6 +1313,23 @@ export default function Page() {
       setBuilderScheduleSource((prev) => (prev === "custom" ? "custom" : "client"));
     }
   }, [builderClientId]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    setClientAssignedStaffMap(loadClientAssignedStaffMap());
+  }, [mounted]);
+
+  function setClientAssignedStaff(clientId, staffIds) {
+    if (!clientId) return;
+    const normalized = Array.from(
+      new Set((staffIds || []).map((id) => String(id || "").trim()).filter(Boolean))
+    );
+    setClientAssignedStaffMap((prev) => {
+      const next = { ...prev, [clientId]: normalized };
+      saveClientAssignedStaffMap(next);
+      return next;
+    });
+  }
 
   // Auto bump endDate if endTime earlier than startTime
   useEffect(() => {
@@ -1271,31 +1363,23 @@ export default function Page() {
     const rows = [];
 
     // Determine shift definitions based on selected source
-    let shiftsDef = [];
-    try {
-      if (builderScheduleSource === "client") {
-        if (!clientSchedule?.shifts?.length) return alert("No saved schedule for this client.");
-        shiftsDef = clientSchedule.shifts;
-      } else if (builderScheduleSource === "custom") {
-        shiftsDef = parseShiftPattern(builderCustomTemplate);
-      } else {
-        shiftsDef = builderTemplate === "2x12"
-          ? [ { start: "07:00", end: "19:00" }, { start: "19:00", end: "07:00" } ]
-          : [ { start: "07:00", end: "15:00" }, { start: "15:00", end: "23:00" }, { start: "23:00", end: "07:00" } ];
-      }
-    } catch (e) {
-      return alert(e.message || "Invalid schedule format.");
-    }
+    const shiftsDef = builderShiftInfo.shifts;
+    if (builderShiftInfo.error) return alert(builderShiftInfo.error);
+    if (!shiftsDef.length) return alert("No shift blocks found for the selected schedule source.");
 
     // Track per-staff minutes while building to avoid over-assigning
     const minutesByStaff = { ...staffWeekMinutesMap };
-    const pool = (state.staff || []).filter((s) => s.active !== false);
+    const pool = activeStaff;
+    const assignedIdSet = new Set(builderClientAssignedStaffIds);
+    const assignedPool = pool.filter((s) => assignedIdSet.has(s.id));
+    const fallbackPool = pool.filter((s) => !assignedIdSet.has(s.id));
+    const preferredPool = assignedPool.length ? [...assignedPool, ...fallbackPool] : pool;
     const projectedByStaff = {};
     let rotIndex = 0;
 
-    const pickStaffForShift = async (startISO, endISO) => {
+    const pickStaffForShift = async (startISO, endISO, blockIdx) => {
       const weekday = new Date(startISO).getDay();
-      const forcedStaffId = builderWeeklyAssignments[weekday];
+      const forcedStaffId = builderBlockAssignments[`${weekday}_${blockIdx}`];
       const addMin = minutesBetweenISO(startISO, endISO);
 
       const checkCandidate = async (st) => {
@@ -1346,9 +1430,9 @@ export default function Page() {
         if (forced && (await checkCandidate(forced))) return forced;
       }
 
-      for (let i = 0; i < pool.length; i++) {
-        const idx = (rotIndex + i) % pool.length;
-        const st = pool[idx];
+      for (let i = 0; i < preferredPool.length; i++) {
+        const idx = (rotIndex + i) % preferredPool.length;
+        const st = preferredPool[idx];
         if (await checkCandidate(st)) {
           rotIndex = idx + 1;
           return st;
@@ -1364,7 +1448,8 @@ export default function Page() {
         const day = addDays(weekStartForRun, d);
         const dateStr = isoLocal(day).slice(0, 10);
 
-        for (const { start: sTime, end: eTime } of shiftsDef) {
+        for (let blockIdx = 0; blockIdx < shiftsDef.length; blockIdx++) {
+          const { start: sTime, end: eTime } = shiftsDef[blockIdx];
           const sISO = toISO(dateStr, sTime);
           let eISO = toISO(dateStr, eTime);
           if (new Date(eISO) <= new Date(sISO)) {
@@ -1372,7 +1457,7 @@ export default function Page() {
             eISO = `${isoLocal(nd).slice(0, 10)}T${eTime}:00`;
           }
 
-          const chosen = await pickStaffForShift(sISO, eISO);
+          const chosen = await pickStaffForShift(sISO, eISO, blockIdx);
           if (chosen) {
             rows.push({
               id: uid("sh"),
@@ -1829,6 +1914,23 @@ export default function Page() {
     const remainingMin = allottedMin - totalMin;
     return { totalMin, dayMin, nightMin, allottedMin, remainingMin };
   }, [selectedClientShifts, selectedClient]);
+
+  const selectedClientAssignedStaffIds = useMemo(() => {
+    if (!selectedClientId) return [];
+    return Array.isArray(clientAssignedStaffMap[selectedClientId])
+      ? clientAssignedStaffMap[selectedClientId]
+      : [];
+  }, [selectedClientId, clientAssignedStaffMap]);
+
+  const selectedClientAssignedStaff = useMemo(() => {
+    return selectedClientAssignedStaffIds
+      .map((id) => (state.staff || []).find((s) => s.id === id))
+      .filter(Boolean);
+  }, [selectedClientAssignedStaffIds, state.staff]);
+
+  const clientAssignedStaffIdSet = useMemo(() => {
+    return new Set(selectedClientAssignedStaffIds);
+  }, [selectedClientAssignedStaffIds]);
   if (!mounted) return null;
 
   // If Supabase isn't configured we'll show a banner inside the UI and
@@ -2149,32 +2251,81 @@ export default function Page() {
             </div>
 
             <div>
-              <div style={styles.tiny}>Weekly staff assignment</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(60px, 1fr))", gap: 6 }}>
-                {WEEKDAY_NAMES.map((day, idx) => (
-                  <div key={day} style={{ display: "flex", flexDirection: "column" }}>
-                    <div style={{ fontSize: 11, opacity: 0.7 }}>{day}</div>
-                    <select
-                      style={styles.select}
-                      value={builderWeeklyAssignments[idx] || ""}
-                      onChange={(e) =>
-                        setBuilderWeeklyAssignments((p) => ({
-                          ...p,
-                          [idx]: e.target.value,
-                        }))
-                      }
-                    >
-                      <option value="">—</option>
-                      {(state.staff || []).map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
+              <div style={styles.tiny}>Shift-block assignment overrides (optional)</div>
+              <div style={{ ...styles.tiny, marginBottom: 6 }}>
+                Builder uses assigned staff from client profile first, then falls back to other active staff.
               </div>
-              <div style={styles.tiny}>Optionally force a specific staff for each day (e.g., Cory on Fridays).</div>
+
+              {builderShiftInfo.error ? (
+                <div style={{ ...styles.warn, marginTop: 0 }}>{builderShiftInfo.error}</div>
+              ) : null}
+
+              {builderShiftInfo.shifts.length ? (
+                <div style={{ display: "grid", gap: 8 }}>
+                  {builderShiftInfo.shifts.map((block, blockIdx) => (
+                    <div key={`${block.start}-${block.end}-${blockIdx}`} style={{ ...styles.card, padding: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6 }}>
+                        Block {blockIdx + 1}: {formatTime12(block.start)} - {formatTime12(block.end)}
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(70px, 1fr))", gap: 6 }}>
+                        {WEEKDAY_NAMES.map((day, dayIdx) => {
+                          const key = `${dayIdx}_${blockIdx}`;
+                          return (
+                            <div key={key} style={{ display: "flex", flexDirection: "column" }}>
+                              <div style={{ fontSize: 11, opacity: 0.7 }}>{day}</div>
+                              <select
+                                style={styles.select}
+                                value={builderBlockAssignments[key] || ""}
+                                onChange={(e) =>
+                                  setBuilderBlockAssignments((p) => ({
+                                    ...p,
+                                    [key]: e.target.value,
+                                  }))
+                                }
+                              >
+                                <option value="">Auto</option>
+                                {activeStaff.map((s) => (
+                                  <option key={s.id} value={s.id}>
+                                    {s.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={styles.tiny}>No shift blocks loaded yet.</div>
+              )}
+
+              <div style={{ ...styles.tiny, marginTop: 8 }}>
+                Assigned staff for this client: {builderClientAssignedStaffIds.length
+                  ? builderClientAssignedStaffIds
+                      .map((id) => activeStaff.find((s) => s.id === id)?.name || id)
+                      .join(", ")
+                  : "None selected"}
+              </div>
+            </div>
+
+            <div>
+              <div style={styles.tiny}>Current week assigned staff on client profile</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {builderClientAssignedStaffIds.length ? (
+                  builderClientAssignedStaffIds.map((id) => {
+                    const st = activeStaff.find((s) => s.id === id);
+                    return (
+                      <span key={id} style={{ ...styles.shift, padding: "4px 8px", borderRadius: 999 }}>
+                        {st?.name || id}
+                      </span>
+                    );
+                  })
+                ) : (
+                  <span style={styles.tiny}>No assigned staff selected in Client Profiles.</span>
+                )}
+              </div>
             </div>
 
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
@@ -2517,6 +2668,36 @@ export default function Page() {
                 </div>
 
                 <div style={{ marginTop: 18 }}>
+                  <h4 style={{ margin: "10px 0 6px 0" }}>Profile Assigned Staff (used by 24-hour builder first)</h4>
+                  <div style={styles.tiny}>Select all staff that can be auto-assigned for this client.</div>
+                  <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+                    {activeStaff.map((st) => {
+                      const checked = selectedClientAssignedStaffIds.includes(st.id);
+                      return (
+                        <label key={st.id} style={{ ...styles.shift, display: "flex", gap: 8, alignItems: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              const next = e.target.checked
+                                ? [...selectedClientAssignedStaffIds, st.id]
+                                : selectedClientAssignedStaffIds.filter((id) => id !== st.id);
+                              setClientAssignedStaff(selectedClient.id, next);
+                            }}
+                          />
+                          <span>{st.name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div style={{ ...styles.tiny, marginTop: 8 }}>
+                    Selected: {selectedClientAssignedStaff.length
+                      ? selectedClientAssignedStaff.map((s) => s.name).join(", ")
+                      : "None"}
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 18 }}>
                   <h4 style={{ margin: "10px 0 6px 0" }}>Client Schedule</h4>
                   {selectedClientShifts.length === 0 ? (
                     <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
@@ -2569,7 +2750,10 @@ export default function Page() {
                         <tbody>
                           {selectedClientStaffSummary.map(({ staff, min }) => (
                             <tr key={staff?.id || "unknown"}>
-                              <td style={styles.td}>{staff?.name || "Unknown"}</td>
+                              <td style={styles.td}>
+                                {staff?.name || "Unknown"}
+                                {staff?.id && clientAssignedStaffIdSet.has(staff.id) ? " (Profile assigned)" : ""}
+                              </td>
                               <td style={styles.td}>{fmtHoursFromMin(min)}</td>
                             </tr>
                           ))}
