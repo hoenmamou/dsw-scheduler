@@ -280,13 +280,21 @@ function parseShiftPattern(input) {
 function shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime) {
   const start = new Date(`${startDate}T00:00:00`);
   const end = new Date(`${endDate}T00:00:00`);
-  if (isNaN(start) || isNaN(end) || end <= start) return false;
+  if (isNaN(start) || isNaN(end)) return false;
+
+  // If end is before start, invalid range
+  if (end < start) return false;
+
+  // If end equals start (same day), do NOT split—single day shift
+  if (end.getTime() === start.getTime()) return false;
 
   const overnight = String(endTime || "") <= String(startTime || "");
   const dayDiff = Math.round((end - start) / (24 * 60 * 60 * 1000));
 
   // Keep true single overnight shifts as one row when the end date is next day.
   if (dayDiff === 1 && overnight) return false;
+
+  // Multi-day range: always split
   return true;
 }
 
@@ -298,14 +306,30 @@ function buildSeparateDailyShifts(startDate, endDate, startTime, endTime) {
   const overnight = String(endTime || "") <= String(startTime || "");
   const windows = [];
 
-  for (let cursor = new Date(start); cursor <= end; cursor = addDays(cursor, 1)) {
+  // Loop through each day from start to end (inclusive)
+  let cursor = new Date(start);
+  while (cursor.getTime() <= end.getTime()) {
     const dateStr = isoLocal(cursor).slice(0, 10);
     const startISO = `${dateStr}T${startTime}:00`;
-    const endDateObj = overnight ? addDays(new Date(`${dateStr}T00:00:00`), 1) : new Date(`${dateStr}T00:00:00`);
-    const endISO = `${isoLocal(endDateObj).slice(0, 10)}T${endTime}:00`;
+    
+    let nextDayObj;
+    if (overnight) {
+      // Overnight shift spans to next day
+      nextDayObj = addDays(new Date(`${dateStr}T00:00:00`), 1);
+    } else {
+      // Same-day shift
+      nextDayObj = new Date(`${dateStr}T00:00:00`);
+    }
+    
+    const endISO = `${isoLocal(nextDayObj).slice(0, 10)}T${endTime}:00`;
+    
+    // Only add if end is after start
     if (new Date(endISO) > new Date(startISO)) {
       windows.push({ startISO, endISO, dateStr });
     }
+    
+    // Move to next day
+    cursor = addDays(cursor, 1);
   }
 
   return windows;
@@ -1490,9 +1514,12 @@ export default function Page() {
     [builderClient, activeStaff]
   );
 
-  // keep startDate aligned with week when week changes
+  // keep startDate aligned with week when week changes, but preserve endDate if user set it differently
   useEffect(() => {
-    setShiftDraft((p) => ({ ...p, startDate: weekStart, endDate: weekStart }));
+    setShiftDraft((p) => {
+      // Only update startDate; let endDate be user-controlled for multi-day shifts
+      return { ...p, startDate: weekStart };
+    });
   }, [weekStart]);
 
   // Load stored client schedule template into the builder when selecting a client
