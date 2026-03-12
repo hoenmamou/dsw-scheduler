@@ -36,7 +36,7 @@ function normalizeRole(role) {
 
 function isSupervisorRole(role) {
   const normalized = normalizeRole(role);
-  return normalized === "supervisor" || normalized === "admin";
+  return normalized === "supervisor";
 }
 
 function clamp(n, a, b) {
@@ -1291,7 +1291,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
    Calendar (print/PDF)
 ========================= */
 
-function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, setTab, setShiftDraft, deleteShift }) {
+function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, canManageShiftForClient, setTab, setShiftDraft, deleteShift }) {
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
@@ -1359,6 +1359,11 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
                     <div style={{ display: "grid", gap: 4, overflowY: isExpanded ? "auto" : "hidden", minHeight: 0 }}>
                       {preview.map((sh) => (
                         <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 8, padding: "3px 6px", background: UI.panelAlt }}>
+                          {(() => {
+                            const canManageShift = typeof canManageShiftForClient === "function"
+                              ? canManageShiftForClient(sh.clientId)
+                              : true;
+                            return (
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
                             <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
                               {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 10)} / {shortLabel(staffName(sh.staffId), 10)}
@@ -1378,34 +1383,38 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, s
                                 </span>
                               ) : null}
                             </div>
-                            <div style={{ display: "flex", gap: 4 }}>
-                              <button
-                                style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px" }}
-                                title="Edit shift"
-                                onClick={() => {
-                                  setTab && setTab("schedule");
-                                  setShiftDraft && setShiftDraft({
-                                    clientId: sh.clientId,
-                                    staffId: sh.staffId,
-                                    startDate: sh.startISO.slice(0, 10),
-                                    startTime: sh.startISO.slice(11, 16),
-                                    endDate: sh.endISO.slice(0, 10),
-                                    endTime: sh.endISO.slice(11, 16),
-                                    isShared: !!sh.isShared,
-                                    clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
-                                    sharedGroupId: sh.sharedGroupId || "",
-                                  });
-                                }}
-                              >E</button>
-                              <button
-                                style={{ ...styles.btnDanger, fontSize: 10, padding: "1px 6px" }}
-                                title="Delete shift"
-                                onClick={() => {
-                                  if (typeof deleteShift === "function") deleteShift(sh.id);
-                                }}
-                              >D</button>
-                            </div>
+                            {canManageShift ? (
+                              <div style={{ display: "flex", gap: 4 }}>
+                                <button
+                                  style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px" }}
+                                  title="Edit shift"
+                                  onClick={() => {
+                                    setTab && setTab("schedule");
+                                    setShiftDraft && setShiftDraft({
+                                      clientId: sh.clientId,
+                                      staffId: sh.staffId,
+                                      startDate: sh.startISO.slice(0, 10),
+                                      startTime: sh.startISO.slice(11, 16),
+                                      endDate: sh.endISO.slice(0, 10),
+                                      endTime: sh.endISO.slice(11, 16),
+                                      isShared: !!sh.isShared,
+                                      clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
+                                      sharedGroupId: sh.sharedGroupId || "",
+                                    });
+                                  }}
+                                >E</button>
+                                <button
+                                  style={{ ...styles.btnDanger, fontSize: 10, padding: "1px 6px" }}
+                                  title="Delete shift"
+                                  onClick={() => {
+                                    if (typeof deleteShift === "function") deleteShift(sh.id);
+                                  }}
+                                >D</button>
+                              </div>
+                            ) : null}
                           </div>
+                            );
+                          })()}
                         </div>
                       ))}
                     </div>
@@ -1621,8 +1630,9 @@ export default function Page() {
     return null;
   }, [state.users, sessionUserId, sessionUserSnapshot]);
   const normalizedRole = normalizeRole(currentUser?.role);
-  const isAdmin = normalizedRole.includes("admin");
-  const canSeeAdminUI = isAdmin || normalizedRole.includes("super");
+  const isAdmin = normalizedRole === "admin";
+  const isSupervisor = normalizedRole === "supervisor";
+  const canSeeAdminUI = isAdmin;
 
   useEffect(() => setMounted(true), []);
 
@@ -1746,6 +1756,15 @@ export default function Page() {
       return false;
     });
   }, [state.clients, state.settings?.includeUnassignedForSupervisors, isAdmin, currentUser?.id]);
+
+  const manageableClientIds = useMemo(() => {
+    return new Set((visibleClients || []).map((c) => c.id));
+  }, [visibleClients]);
+
+  function canManageClientId(clientId) {
+    if (isAdmin) return true;
+    return manageableClientIds.has(clientId);
+  }
 
   const shiftsInSelectedWeek = useMemo(() => {
     return (state.shifts || []).filter((sh) => {
@@ -1961,6 +1980,9 @@ export default function Page() {
 
   async function runBuilder() {
     if (!builderClientId) return alert("Pick a client for the builder.");
+    if (!canManageClientId(builderClientId)) {
+      return alert("You can only manage schedules for your assigned clients.");
+    }
     const client = (state.clients || []).find((c) => c.id === builderClientId);
     if (!client) return alert("Selected client was not found.");
 
@@ -2041,10 +2063,16 @@ export default function Page() {
     const { clientId, clientId2, staffId, startDate, startTime, endDate, endTime, isShared } = shiftDraft;
 
     if (!clientId || !staffId) return alert("Pick a client and staff.");
+    if (!canManageClientId(clientId)) {
+      return alert("You can only create shifts for your assigned clients.");
+    }
 
     if (isShared) {
       if (!clientId2) return alert("Pick the 2nd client for Shared Support.");
       if (clientId2 === clientId) return alert("Client 1 and Client 2 cannot be the same.");
+      if (!canManageClientId(clientId2)) {
+        return alert("You can only create shared shifts for your assigned clients.");
+      }
     }
 
     const shouldSplitDaily = shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime);
@@ -2205,6 +2233,10 @@ export default function Page() {
   async function deleteShift(id) {
     const allShifts = await sbSelect("shifts");
     const target = (allShifts || []).find((sh) => sh.id === id);
+    const targetClientId = target?.client_id || target?.clientId || "";
+    if (!canManageClientId(targetClientId)) {
+      return alert("You can only delete shifts for your assigned clients.");
+    }
     const sharedGroupId = target?.shared_group_id || target?.sharedGroupId || "";
     const idsToDelete = sharedGroupId
       ? (allShifts || [])
@@ -2283,6 +2315,7 @@ export default function Page() {
   }
 
   async function saveClient() {
+    if (!canSeeAdminUI) return alert("Only admins can manage clients in this section.");
     if (isSavingClient) return;
     const name = clientDraft.name.trim();
     if (!name) return alert("Client name required.");
@@ -2327,6 +2360,7 @@ export default function Page() {
   }
 
   async function deleteClient(id) {
+    if (!canSeeAdminUI) return alert("Only admins can delete clients.");
     if (!confirm("Delete this client?")) return;
     // remove shifts for that client first
     const shifts = await sbSelect("shifts");
@@ -2339,6 +2373,7 @@ export default function Page() {
   }
 
   async function saveUser() {
+    if (!canSeeAdminUI) return alert("Only admins can manage users.");
     if (!userDraft.id.trim() || !userDraft.name.trim() || !userDraft.pin.trim()) {
       return alert("User id, name, and PIN required.");
     }
@@ -2354,6 +2389,7 @@ export default function Page() {
   }
 
   async function deleteUser(id) {
+    if (!canSeeAdminUI) return alert("Only admins can manage users.");
     if (!confirm("Delete this user?")) return;
     await sbDelete("users", id);
     await refreshState(setState);
@@ -2380,14 +2416,34 @@ export default function Page() {
       : []),
   ];
 
+  useEffect(() => {
+    if (!tabs.some((t) => t.value === tab)) {
+      setTab("schedule");
+    }
+  }, [tab, tabs]);
+
   // --- Client Profiles state ---
   const [selectedClientId, setSelectedClientId] = useState("");
 
-  // Use all clients for the dropdown and selectors
-  const allClients = useMemo(() => (state.clients || []).filter(c => c), [state.clients]);
+  // Client profile access follows client visibility permissions.
+  const allClients = useMemo(() => (visibleClients || []).filter((c) => c), [visibleClients]);
 
   // Memo: selected client object
   const selectedClient = useMemo(() => (allClients || []).find(c => c.id === selectedClientId) || null, [allClients, selectedClientId]);
+
+  useEffect(() => {
+    if (!selectedClientId) return;
+    if (!allClients.some((c) => c.id === selectedClientId)) {
+      setSelectedClientId("");
+    }
+  }, [selectedClientId, allClients]);
+
+  useEffect(() => {
+    if (!builderClientId) return;
+    if (!canManageClientId(builderClientId)) {
+      setBuilderClientId("");
+    }
+  }, [builderClientId, canSeeAdminUI, manageableClientIds]);
 
   // Memo: all shifts for selected client in selected week
   const selectedClientShifts = useMemo(() => {
@@ -2492,7 +2548,10 @@ export default function Page() {
     return <LoginScreen users={state.users} onLogin={loginAs} onCreateAdmin={createAdminUser} />;
   }
 
-  const canSeeAllShifts = isAdmin; // supervisors see their clients + optional unassigned (via visibleClients)
+  const canSeeAllShifts = isAdmin || isSupervisor;
+  const accessSummary = isAdmin
+    ? "Admin access: global management + scheduling"
+    : "Supervisor access: global schedule visibility, own-client management only";
 
   return (
     <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 10 }}>
@@ -2514,6 +2573,9 @@ export default function Page() {
             <div style={{ fontSize: 22, fontWeight: 980, lineHeight: 1.12, letterSpacing: "0.01em" }}>DSW Scheduler</div>
             <div style={styles.tiny}>
               Logged in as <b>{currentUser.name}</b> ({currentUser.role})
+            </div>
+            <div style={{ ...styles.tiny, marginTop: 2 }}>
+              <b>Access:</b> {accessSummary}
             </div>
           </div>
 
@@ -2744,7 +2806,7 @@ export default function Page() {
               <div style={styles.tiny}>Client</div>
               <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
                 <option value="">Select…</option>
-                {(state.clients || []).map((c) => (
+                {visibleClients.map((c) => (
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </select>
@@ -3084,6 +3146,9 @@ export default function Page() {
                       shifts = clientSchedule?.shifts || [];
                     }
                     if (!shifts.length) return alert("No shifts to save.");
+                    if (!canManageClientId(builderClientId)) {
+                      return alert("You can only manage schedules for your assigned clients.");
+                    }
                     saveClientSchedule(builderClientId, shifts);
                     alert("Saved schedule for this client.");
                   } catch (e) {
@@ -3182,6 +3247,7 @@ export default function Page() {
             weekStartDate={weekStartDate}
             visibleClients={visibleClients}
             canSeeAllShifts={canSeeAllShifts}
+            canManageShiftForClient={canManageClientId}
             setTab={setTab}
             setShiftDraft={setShiftDraft}
             deleteShift={deleteShift}
@@ -3278,7 +3344,7 @@ export default function Page() {
               </div>
             </div>
 
-            {(currentUser?.role === "supervisor" || isAdmin) && hoursSummary.staffInOt > 0 ? (
+            {(isSupervisor || isAdmin) && hoursSummary.staffInOt > 0 ? (
               <div style={styles.warn}>One or more staff have reached 40 hours this week.</div>
             ) : null}
 
@@ -3478,6 +3544,10 @@ export default function Page() {
                     selectedIds={selectedClientAssignedStaffIds}
                     staffOptions={activeStaff}
                     onChange={(next) => {
+                      if (!canManageClientId(selectedClient.id)) {
+                        alert("You can only edit assigned staff for your own clients.");
+                        return;
+                      }
                       sbUpsert("clients", [
                         {
                           id: selectedClient.id,
