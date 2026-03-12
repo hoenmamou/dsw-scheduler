@@ -3845,6 +3845,26 @@ export default function Page() {
           </div>
         )}
       </div>
+
+      <style jsx global>{`
+        select {
+          background-color: #ffffff;
+          color: #111111;
+          border: 1px solid #444;
+          -webkit-text-fill-color: #111111;
+        }
+
+        select option {
+          color: #111111;
+          background-color: #ffffff;
+        }
+
+        select:focus {
+          border-color: #3f73d8;
+          outline: 2px solid rgba(63, 115, 216, 0.35);
+          outline-offset: 1px;
+        }
+      `}</style>
     </div>
   );
 }
@@ -3910,9 +3930,9 @@ const styles = {
     width: "100%",
     padding: "8px 9px",
     borderRadius: 10,
-    border: `1px solid ${UI.border}`,
-    background: "rgba(255,255,255,0.02)",
-    color: UI.text,
+    border: "1px solid #444",
+    background: "#ffffff",
+    color: "#111111",
     outline: "none",
   },
   grid4: { display: "grid", gridTemplateColumns: "repeat(4, minmax(220px, 1fr))", gap: 8 },
