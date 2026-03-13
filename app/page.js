@@ -3402,28 +3402,34 @@ export default function Page() {
                 </select>
               </div>
 
-              <div style={{ marginTop: 8, overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <div style={{ marginTop: 8, overflowX: "auto", maxWidth: 700 }}>
+                <table style={styles.staffHoursTable}>
+                  <colgroup>
+                    <col style={{ width: 220 }} />
+                    <col style={{ width: 120 }} />
+                    <col style={{ width: 120 }} />
+                    <col style={{ width: 160 }} />
+                  </colgroup>
                   <thead>
                     <tr>
-                      <th style={styles.thCompact}>Staff</th>
-                      <th style={styles.thCompact}>Week Hours</th>
-                      <th style={styles.thCompact}>OT Hours</th>
-                      <th style={styles.thCompact}>Shared Support Hours</th>
+                      <th style={styles.staffHoursThName}>Staff</th>
+                      <th style={styles.staffHoursThNum}>Week Hours</th>
+                      <th style={styles.staffHoursThNum}>OT Hours</th>
+                      <th style={styles.staffHoursThNum}>Shared Support Hours</th>
                     </tr>
                   </thead>
                   <tbody>
                     {staffHoursRows.map(({ st, min, otMin, sharedSupportMin }) => (
                       <tr key={st.id}>
-                        <td style={styles.tdCompact}><b>{st.name}</b></td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(min)}</td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums", color: otMin > 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(sharedSupportMin)}</td>
+                        <td style={styles.staffHoursTdName}><b>{st.name}</b></td>
+                        <td style={styles.staffHoursTdNum}>{fmtHoursFromMin(min)}</td>
+                        <td style={{ ...styles.staffHoursTdNum, color: otMin > 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
+                        <td style={styles.staffHoursTdNum}>{fmtHoursFromMin(sharedSupportMin)}</td>
                       </tr>
                     ))}
                     {staffHoursRows.length === 0 ? (
                       <tr>
-                        <td style={styles.tdCompact} colSpan={4}>No staff rows match this filter.</td>
+                        <td style={styles.staffHoursTdEmpty} colSpan={4}>No staff rows match this filter.</td>
                       </tr>
                     ) : null}
                   </tbody>
@@ -4054,4 +4060,48 @@ const styles = {
   td: { padding: "7px 6px", borderBottom: `1px solid ${UI.borderSoft}`, fontSize: 12 },
   thCompact: { textAlign: "left", fontSize: 10, color: UI.textMuted, padding: "5px 5px", borderBottom: `1px solid ${UI.border}` },
   tdCompact: { padding: "5px 5px", borderBottom: `1px solid ${UI.borderSoft}`, fontSize: 11 },
+  staffHoursTable: {
+    width: "auto",
+    minWidth: 620,
+    borderCollapse: "collapse",
+    tableLayout: "auto",
+  },
+  staffHoursThName: {
+    textAlign: "left",
+    fontSize: 10,
+    color: UI.textMuted,
+    padding: "8px 14px",
+    borderBottom: `1px solid ${UI.border}`,
+    whiteSpace: "nowrap",
+  },
+  staffHoursThNum: {
+    textAlign: "right",
+    fontSize: 10,
+    color: UI.textMuted,
+    padding: "8px 14px",
+    borderBottom: `1px solid ${UI.border}`,
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
+  staffHoursTdName: {
+    padding: "8px 14px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 11,
+    textAlign: "left",
+    whiteSpace: "nowrap",
+  },
+  staffHoursTdNum: {
+    padding: "8px 14px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 11,
+    textAlign: "right",
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
+  staffHoursTdEmpty: {
+    padding: "8px 14px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 11,
+    textAlign: "left",
+  },
 };
