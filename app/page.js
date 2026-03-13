@@ -3093,23 +3093,23 @@ export default function Page() {
                       <div style={{ ...styles.tiny, marginTop: 2 }}>
                         Staff over 40h: {week.staffOver40.length ? week.staffOver40.map((st) => st.name).join(", ") : "None"}
                       </div>
-                      <div style={{ marginTop: 6, overflowX: "auto" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <div style={styles.tableWrapCompact}>
+                        <table className="app-table" style={styles.tableCompact}>
                           <thead>
                             <tr>
                               <th style={styles.thCompact}>Staff</th>
-                              <th style={styles.thCompact}>Week Hours</th>
+                              <th style={styles.thCompactNum}>Week Hours</th>
                             </tr>
                           </thead>
                           <tbody>
                             {week.staffHours.length ? week.staffHours.map((entry) => (
                               <tr key={`${week.weekStart}_${entry.id}`}>
                                 <td style={styles.tdCompact}>{entry.name}</td>
-                                <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(entry.minutes)}</td>
+                                <td style={styles.tdCompactNum}>{fmtHoursFromMin(entry.minutes)}</td>
                               </tr>
                             )) : (
                               <tr>
-                                <td style={styles.tdCompact} colSpan={2}>No assigned staff hours for this week.</td>
+                                <td style={styles.tdCompactEmpty} colSpan={2}>No assigned staff hours for this week.</td>
                               </tr>
                             )}
                           </tbody>
@@ -3298,8 +3298,8 @@ export default function Page() {
             <h3 style={{ marginTop: 0 }}>Staff Schedule</h3>
             <div style={styles.tiny}>Shows upcoming shifts for each staff member in the selected week.</div>
 
-            <div style={{ marginTop: 10, overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <div style={styles.tableWrap}>
+              <table className="app-table" style={styles.tableBase}>
                 <thead>
                   <tr>
                     <th style={styles.th}>Staff</th>
@@ -3318,7 +3318,7 @@ export default function Page() {
                       return (
                         <tr key={st.id}>
                           <td style={styles.td}><b>{st.name}</b></td>
-                          <td style={{ ...styles.td, opacity: 0.7 }} colSpan={2}>
+                          <td style={styles.tdMuted} colSpan={2}>
                             No shifts this week
                           </td>
                         </tr>
@@ -3402,8 +3402,8 @@ export default function Page() {
                 </select>
               </div>
 
-              <div style={{ marginTop: 8, overflowX: "auto", maxWidth: 700 }}>
-                <table style={styles.staffHoursTable}>
+              <div style={styles.tableWrapReport}>
+                <table className="app-table app-table-report" style={styles.staffHoursTable}>
                   <colgroup>
                     <col style={{ width: 220 }} />
                     <col style={{ width: 120 }} />
@@ -3456,32 +3456,32 @@ export default function Page() {
                 </label>
               </div>
 
-              <div style={{ marginTop: 8, overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <div style={styles.tableWrapReportWide}>
+                <table className="app-table app-table-report" style={styles.tableCompact}>
                   <thead>
                     <tr>
                       <th style={styles.thCompact}>Client</th>
-                      <th style={styles.thCompact}>Allotted</th>
-                      <th style={styles.thCompact}>Weekly Total</th>
-                      <th style={styles.thCompact}>Remaining</th>
-                      <th style={styles.thCompact}>Day</th>
-                      <th style={styles.thCompact}>Night</th>
+                      <th style={styles.thCompactNum}>Allotted</th>
+                      <th style={styles.thCompactNum}>Weekly Total</th>
+                      <th style={styles.thCompactNum}>Remaining</th>
+                      <th style={styles.thCompactNum}>Day</th>
+                      <th style={styles.thCompactNum}>Night</th>
                     </tr>
                   </thead>
                   <tbody>
                     {clientHoursRows.map(({ c, h, allottedMin, remainingMin }) => (
                       <tr key={c.id}>
                         <td style={styles.tdCompact}><b>{c.name}</b></td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(allottedMin)}</td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(h.totalMin)}</td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums", color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(remainingMin)}</td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(h.dayMin)}</td>
-                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(h.nightMin)}</td>
+                        <td style={styles.tdCompactNum}>{fmtHoursFromMin(allottedMin)}</td>
+                        <td style={styles.tdCompactNum}>{fmtHoursFromMin(h.totalMin)}</td>
+                        <td style={{ ...styles.tdCompactNum, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(remainingMin)}</td>
+                        <td style={styles.tdCompactNum}>{fmtHoursFromMin(h.dayMin)}</td>
+                        <td style={styles.tdCompactNum}>{fmtHoursFromMin(h.nightMin)}</td>
                       </tr>
                     ))}
                     {clientHoursRows.length === 0 ? (
                       <tr>
-                        <td style={styles.tdCompact} colSpan={6}>No client rows match this filter.</td>
+                        <td style={styles.tdCompactEmpty} colSpan={6}>No client rows match this filter.</td>
                       </tr>
                     ) : null}
                   </tbody>
@@ -3615,15 +3615,15 @@ export default function Page() {
                   {selectedClientShifts.length === 0 ? (
                     <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
                   ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <div style={styles.tableWrap}>
+                      <table className="app-table" style={styles.tableBase}>
                         <thead>
                           <tr>
                             <th style={styles.th}>Date</th>
                             <th style={styles.th}>Start</th>
                             <th style={styles.th}>End</th>
                             <th style={styles.th}>Staff</th>
-                            <th style={styles.th}>Shared</th>
+                            <th style={styles.thCenter}>Shared</th>
                             <th style={styles.th}>Group</th>
                           </tr>
                         </thead>
@@ -3636,7 +3636,7 @@ export default function Page() {
                                 <td style={styles.td}>{formatShiftTimeFromISO(sh.startISO)}</td>
                                 <td style={styles.td}>{formatShiftTimeFromISO(sh.endISO)}</td>
                                 <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
-                                <td style={styles.td}>{sh.isShared ? "Yes" : "No"}</td>
+                                <td style={styles.tdCenter}>{sh.isShared ? "Yes" : "No"}</td>
                                 <td style={styles.td}>{sh.sharedGroupId || ""}</td>
                               </tr>
                             );
@@ -3652,12 +3652,12 @@ export default function Page() {
                   {selectedClientStaffSummary.length === 0 ? (
                     <div style={styles.tiny}>No staff assigned this week.</div>
                   ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <div style={styles.tableWrapCompact}>
+                      <table className="app-table app-table-report" style={styles.tableCompact}>
                         <thead>
                           <tr>
                             <th style={styles.th}>Staff</th>
-                            <th style={styles.th}>Total Hours</th>
+                            <th style={styles.thNum}>Total Hours</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -3667,7 +3667,7 @@ export default function Page() {
                                 {staff?.name || "Unknown"}
                                 {staff?.id && clientAssignedStaffIdSet.has(staff.id) ? " (Profile assigned)" : ""}
                               </td>
-                              <td style={styles.td}>{fmtHoursFromMin(min)}</td>
+                              <td style={styles.tdNum}>{fmtHoursFromMin(min)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -3976,6 +3976,27 @@ export default function Page() {
           outline: 2px solid rgba(63, 115, 216, 0.35);
           outline-offset: 1px;
         }
+
+        .app-table {
+          width: 100%;
+          border-collapse: collapse;
+          table-layout: auto;
+        }
+
+        .app-table thead th {
+          position: sticky;
+          top: 0;
+          z-index: 1;
+          background: #131a24;
+        }
+
+        .app-table tbody tr:nth-child(even) td {
+          background: rgba(255, 255, 255, 0.018);
+        }
+
+        .app-table tbody tr:hover td {
+          background: rgba(76, 201, 240, 0.06);
+        }
       `}</style>
     </div>
   );
@@ -4056,44 +4077,177 @@ const styles = {
   shiftMeta: { fontSize: 11, color: UI.textMuted, lineHeight: 1.35 },
   hr: { height: 1, background: UI.borderSoft, margin: "10px 0" },
   warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
-  th: { textAlign: "left", fontSize: 11, color: UI.textMuted, padding: "7px 6px", borderBottom: `1px solid ${UI.border}` },
-  td: { padding: "7px 6px", borderBottom: `1px solid ${UI.borderSoft}`, fontSize: 12 },
-  thCompact: { textAlign: "left", fontSize: 10, color: UI.textMuted, padding: "5px 5px", borderBottom: `1px solid ${UI.border}` },
-  tdCompact: { padding: "5px 5px", borderBottom: `1px solid ${UI.borderSoft}`, fontSize: 11 },
+  tableWrap: {
+    marginTop: 10,
+    overflowX: "auto",
+    maxWidth: "100%",
+  },
+  tableWrapCompact: {
+    marginTop: 6,
+    overflowX: "auto",
+    maxWidth: "100%",
+  },
+  tableWrapReport: {
+    marginTop: 8,
+    overflowX: "auto",
+    maxWidth: 700,
+  },
+  tableWrapReportWide: {
+    marginTop: 8,
+    overflowX: "auto",
+    maxWidth: 860,
+  },
+  tableBase: {
+    width: "100%",
+    borderCollapse: "collapse",
+    tableLayout: "auto",
+  },
+  tableCompact: {
+    width: "100%",
+    borderCollapse: "collapse",
+    tableLayout: "auto",
+  },
+  th: {
+    textAlign: "left",
+    fontSize: 12,
+    fontWeight: 700,
+    color: UI.textMuted,
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.border}`,
+    whiteSpace: "nowrap",
+  },
+  thNum: {
+    textAlign: "right",
+    fontSize: 12,
+    fontWeight: 700,
+    color: UI.textMuted,
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.border}`,
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
+  thCenter: {
+    textAlign: "center",
+    fontSize: 12,
+    fontWeight: 700,
+    color: UI.textMuted,
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.border}`,
+    whiteSpace: "nowrap",
+  },
+  td: {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 13,
+    textAlign: "left",
+    verticalAlign: "top",
+  },
+  tdNum: {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 13,
+    textAlign: "right",
+    verticalAlign: "top",
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
+  tdCenter: {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 13,
+    textAlign: "center",
+    verticalAlign: "top",
+    whiteSpace: "nowrap",
+  },
+  tdMuted: {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 13,
+    textAlign: "left",
+    verticalAlign: "top",
+    opacity: 0.7,
+  },
+  thCompact: {
+    textAlign: "left",
+    fontSize: 12,
+    fontWeight: 700,
+    color: UI.textMuted,
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.border}`,
+    whiteSpace: "nowrap",
+  },
+  thCompactNum: {
+    textAlign: "right",
+    fontSize: 12,
+    fontWeight: 700,
+    color: UI.textMuted,
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.border}`,
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
+  tdCompact: {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 13,
+    textAlign: "left",
+    verticalAlign: "top",
+  },
+  tdCompactNum: {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 13,
+    textAlign: "right",
+    verticalAlign: "top",
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
+  tdCompactEmpty: {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${UI.borderSoft}`,
+    fontSize: 13,
+    textAlign: "left",
+  },
   staffHoursTable: {
-    width: "auto",
+    width: "100%",
     minWidth: 620,
     borderCollapse: "collapse",
     tableLayout: "auto",
   },
   staffHoursThName: {
-    textAlign: "left",
-    fontSize: 10,
-    color: UI.textMuted,
-    padding: "8px 14px",
-    borderBottom: `1px solid ${UI.border}`,
+    ...{
+      textAlign: "left",
+      fontSize: 12,
+      fontWeight: 700,
+      color: UI.textMuted,
+      padding: "8px 14px",
+      borderBottom: `1px solid ${UI.border}`,
+    },
     whiteSpace: "nowrap",
   },
   staffHoursThNum: {
-    textAlign: "right",
-    fontSize: 10,
-    color: UI.textMuted,
-    padding: "8px 14px",
-    borderBottom: `1px solid ${UI.border}`,
+    ...{
+      textAlign: "right",
+      fontSize: 12,
+      fontWeight: 700,
+      color: UI.textMuted,
+      padding: "8px 14px",
+      borderBottom: `1px solid ${UI.border}`,
+    },
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
   },
   staffHoursTdName: {
     padding: "8px 14px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 11,
+    fontSize: 13,
     textAlign: "left",
     whiteSpace: "nowrap",
   },
   staffHoursTdNum: {
     padding: "8px 14px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 11,
+    fontSize: 13,
     textAlign: "right",
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
@@ -4101,7 +4255,7 @@ const styles = {
   staffHoursTdEmpty: {
     padding: "8px 14px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 11,
+    fontSize: 13,
     textAlign: "left",
   },
 };
