@@ -1367,7 +1367,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
-  const [expandedDays, setExpandedDays] = useState({});
+  const [dayDetail, setDayDetail] = useState(null);
 
   const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
   const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
@@ -1382,9 +1382,26 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
 
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
   const PREVIEW_LIMIT = 3;
+  const DAY_BOX_HEIGHT = 188;
 
-  function toggleDayExpanded(dateStr) {
-    setExpandedDays((prev) => ({ ...prev, [dateStr]: !prev[dateStr] }));
+  function openShiftEditor(sh) {
+    const linkedClientIds = getSharedClientIdsForShift(state.shifts || [], sh)
+      .filter((id) => id !== sh.clientId);
+    const staffingType = getShiftStaffingType(state.shifts || [], sh);
+    setTab && setTab("schedule");
+    setShiftDraft && setShiftDraft({
+      clientId: sh.clientId,
+      clientId2: linkedClientIds[0] || "",
+      clientId3: linkedClientIds[1] || "",
+      staffId: sh.staffId,
+      startDate: sh.startISO.slice(0, 10),
+      startTime: sh.startISO.slice(11, 16),
+      endDate: sh.endISO.slice(0, 10),
+      endTime: sh.endISO.slice(11, 16),
+      staffingType,
+      isShared: staffingType !== "single",
+      sharedGroupId: sh.sharedGroupId || "",
+    });
   }
 
   function dayShifts(dateStr) {
@@ -1410,107 +1427,70 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(170px, 1fr))", gap: 8, overflowX: "auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8 }}>
         {days.map(({ d, dateStr }) => (
-          <div key={dateStr} style={{ ...styles.card, padding: 8, minHeight: 170, maxHeight: 170, display: "flex", flexDirection: "column" }}>
-            <div style={{ fontWeight: 900, fontSize: 12 }}>
+          <div
+            key={dateStr}
+            style={{
+              ...styles.card,
+              padding: 10,
+              minHeight: DAY_BOX_HEIGHT,
+              maxHeight: DAY_BOX_HEIGHT,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ fontWeight: 900, fontSize: 11 }}>
               {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
             </div>
 
-            <div style={{ display: "grid", gap: 4, marginTop: 6, fontSize: 11, lineHeight: 1.25, flex: 1, minHeight: 0 }}>
+            <div style={{ display: "grid", gap: 5, marginTop: 8, fontSize: 10, lineHeight: 1.35, flex: 1, minHeight: 0 }}>
               {(() => {
                 const all = dayShifts(dateStr);
-                const isExpanded = !!expandedDays[dateStr];
-                const preview = isExpanded ? all : all.slice(0, PREVIEW_LIMIT);
+                const preview = all.slice(0, PREVIEW_LIMIT);
                 const hiddenCount = Math.max(0, all.length - PREVIEW_LIMIT);
 
-                if (all.length === 0) return <div style={{ opacity: 0.75, fontSize: 11 }}>No shifts</div>;
+                if (all.length === 0) return <div style={{ opacity: 0.72, fontSize: 10 }}>No shifts</div>;
 
                 return (
                   <>
-                    <div style={{ display: "grid", gap: 4, overflowY: isExpanded ? "auto" : "hidden", minHeight: 0 }}>
+                    <div style={{ display: "grid", gap: 5, overflow: "hidden", minHeight: 0 }}>
                       {preview.map((sh) => (
-                        <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 8, padding: "3px 6px", background: UI.panelAlt }}>
-                          {(() => {
-                            const canManageShift = typeof canManageShiftForClient === "function"
-                              ? canManageShiftForClient(sh.clientId)
-                              : true;
-                            return (
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
-                            <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
-                              {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 10)} / {shortLabel(staffName(sh.staffId), 10)}
-                              {sh.isShared ? (
-                                <span
-                                  style={{
-                                    marginLeft: 6,
-                                    fontSize: 10,
-                                    fontWeight: 900,
-                                    color: "#4cc9f0",
-                                    border: "1px solid rgba(76,201,240,0.45)",
-                                    borderRadius: 999,
-                                    padding: "0 6px",
-                                  }}
-                                >
-                                  {getShiftStaffingLabel(shifts, sh)}
-                                </span>
-                              ) : null}
-                            </div>
-                            {canManageShift ? (
-                              <div style={{ display: "flex", gap: 4 }}>
-                                <button
-                                  style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px" }}
-                                  title="Edit shift"
-                                  onClick={() => {
-                                    const linkedClientIds = getSharedClientIdsForShift(state.shifts || [], sh)
-                                      .filter((id) => id !== sh.clientId);
-                                    const staffingType = getShiftStaffingType(state.shifts || [], sh);
-                                    setTab && setTab("schedule");
-                                    setShiftDraft && setShiftDraft({
-                                      clientId: sh.clientId,
-                                      clientId2: linkedClientIds[0] || "",
-                                      clientId3: linkedClientIds[1] || "",
-                                      staffId: sh.staffId,
-                                      startDate: sh.startISO.slice(0, 10),
-                                      startTime: sh.startISO.slice(11, 16),
-                                      endDate: sh.endISO.slice(0, 10),
-                                      endTime: sh.endISO.slice(11, 16),
-                                      staffingType,
-                                      isShared: staffingType !== "single",
-                                      sharedGroupId: sh.sharedGroupId || "",
-                                    });
-                                  }}
-                                >E</button>
-                                <button
-                                  style={{ ...styles.btnDanger, fontSize: 10, padding: "1px 6px" }}
-                                  title="Delete shift"
-                                  onClick={() => {
-                                    if (typeof deleteShift === "function") deleteShift(sh.id);
-                                  }}
-                                >D</button>
-                              </div>
-                            ) : null}
-                          </div>
-                            );
-                          })()}
+                        <div
+                          key={sh.id}
+                          style={{
+                            border: `1px solid ${UI.borderSoft}`,
+                            borderRadius: 7,
+                            padding: "4px 6px",
+                            background: UI.panelAlt,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={`${compactShiftRange(sh.startISO, sh.endISO)} • ${clientName(sh.clientId)} • ${staffName(sh.staffId)}`}
+                        >
+                          {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
                         </div>
                       ))}
                     </div>
-                    {hiddenCount > 0 && !isExpanded ? (
+                    {hiddenCount > 0 ? (
                       <button
                         type="button"
-                        style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px", justifySelf: "start" }}
-                        onClick={() => toggleDayExpanded(dateStr)}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          color: "#7fd1ff",
+                          fontSize: 10,
+                          fontWeight: 800,
+                          padding: 0,
+                          textAlign: "left",
+                          cursor: "pointer",
+                          justifySelf: "start",
+                        }}
+                        onClick={() => setDayDetail({ dateStr, date: d })}
                       >
                         +{hiddenCount} more
-                      </button>
-                    ) : null}
-                    {isExpanded && all.length > PREVIEW_LIMIT ? (
-                      <button
-                        type="button"
-                        style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px", justifySelf: "start" }}
-                        onClick={() => toggleDayExpanded(dateStr)}
-                      >
-                        Show less
                       </button>
                     ) : null}
                   </>
@@ -1520,6 +1500,85 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
           </div>
         ))}
       </div>
+
+      {dayDetail ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(7,12,20,0.62)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+          }}
+          onClick={() => setDayDetail(null)}
+        >
+          <div
+            style={{
+              ...styles.card,
+              width: "min(640px, 100%)",
+              maxHeight: "82vh",
+              overflowY: "auto",
+              padding: 14,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 900 }}>Day Details</div>
+                <div style={styles.tiny}>
+                  {dayDetail.date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}
+                </div>
+              </div>
+              <button type="button" style={styles.btn2} onClick={() => setDayDetail(null)}>Close</button>
+            </div>
+
+            <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+              {dayShifts(dayDetail.dateStr).map((sh) => {
+                const canManageShift = typeof canManageShiftForClient === "function"
+                  ? canManageShiftForClient(sh.clientId)
+                  : true;
+                return (
+                  <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 10, padding: 10, background: UI.panelAlt }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
+                      {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
+                    </div>
+                    <div style={{ ...styles.tiny, marginTop: 3 }}>
+                      {formatShiftDateTimeFromISO(sh.startISO)} to {formatShiftDateTimeFromISO(sh.endISO)}
+                      {sh.isShared ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                    </div>
+                    {canManageShift ? (
+                      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                        <button
+                          type="button"
+                          style={{ ...styles.btn2, fontSize: 11, padding: "3px 8px" }}
+                          onClick={() => {
+                            openShiftEditor(sh);
+                            setDayDetail(null);
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          style={{ ...styles.btnDanger, fontSize: 11, padding: "3px 8px" }}
+                          onClick={() => {
+                            if (typeof deleteShift === "function") deleteShift(sh.id);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
