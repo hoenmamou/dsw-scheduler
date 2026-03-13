@@ -1263,6 +1263,68 @@ function createShiftRowsFromTemplate({
   return { rows, generatedShifts };
 }
 
+function getStaffWeeklyMinutes(staffId, staffMinutesMap) {
+  if (!staffId) return 0;
+  return Number(staffMinutesMap?.[staffId] || 0);
+}
+
+function isNearOvertime(totalMinutes) {
+  const minutes = Number(totalMinutes) || 0;
+  return minutes >= 36 * 60 && minutes < OT_THRESHOLD_MIN;
+}
+
+function isOvertime(totalMinutes) {
+  const minutes = Number(totalMinutes) || 0;
+  return minutes >= OT_THRESHOLD_MIN;
+}
+
+function isSharedSupport(shift) {
+  return !!(shift?.isShared || shift?.is_shared);
+}
+
+function getShiftStatus(shift, staffMinutesMap) {
+  const totalMinutes = getStaffWeeklyMinutes(shift?.staffId, staffMinutesMap);
+  const sharedSupport = isSharedSupport(shift);
+  const overtime = isOvertime(totalMinutes);
+  const nearOvertime = !overtime && isNearOvertime(totalMinutes);
+
+  return {
+    totalMinutes,
+    sharedSupport,
+    overtime,
+    nearOvertime,
+    tone: overtime ? "over" : nearOvertime ? "near" : "normal",
+  };
+}
+
+function getShiftStatusColors(status) {
+  const tone = status?.tone || "normal";
+  const palette = tone === "over"
+    ? {
+        background: "#FCEDEE",
+        border: "#E9C2C4",
+        text: "#7F2F36",
+      }
+    : tone === "near"
+      ? {
+          background: "#FFF7E6",
+          border: "#E8D49E",
+          text: "#7A5A12",
+        }
+      : {
+          background: "#EDF7EF",
+          border: "#C8DFCF",
+          text: "#2F6A3B",
+        };
+
+  return {
+    ...palette,
+    sharedRail: "#4F7DF3",
+    sharedBadgeBg: "#EAF0FF",
+    sharedBadgeText: "#365CC6",
+  };
+}
+
 function getStaffHoursMapForBucket(shifts, staffList, bucketStartValue, bucketDays = PAYROLL_BUCKET_DAYS) {
   const bucketStartDate = parseDateOnlyLocal(bucketStartValue);
   if (!bucketStartDate) return {};
@@ -1559,7 +1621,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
    Calendar (print/PDF)
 ========================= */
 
-function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, canManageShiftForClient, setTab, setShiftDraft, deleteShift }) {
+function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, canManageShiftForClient, setTab, setShiftDraft, deleteShift, staffPeriodMinutesMap }) {
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
@@ -1577,8 +1639,8 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
   });
 
   const visibleClientIds = new Set((visibleClients || []).map((c) => c.id));
-  const PREVIEW_LIMIT = 3;
-  const DAY_BOX_HEIGHT = 188;
+  const DAY_BOX_HEIGHT = 254;
+  const DAY_COLUMN_MIN_WIDTH = 172;
 
   function openShiftEditor(sh) {
     const linkedClientIds = getSharedClientIdsForShift(state.shifts || [], sh)
@@ -1609,13 +1671,46 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
       .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
   }
 
+  function renderStatusBadges(sh) {
+    const status = getShiftStatus(sh, staffPeriodMinutesMap);
+    const colors = getShiftStatusColors(status);
+    const badges = [];
+    if (status.sharedSupport) {
+      badges.push({
+        key: "shared",
+        label: getShiftStaffingLabel(shifts, sh),
+        background: colors.sharedBadgeBg,
+        color: colors.sharedBadgeText,
+        borderColor: "rgba(79,125,243,0.24)",
+      });
+    }
+    if (status.overtime) {
+      badges.push({
+        key: "ot",
+        label: "40h+",
+        background: colors.background,
+        color: colors.text,
+        borderColor: colors.border,
+      });
+    } else if (status.nearOvertime) {
+      badges.push({
+        key: "near",
+        label: "Near 40h",
+        background: colors.background,
+        color: colors.text,
+        borderColor: colors.border,
+      });
+    }
+    return badges;
+  }
+
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ ...styles.card, marginBottom: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 980 }}>Weekly Calendar</div>
-            <div style={styles.tiny}>Week of {start.toLocaleDateString()}</div>
+            <div style={styles.tiny}>Week of {start.toLocaleDateString()} • Click any shift row for edit/delete details.</div>
           </div>
           <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
             Print / Save PDF
@@ -1623,13 +1718,13 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(7, minmax(${DAY_COLUMN_MIN_WIDTH}px, 1fr))`, gap: 10, overflowX: "auto", alignItems: "start" }}>
         {days.map(({ d, dateStr }) => (
           <div
             key={dateStr}
             style={{
               ...styles.card,
-              padding: 10,
+              padding: 8,
               minHeight: DAY_BOX_HEIGHT,
               maxHeight: DAY_BOX_HEIGHT,
               display: "flex",
@@ -1637,75 +1732,55 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
               overflow: "hidden",
             }}
           >
-            <div style={{ fontWeight: 900, fontSize: 11 }}>
-              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: 0.35 }}>
+              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
             </div>
 
-            <div style={{ display: "grid", gap: 5, marginTop: 8, fontSize: 10, lineHeight: 1.35, flex: 1, minHeight: 0 }}>
+            <div style={{ display: "grid", gap: 4, marginTop: 6, fontSize: 10, lineHeight: 1.25, flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 2 }}>
               {(() => {
                 const all = dayShifts(dateStr);
-                const preview = all.slice(0, PREVIEW_LIMIT);
-                const hiddenCount = Math.max(0, all.length - PREVIEW_LIMIT);
-
                 if (all.length === 0) return <div style={{ opacity: 0.72, fontSize: 10 }}>No shifts</div>;
 
                 return (
-                  <>
-                    <div style={{ display: "grid", gap: 5, overflow: "hidden", minHeight: 0 }}>
-                      {preview.map((sh) => (
-                        <div
+                  <div style={{ display: "grid", gap: 4, minHeight: 0 }}>
+                    {all.map((sh) => {
+                      const status = getShiftStatus(sh, staffPeriodMinutesMap);
+                      const colors = getShiftStatusColors(status);
+                      return (
+                        <button
                           key={sh.id}
+                          type="button"
+                          onClick={() => setDayDetail({ dateStr, date: d })}
+                          title={`${compactShiftRange(sh.startISO, sh.endISO)} | ${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}
                           style={{
-                            border: `1px solid ${UI.borderSoft}`,
-                            borderRadius: 7,
+                            border: `1px solid ${colors.border}`,
+                            borderLeft: `4px solid ${status.sharedSupport ? colors.sharedRail : colors.border}`,
+                            borderRadius: 8,
                             padding: "4px 6px",
-                            background: UI.panelAlt,
-                            display: "flex",
+                            background: colors.background,
+                            color: UI.text,
+                            cursor: "pointer",
+                            textAlign: "left",
+                            display: "grid",
+                            gridTemplateColumns: "70px minmax(0, 1fr) minmax(0, 1fr)",
+                            gap: 8,
                             alignItems: "center",
-                            gap: 6,
                             minWidth: 0,
                           }}
-                          title={`${compactShiftRange(sh.startISO, sh.endISO)} • ${clientName(sh.clientId)} • ${staffName(sh.staffId)}`}
                         >
-                          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-                            {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
-                          </div>
-                          {typeof canManageShiftForClient === "function" && canManageShiftForClient(sh.clientId) && typeof deleteShift === "function" ? (
-                            <button
-                              type="button"
-                              aria-label={`Delete shift for ${staffName(sh.staffId)}`}
-                              style={{ ...styles.btnDanger, fontSize: 10, padding: "1px 6px", lineHeight: 1.2, flexShrink: 0 }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                deleteShift(sh.id);
-                              }}
-                            >
-                              Del
-                            </button>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
-                    {hiddenCount > 0 ? (
-                      <button
-                        type="button"
-                        style={{
-                          border: "none",
-                          background: "transparent",
-                          color: "#7fd1ff",
-                          fontSize: 10,
-                          fontWeight: 800,
-                          padding: 0,
-                          textAlign: "left",
-                          cursor: "pointer",
-                          justifySelf: "start",
-                        }}
-                        onClick={() => setDayDetail({ dateStr, date: d })}
-                      >
-                        +{hiddenCount} more
-                      </button>
-                    ) : null}
-                  </>
+                          <span style={{ whiteSpace: "nowrap", fontWeight: 800, fontVariantNumeric: "tabular-nums", color: UI.text }}>
+                            {compactShiftRange(sh.startISO, sh.endISO)}
+                          </span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: UI.text }}>
+                            {clientName(sh.clientId)}
+                          </span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: UI.textSecondary }}>
+                            {staffName(sh.staffId)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 );
               })()}
             </div>
@@ -1752,14 +1827,35 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
                 const canManageShift = typeof canManageShiftForClient === "function"
                   ? canManageShiftForClient(sh.clientId)
                   : true;
+                const status = getShiftStatus(sh, staffPeriodMinutesMap);
+                const colors = getShiftStatusColors(status);
                 return (
-                  <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 10, padding: 10, background: UI.panelAlt }}>
+                  <div key={sh.id} style={{ border: `1px solid ${colors.border}`, borderLeft: `4px solid ${status.sharedSupport ? colors.sharedRail : colors.border}`, borderRadius: 10, padding: 10, background: colors.background }}>
                     <div style={{ fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
                       {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
                     </div>
                     <div style={{ ...styles.tiny, marginTop: 3 }}>
                       {formatShiftDateTimeFromISO(sh.startISO)} to {formatShiftDateTimeFromISO(sh.endISO)}
-                      {sh.isShared ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                      {renderStatusBadges(sh).map((badge) => (
+                        <span
+                          key={badge.key}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "2px 7px",
+                            borderRadius: 999,
+                            fontSize: 10,
+                            fontWeight: 800,
+                            background: badge.background,
+                            color: badge.color,
+                            border: `1px solid ${badge.borderColor}`,
+                          }}
+                        >
+                          {badge.label}
+                        </span>
+                      ))}
                     </div>
                     {canManageShift ? (
                       <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
@@ -2013,6 +2109,143 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts,
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function PrintableClientCalendar({ state, weekStartDate, visibleClients, selectedClientView, onChangeClientView, staffPeriodMinutesMap }) {
+  const shifts = state.shifts || [];
+  const clients = state.clients || [];
+  const staff = state.staff || [];
+
+  const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
+
+  const start = new Date(weekStartDate);
+  start.setHours(0, 0, 0, 0);
+
+  const days = [...Array(7)].map((_, i) => {
+    const d = addDays(start, i);
+    return { d, dateStr: isoLocal(d).slice(0, 10) };
+  });
+
+  const sortedClients = (visibleClients || [])
+    .slice()
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  const showAllClients = !selectedClientView || selectedClientView === "all";
+  const selectedClient = sortedClients.find((c) => c.id === selectedClientView) || null;
+  const selectedClientIds = new Set(showAllClients ? sortedClients.map((c) => c.id) : (selectedClient ? [selectedClient.id] : []));
+
+  function dayShifts(dateStr) {
+    return shifts
+      .filter((sh) => selectedClientIds.has(sh.clientId))
+      .filter((sh) => String(sh.startISO || "").slice(0, 10) === dateStr)
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  }
+
+  return (
+    <div style={{ marginTop: 12, ...styles.card }} className="print-calendar-page">
+      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "end", flexWrap: "wrap", marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 900 }}>Printable Client Calendar</div>
+          <div style={styles.tiny}>Compact weekly handoff view with shared-support and overtime status coloring.</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "end", flexWrap: "wrap" }}>
+          <div>
+            <div style={styles.tiny}>Client View</div>
+            <select style={{ ...styles.select, minWidth: 220 }} value={selectedClientView} onChange={(e) => onChangeClientView(e.target.value)}>
+              <option value="all">View All</option>
+              {sortedClients.map((client) => (
+                <option key={client.id} value={client.id}>{client.name}</option>
+              ))}
+            </select>
+          </div>
+          <button type="button" style={styles.btn2} onClick={() => window.print()}>Print Calendar</button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline", flexWrap: "wrap", marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 900 }}>
+            {showAllClients ? "All Visible Clients" : (selectedClient?.name || "Selected Client")}
+          </div>
+          <div style={styles.tiny}>Week of {start.toLocaleDateString()}</div>
+        </div>
+        <div className="print-calendar-legend" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[
+            { label: "Green = Normal", background: "#EDF7EF", border: "#C8DFCF", color: "#2F6A3B" },
+            { label: "Yellow = Near 40", background: "#FFF7E6", border: "#E8D49E", color: "#7A5A12" },
+            { label: "Red = Over 40", background: "#FCEDEE", border: "#E9C2C4", color: "#7F2F36" },
+            { label: "Blue = Shared Support", background: "#EAF0FF", border: "rgba(79,125,243,0.24)", color: "#365CC6" },
+          ].map((item) => (
+            <span
+              key={item.label}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "3px 8px",
+                borderRadius: 999,
+                border: `1px solid ${item.border}`,
+                background: item.background,
+                color: item.color,
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              {item.label}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="print-calendar-grid" style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(145px, 1fr))", gap: 8, overflowX: "auto", alignItems: "start" }}>
+        {days.map(({ d, dateStr }) => (
+          <div key={dateStr} className="print-calendar-day" style={{ border: `1px solid ${UI.border}`, borderRadius: 12, background: UI.panel, minHeight: 220, display: "flex", flexDirection: "column", padding: 8 }}>
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: 0.35 }}>
+              {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
+            </div>
+            <div style={{ display: "grid", gap: 4, marginTop: 6, flex: 1, minHeight: 0 }}>
+              {(() => {
+                const entries = dayShifts(dateStr);
+                if (!entries.length) return <div style={{ ...styles.tiny, opacity: 0.8 }}>No shifts</div>;
+                return entries.map((sh) => {
+                  const status = getShiftStatus(sh, staffPeriodMinutesMap);
+                  const colors = getShiftStatusColors(status);
+                  return (
+                    <div
+                      key={sh.id}
+                      className="print-calendar-row"
+                      style={{
+                        border: `1px solid ${colors.border}`,
+                        borderLeft: `4px solid ${status.sharedSupport ? colors.sharedRail : colors.border}`,
+                        borderRadius: 8,
+                        padding: "4px 6px",
+                        background: colors.background,
+                        display: "grid",
+                        gridTemplateColumns: showAllClients ? "70px minmax(0, 1fr) minmax(0, 1fr)" : "70px minmax(0, 1fr)",
+                        gap: 8,
+                        alignItems: "center",
+                        fontSize: 11,
+                        minWidth: 0,
+                      }}
+                    >
+                      <span style={{ whiteSpace: "nowrap", fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{compactShiftRange(sh.startISO, sh.endISO)}</span>
+                      {showAllClients ? (
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{clientName(sh.clientId)}</span>
+                      ) : null}
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: UI.textSecondary }}>
+                        {staffName(sh.staffId)}
+                        {status.sharedSupport ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                      </span>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2302,6 +2535,7 @@ export default function Page() {
   const [staffHoursSearch, setStaffHoursSearch] = useState("");
   const [staffHoursFilter, setStaffHoursFilter] = useState("worked"); // all | worked | ot
   const [staffScheduleFilter, setStaffScheduleFilter] = useState("all");
+  const [printCalendarClientView, setPrintCalendarClientView] = useState("all");
   const [clientHoursSearch, setClientHoursSearch] = useState("");
   const [showAllClientHours, setShowAllClientHours] = useState(false);
 
@@ -3094,6 +3328,7 @@ export default function Page() {
   const tabs = [
     { value: "schedule", label: "Schedule" },
     { value: "calendar", label: "Weekly Calendar" },
+    ...(visibleClients.length > 0 ? [{ value: "printCalendar", label: "Client Print Calendar" }] : []),
     { value: "month", label: "Monthly Calendar" },
     { value: "staffSchedule", label: "Staff Schedule" },
     { value: "hours", label: "Hours & OT" },
@@ -3132,6 +3367,13 @@ export default function Page() {
       setSelectedClientId("");
     }
   }, [selectedClientId, allClients]);
+
+  useEffect(() => {
+    if (printCalendarClientView === "all") return;
+    if (!allClients.some((c) => c.id === printCalendarClientView)) {
+      setPrintCalendarClientView("all");
+    }
+  }, [printCalendarClientView, allClients]);
 
   useEffect(() => {
     if (!builderClientId) return;
@@ -4023,6 +4265,18 @@ export default function Page() {
             setTab={setTab}
             setShiftDraft={setShiftDraft}
             deleteShift={deleteShift}
+            staffPeriodMinutesMap={staffPeriodMinutesMap}
+          />
+        )}
+
+        {tab === "printCalendar" && (
+          <PrintableClientCalendar
+            state={state}
+            weekStartDate={weekStartDate}
+            visibleClients={visibleClients}
+            selectedClientView={printCalendarClientView}
+            onChangeClientView={setPrintCalendarClientView}
+            staffPeriodMinutesMap={staffPeriodMinutesMap}
           />
         )}
 
@@ -4800,6 +5054,53 @@ export default function Page() {
 
         summary::-webkit-details-marker {
           display: none;
+        }
+
+        @media print {
+          :root {
+            color-scheme: light;
+          }
+
+          html,
+          body {
+            background: #ffffff !important;
+            color: #1f2933 !important;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+
+          .no-print {
+            display: none !important;
+          }
+
+          .print-calendar-page {
+            background: #ffffff !important;
+            border: 1px solid #d5dbe2 !important;
+            box-shadow: none !important;
+            margin-top: 0 !important;
+          }
+
+          .print-calendar-grid {
+            grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
+            gap: 6px !important;
+            overflow: visible !important;
+          }
+
+          .print-calendar-day {
+            background: #ffffff !important;
+            border: 1px solid #d5dbe2 !important;
+            min-height: auto !important;
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+
+          .print-calendar-row {
+            box-shadow: none !important;
+          }
+
+          .print-calendar-legend {
+            gap: 6px !important;
+          }
         }
       `}</style>
     </div>
