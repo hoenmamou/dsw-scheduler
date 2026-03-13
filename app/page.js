@@ -835,7 +835,7 @@ async function refreshState(setStateLocal) {
 ========================= */
 
 function staffShiftUniqueKey(sh) {
-  // Shared support: the TWO shift rows should count once for staff OT
+  // Shared support: linked client rows (2:1 or 3:1) count once for staff OT
   if (sh.isShared && sh.sharedGroupId) {
     return `SS|${sh.staffId}|${sh.startISO}|${sh.endISO}|${sh.sharedGroupId}`;
   }
@@ -853,6 +853,56 @@ function staffWeekMinutesDedup(shifts, staffId) {
     total += minutesBetweenISO(sh.startISO, sh.endISO);
   }
   return total;
+}
+
+function normalizeDraftStaffingType(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "shared3") return "shared3";
+  if (raw === "shared2" || raw === "shared") return "shared2";
+  return "single";
+}
+
+function getSharedClientIdsForShift(shifts, shift) {
+  if (!shift) return [];
+  const isShared = !!(shift.isShared || shift.is_shared);
+  const shiftClientId = shift.clientId || shift.client_id || "";
+  if (!isShared) return shiftClientId ? [shiftClientId] : [];
+
+  const groupId = shift.sharedGroupId || shift.shared_group_id || "";
+  const staffId = shift.staffId || shift.staff_id || "";
+  const startISO = shift.startISO || shift.start_iso || "";
+  const endISO = shift.endISO || shift.end_iso || "";
+
+  return Array.from(
+    new Set(
+      (shifts || [])
+        .filter((row) => !!(row.isShared || row.is_shared))
+        .filter((row) => {
+          const rowGroupId = row.sharedGroupId || row.shared_group_id || "";
+          const rowStaffId = row.staffId || row.staff_id || "";
+          const rowStartISO = row.startISO || row.start_iso || "";
+          const rowEndISO = row.endISO || row.end_iso || "";
+          if (groupId) return rowGroupId === groupId;
+          return rowStaffId === staffId && rowStartISO === startISO && rowEndISO === endISO;
+        })
+        .map((row) => row.clientId || row.client_id || "")
+        .filter(Boolean)
+    )
+  );
+}
+
+function getShiftStaffingType(shifts, shift) {
+  if (!shift || !(shift.isShared || shift.is_shared)) return "single";
+  const sharedClientCount = getSharedClientIdsForShift(shifts, shift).length;
+  if (sharedClientCount >= 3) return "shared3";
+  return "shared2";
+}
+
+function getShiftStaffingLabel(shifts, shift) {
+  const staffingType = getShiftStaffingType(shifts, shift);
+  if (staffingType === "shared3") return "Shared 3:1";
+  if (staffingType === "shared2") return "Shared 2:1";
+  return "1:1";
 }
 
 function staffSharedSupportMinutesDedup(shifts, staffId) {
@@ -1401,7 +1451,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
                                     padding: "0 6px",
                                   }}
                                 >
-                                  Shared
+                                  {getShiftStaffingLabel(shifts, sh)}
                                 </span>
                               ) : null}
                             </div>
@@ -1411,16 +1461,21 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
                                   style={{ ...styles.btn2, fontSize: 10, padding: "1px 6px" }}
                                   title="Edit shift"
                                   onClick={() => {
+                                    const linkedClientIds = getSharedClientIdsForShift(state.shifts || [], sh)
+                                      .filter((id) => id !== sh.clientId);
+                                    const staffingType = getShiftStaffingType(state.shifts || [], sh);
                                     setTab && setTab("schedule");
                                     setShiftDraft && setShiftDraft({
                                       clientId: sh.clientId,
+                                      clientId2: linkedClientIds[0] || "",
+                                      clientId3: linkedClientIds[1] || "",
                                       staffId: sh.staffId,
                                       startDate: sh.startISO.slice(0, 10),
                                       startTime: sh.startISO.slice(11, 16),
                                       endDate: sh.endISO.slice(0, 10),
                                       endTime: sh.endISO.slice(11, 16),
-                                      isShared: !!sh.isShared,
-                                      clientId2: sh.isShared ? (state.shifts.find((s) => s.sharedGroupId === sh.sharedGroupId && s.id !== sh.id)?.clientId || "") : "",
+                                      staffingType,
+                                      isShared: staffingType !== "single",
                                       sharedGroupId: sh.sharedGroupId || "",
                                     });
                                   }}
@@ -1563,7 +1618,7 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
                                 padding: "0 5px",
                               }}
                             >
-                              Shared
+                              {getShiftStaffingLabel(shifts, sh)}
                             </span>
                           ) : null}
                         </div>
@@ -1832,14 +1887,22 @@ export default function Page() {
   const [shiftDraft, setShiftDraft] = useState({
     clientId: "",
     clientId2: "",
+    clientId3: "",
     staffId: "",
     startDate: weekStart,
     startTime: "07:00",
     endDate: weekStart,
     endTime: "15:00",
+    staffingType: "single",
     isShared: false,
     sharedGroupId: "",
   });
+
+  const shiftDraftStaffingType = useMemo(
+    () => normalizeDraftStaffingType(shiftDraft.staffingType || (shiftDraft.isShared ? "shared2" : "single")),
+    [shiftDraft.staffingType, shiftDraft.isShared]
+  );
+  const draftIsSharedSupport = shiftDraftStaffingType !== "single";
 
   // Auto-suggest staff for shift
   const suggestedStaff = useMemo(() => {
@@ -2086,17 +2149,32 @@ export default function Page() {
   async function addShift() {
     // Works with Supabase or localStorage fallback via sbUpsert
 
-    const { clientId, clientId2, staffId, startDate, startTime, endDate, endTime, isShared } = shiftDraft;
+    const { clientId, clientId2, clientId3, staffId, startDate, startTime, endDate, endTime } = shiftDraft;
+    const staffingType = normalizeDraftStaffingType(shiftDraft.staffingType || (shiftDraft.isShared ? "shared2" : "single"));
+    const isShared = staffingType !== "single";
+    const extraClientIds = staffingType === "shared3"
+      ? [clientId2, clientId3]
+      : staffingType === "shared2"
+        ? [clientId2]
+        : [];
+    const selectedClientIds = [clientId, ...extraClientIds].filter(Boolean);
 
     if (!clientId || !staffId) return alert("Pick a client and staff.");
     if (!canManageClientId(clientId)) {
       return alert("You can only create shifts for your assigned clients.");
     }
 
-    if (isShared) {
-      if (!clientId2) return alert("Pick the 2nd client for Shared Support.");
-      if (clientId2 === clientId) return alert("Client 1 and Client 2 cannot be the same.");
-      if (!canManageClientId(clientId2)) {
+    if (staffingType === "shared2" && !clientId2) {
+      return alert("Client 2 is required for 2-to-1 staffing.");
+    }
+    if (staffingType === "shared3" && (!clientId2 || !clientId3)) {
+      return alert("Client 2 and Client 3 are required for 3-to-1 staffing.");
+    }
+    if (new Set(selectedClientIds).size !== selectedClientIds.length) {
+      return alert("All selected clients must be different.");
+    }
+    for (const sharedClientId of extraClientIds) {
+      if (!canManageClientId(sharedClientId)) {
         return alert("You can only create shared shifts for your assigned clients.");
       }
     }
@@ -2223,28 +2301,15 @@ export default function Page() {
       projectedMinutes = afterMin;
       planned.push({ id: `planned_${idx}`, staffId, startISO, endISO });
 
-      // Always create row for primary client
-      rows.push({
-        id: uid("sh"),
-        client_id: clientId,
-        staff_id: staffId,
-        start_iso: startISO,
-        end_iso: endISO,
-        created_by: createdBy,
-        is_shared: !!isShared,
-        shared_group_id: sharedGroupId,
-      });
-
-      // Shared support: also create row for client 2
-      if (isShared) {
+      for (const selectedClientId of selectedClientIds) {
         rows.push({
           id: uid("sh"),
-          client_id: clientId2,
+          client_id: selectedClientId,
           staff_id: staffId,
           start_iso: startISO,
           end_iso: endISO,
           created_by: createdBy,
-          is_shared: true,
+          is_shared: !!isShared,
           shared_group_id: sharedGroupId,
         });
       }
@@ -2253,7 +2318,14 @@ export default function Page() {
     await sbUpsert("shifts", rows);
     // refresh UI and reset draft
     await refreshState(setState);
-    setShiftDraft((p) => ({ ...p, isShared: false, clientId2: "", sharedGroupId: "" }));
+    setShiftDraft((p) => ({
+      ...p,
+      staffingType: "single",
+      isShared: false,
+      clientId2: "",
+      clientId3: "",
+      sharedGroupId: "",
+    }));
   }
 
   async function deleteShift(id) {
@@ -2652,12 +2724,40 @@ export default function Page() {
 
     <div style={{ marginTop: 10, ...styles.grid4 }}>
       <div>
-        <div style={styles.tiny}>Client</div>
+        <div style={styles.tiny}>Staffing Type</div>
+        <select
+          style={styles.select}
+          value={shiftDraftStaffingType}
+          onChange={(e) => {
+            const nextType = normalizeDraftStaffingType(e.target.value);
+            setShiftDraft((p) => ({
+              ...p,
+              staffingType: nextType,
+              isShared: nextType !== "single",
+              clientId2: nextType === "single" ? "" : p.clientId2,
+              clientId3: nextType === "shared3" ? p.clientId3 : "",
+              sharedGroupId: nextType === "single" ? "" : p.sharedGroupId,
+            }));
+          }}
+        >
+          <option value="single">Normal 1:1</option>
+          <option value="shared2">Shared Support 2:1</option>
+          <option value="shared3">Shared Support 3:1</option>
+        </select>
+      </div>
+
+      <div>
+        <div style={styles.tiny}>Client 1</div>
         <select
           style={styles.select}
           value={shiftDraft.clientId}
           onChange={(e) =>
-            setShiftDraft((p) => ({ ...p, clientId: e.target.value }))
+            setShiftDraft((p) => ({
+              ...p,
+              clientId: e.target.value,
+              clientId2: p.clientId2 === e.target.value ? "" : p.clientId2,
+              clientId3: p.clientId3 === e.target.value ? "" : p.clientId3,
+            }))
           }
         >
           <option value="">Select…</option>
@@ -2756,23 +2856,7 @@ export default function Page() {
       </div>
 
       <div style={{ gridColumn: "1 / -1", display: "grid", gap: 8 }}>
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            type="checkbox"
-            checked={!!shiftDraft.isShared}
-            onChange={(e) =>
-              setShiftDraft((p) => ({
-                ...p,
-                isShared: e.target.checked,
-                clientId2: e.target.checked ? p.clientId2 : "",
-                sharedGroupId: e.target.checked ? p.sharedGroupId : "",
-              }))
-            }
-          />
-          <span style={{ fontSize: 13, fontWeight: 700 }}>Shared Support</span>
-        </label>
-
-        {shiftDraft.isShared ? (
+        {draftIsSharedSupport ? (
           <div style={{ ...styles.grid4, gap: 8 }}>
             <div>
               <div style={styles.tiny}>Client 2</div>
@@ -2785,7 +2869,7 @@ export default function Page() {
               >
                 <option value="">Select…</option>
                 {visibleClients
-                  .filter((c) => c.id !== shiftDraft.clientId)
+                  .filter((c) => c.id !== shiftDraft.clientId && c.id !== shiftDraft.clientId3)
                   .map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
@@ -2793,6 +2877,28 @@ export default function Page() {
                   ))}
               </select>
             </div>
+
+            {shiftDraftStaffingType === "shared3" ? (
+              <div>
+                <div style={styles.tiny}>Client 3</div>
+                <select
+                  style={styles.select}
+                  value={shiftDraft.clientId3 || ""}
+                  onChange={(e) =>
+                    setShiftDraft((p) => ({ ...p, clientId3: e.target.value }))
+                  }
+                >
+                  <option value="">Select…</option>
+                  {visibleClients
+                    .filter((c) => c.id !== shiftDraft.clientId && c.id !== shiftDraft.clientId2)
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            ) : null}
 
             <div>
               <div style={styles.tiny}>Shared Group ID (optional)</div>
@@ -2804,6 +2910,10 @@ export default function Page() {
                 }
                 placeholder="Auto-generated if empty"
               />
+            </div>
+
+            <div style={{ ...styles.tiny, alignSelf: "end" }}>
+              One staff + one time block is applied to each selected client while staff worked hours are deduped to count once.
             </div>
           </div>
         ) : null}
@@ -3636,7 +3746,7 @@ export default function Page() {
                                 <td style={styles.td}>{formatShiftTimeFromISO(sh.startISO)}</td>
                                 <td style={styles.td}>{formatShiftTimeFromISO(sh.endISO)}</td>
                                 <td style={styles.td}>{staff ? staff.name : "Unknown"}</td>
-                                <td style={styles.tdCenter}>{sh.isShared ? "Yes" : "No"}</td>
+                                <td style={styles.tdCenter}>{sh.isShared ? getShiftStaffingLabel(selectedClientShifts, sh) : "No"}</td>
                                 <td style={styles.td}>{sh.sharedGroupId || ""}</td>
                               </tr>
                             );
