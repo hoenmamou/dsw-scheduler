@@ -317,6 +317,22 @@ function overlaps(aStart, aEnd, bStart, bEnd) {
   return new Date(aStart) < new Date(bEnd) && new Date(bStart) < new Date(aEnd);
 }
 
+function hasTrueTimeOverlap(aStartInput, aEndInput, bStartInput, bEndInput) {
+  const aStartISO = normalizeDateTimeISO(aStartInput);
+  const aEndISO = normalizeDateTimeISO(aEndInput);
+  const bStartISO = normalizeDateTimeISO(bStartInput);
+  const bEndISO = normalizeDateTimeISO(bEndInput);
+  if (!aStartISO || !aEndISO || !bStartISO || !bEndISO) return false;
+
+  const aStart = new Date(aStartISO);
+  const aEnd = new Date(aEndISO);
+  const bStart = new Date(bStartISO);
+  const bEnd = new Date(bEndISO);
+  if (isNaN(aStart) || isNaN(aEnd) || isNaN(bStart) || isNaN(bEnd)) return false;
+  if (aEnd <= aStart || bEnd <= bStart) return false;
+  return aStart < bEnd && bStart < aEnd;
+}
+
 /** Day: 07:00–23:00, Night: 23:00–07:00 */
 function splitDayNightMinutes(startISO, endISO) {
   const start = new Date(startISO);
@@ -1644,13 +1660,29 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
                             borderRadius: 7,
                             padding: "4px 6px",
                             background: UI.panelAlt,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            minWidth: 0,
                           }}
                           title={`${compactShiftRange(sh.startISO, sh.endISO)} • ${clientName(sh.clientId)} • ${staffName(sh.staffId)}`}
                         >
-                          {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
+                          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+                            {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
+                          </div>
+                          {typeof canManageShiftForClient === "function" && canManageShiftForClient(sh.clientId) && typeof deleteShift === "function" ? (
+                            <button
+                              type="button"
+                              aria-label={`Delete shift for ${staffName(sh.staffId)}`}
+                              style={{ ...styles.btnDanger, fontSize: 10, padding: "1px 6px", lineHeight: 1.2, flexShrink: 0 }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteShift(sh.id);
+                              }}
+                            >
+                              Del
+                            </button>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -1763,14 +1795,35 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
   );
 }
 
-function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts }) {
+function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts, canManageShiftForClient, setTab, setShiftDraft, deleteShift }) {
   const shifts = state.shifts || [];
   const clients = state.clients || [];
   const staff = state.staff || [];
   const [expandedDays, setExpandedDays] = useState({});
+  const [dayDetail, setDayDetail] = useState(null);
 
   const clientName = (id) => clients.find((c) => c.id === id)?.name || "Unknown";
   const staffName = (id) => staff.find((s) => s.id === id)?.name || "Unknown";
+
+  function openShiftEditor(sh) {
+    const linkedClientIds = getSharedClientIdsForShift(state.shifts || [], sh)
+      .filter((id) => id !== sh.clientId);
+    const staffingType = getShiftStaffingType(state.shifts || [], sh);
+    setTab && setTab("schedule");
+    setShiftDraft && setShiftDraft({
+      clientId: sh.clientId,
+      clientId2: linkedClientIds[0] || "",
+      clientId3: linkedClientIds[1] || "",
+      staffId: sh.staffId,
+      startDate: sh.startISO.slice(0, 10),
+      startTime: sh.startISO.slice(11, 16),
+      endDate: sh.endISO.slice(0, 10),
+      endTime: sh.endISO.slice(11, 16),
+      staffingType,
+      isShared: staffingType !== "single",
+      sharedGroupId: sh.sharedGroupId || "",
+    });
+  }
 
   const monthStart = new Date(monthStartDate);
   monthStart.setHours(0, 0, 0, 0);
@@ -1843,7 +1896,13 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
                   <>
                     <div style={{ display: "grid", gap: 3, overflowY: isExpanded ? "auto" : "hidden", minHeight: 0 }}>
                       {preview.map((sh) => (
-                        <div key={sh.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}>
+                        <button
+                          key={sh.id}
+                          type="button"
+                          style={{ border: "none", background: "transparent", padding: 0, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", color: UI.text }}
+                          title={`${clientName(sh.clientId)} | ${staffName(sh.staffId)}`}
+                          onClick={() => setDayDetail({ dateStr, date: d })}
+                        >
                           {compactShiftRange(sh.startISO, sh.endISO)} {shortLabel(clientName(sh.clientId), 8)} / {shortLabel(staffName(sh.staffId), 8)}
                           {sh.isShared ? (
                             <span
@@ -1851,8 +1910,8 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
                                 marginLeft: 5,
                                 fontSize: 9,
                                 fontWeight: 900,
-                                    color: UI.accent,
-                                border: "1px solid rgba(76,201,240,0.45)",
+                                color: UI.accent,
+                                border: `1px solid ${UI.border}`,
                                 borderRadius: 999,
                                 padding: "0 5px",
                               }}
@@ -1860,7 +1919,7 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
                               {getShiftStaffingLabel(shifts, sh)}
                             </span>
                           ) : null}
-                        </div>
+                        </button>
                       ))}
                     </div>
                     {hiddenCount > 0 && !isExpanded ? (
@@ -1888,6 +1947,72 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
           </div>
         ))}
       </div>
+
+      {dayDetail ? (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(31,41,51,0.24)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+          onClick={() => setDayDetail(null)}
+        >
+          <div
+            style={{ ...styles.card, width: "min(640px, 100%)", maxHeight: "82vh", overflowY: "auto", padding: 14 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 900 }}>Day Details</div>
+                <div style={styles.tiny}>
+                  {dayDetail.date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}
+                </div>
+              </div>
+              <button type="button" style={styles.btn2} onClick={() => setDayDetail(null)}>Close</button>
+            </div>
+
+            <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+              {dayShifts(dayDetail.dateStr).map((sh) => {
+                const canManageShift = typeof canManageShiftForClient === "function"
+                  ? canManageShiftForClient(sh.clientId)
+                  : true;
+                return (
+                  <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 10, padding: 10, background: UI.panelAlt }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
+                      {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
+                    </div>
+                    <div style={{ ...styles.tiny, marginTop: 3 }}>
+                      {formatShiftDateTimeFromISO(sh.startISO)} to {formatShiftDateTimeFromISO(sh.endISO)}
+                      {sh.isShared ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                    </div>
+                    {canManageShift ? (
+                      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                        <button
+                          type="button"
+                          style={{ ...styles.btn2, fontSize: 11, padding: "3px 8px" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openShiftEditor(sh);
+                            setDayDetail(null);
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          style={{ ...styles.btnDanger, fontSize: 11, padding: "3px 8px", position: "relative", zIndex: 2 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (typeof deleteShift === "function") deleteShift(sh.id);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1924,7 +2049,6 @@ export default function Page() {
   const [tab, setTab] = useState("schedule");
 
   // Payroll period selection
-  const [payrollReferenceDate, setPayrollReferenceDate] = useState(() => formatDateOnlyLocal(new Date()));
   const [payrollStartDate, setPayrollStartDate] = useState(() => getPayrollCycleRangeForReferenceDate(new Date()).startDate);
   const [payrollFinishDate, setPayrollFinishDate] = useState(() => getPayrollCycleRangeForReferenceDate(new Date()).finishDate);
 
@@ -1946,13 +2070,6 @@ export default function Page() {
     d.setHours(0, 0, 0, 0);
     return d;
   }, [weekStartDate]);
-
-  function applyPayrollCycleFromReference(referenceDateValue = payrollReferenceDate) {
-    const nextRange = getPayrollCycleRangeForReferenceDate(referenceDateValue);
-    setPayrollReferenceDate(referenceDateValue);
-    setPayrollStartDate(nextRange.startDate);
-    setPayrollFinishDate(nextRange.finishDate);
-  }
 
   useEffect(() => {
     if (selectedPeriodFinishDate < weekStartDate) {
@@ -2184,6 +2301,7 @@ export default function Page() {
   const maxConsecutiveDays = Math.max(1, Number(state.settings?.maxConsecutiveDays) || 6);
   const [staffHoursSearch, setStaffHoursSearch] = useState("");
   const [staffHoursFilter, setStaffHoursFilter] = useState("worked"); // all | worked | ot
+  const [staffScheduleFilter, setStaffScheduleFilter] = useState("all");
   const [clientHoursSearch, setClientHoursSearch] = useState("");
   const [showAllClientHours, setShowAllClientHours] = useState(false);
 
@@ -2527,12 +2645,12 @@ export default function Page() {
         : "";
 
       const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
-      const localConflicts = nextPlanned.filter((p) => overlaps(p.startISO, p.endISO, startISO, endISO));
+      const localConflicts = nextPlanned.filter((p) => p.staffId === staffId && hasTrueTimeOverlap(p.startISO, p.endISO, startISO, endISO));
       const localAsDbShape = localConflicts.map((p) => ({
         ...p,
-        clientId,
-        isShared: !!isShared,
-        sharedGroupId,
+        clientId: p.clientId || clientId,
+        isShared: !!p.isShared,
+        sharedGroupId: p.sharedGroupId || "",
       }));
 
       const illegalConflicts = [...conflicts, ...localAsDbShape].filter((c) => {
@@ -2769,7 +2887,10 @@ export default function Page() {
       })
       .filter(Boolean);
 
-    return all.filter((sh) => sh.staffId === staffId && overlaps(sh.startISO, sh.endISO, startISO, endISO));
+    return all.filter((sh) => {
+      if (sh.staffId !== staffId) return false;
+      return hasTrueTimeOverlap(sh.startISO, sh.endISO, startISO, endISO);
+    });
   }
 
   async function addShift() {
@@ -3167,7 +3288,7 @@ export default function Page() {
 
         <div className="no-print" style={{ marginTop: 4, display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center", paddingBottom: 2 }}>
           <Tabs value={tab} onChange={setTab} tabs={tabs} />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(140px, auto))", gap: 6, alignItems: "end" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(140px, auto))", gap: 6, alignItems: "end" }}>
             <div>
               <div style={styles.tiny}>Payroll Start Date</div>
               <input
@@ -3186,18 +3307,6 @@ export default function Page() {
                 onChange={(e) => setPayrollFinishDate(e.target.value)}
               />
             </div>
-            <div>
-              <div style={styles.tiny}>Payroll Reference Date</div>
-              <input
-                style={{ ...styles.input, width: 150, padding: "7px 9px" }}
-                type="date"
-                value={payrollReferenceDate}
-                onChange={(e) => setPayrollReferenceDate(e.target.value)}
-              />
-            </div>
-            <button style={{ ...styles.btn2, height: 34 }} onClick={() => applyPayrollCycleFromReference()}>
-              Auto-fill Cycle
-            </button>
           </div>
         </div>
 
@@ -3923,6 +4032,10 @@ export default function Page() {
             monthStartDate={monthStartDate}
             visibleClients={visibleClients}
             canSeeAllShifts={canSeeAllShifts}
+            canManageShiftForClient={canManageClientId}
+            setTab={setTab}
+            setShiftDraft={setShiftDraft}
+            deleteShift={deleteShift}
           />
         )}
 
@@ -3931,6 +4044,25 @@ export default function Page() {
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Staff Schedule</h3>
             <div style={styles.tiny}>Shows shifts for each staff member in the selected payroll period.</div>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "end", marginTop: 10, marginBottom: 10, flexWrap: "wrap" }}>
+              <div>
+                <div style={styles.tiny}>Staff Filter</div>
+                <select
+                  style={{ ...styles.input, minWidth: 220, padding: "7px 9px" }}
+                  value={staffScheduleFilter}
+                  onChange={(e) => setStaffScheduleFilter(e.target.value)}
+                >
+                  <option value="all">View All</option>
+                  {(state.staff || [])
+                    .slice()
+                    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+                    .map((st) => (
+                      <option key={st.id} value={st.id}>{st.name}</option>
+                    ))}
+                </select>
+              </div>
+            </div>
 
             <div style={styles.tableWrap}>
               <table className="app-table" style={styles.tableBase}>
@@ -3942,7 +4074,9 @@ export default function Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(state.staff || []).map((st) => {
+                  {(state.staff || [])
+                    .filter((st) => staffScheduleFilter === "all" || st.id === staffScheduleFilter)
+                    .map((st) => {
                     const shifts = shiftsInSelectedPeriod
                       .filter((sh) => sh.staffId === st.id)
                       .filter((sh) => (canSeeAllShifts ? true : visibleClients.some((c) => c.id === sh.clientId)))
