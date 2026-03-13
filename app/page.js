@@ -662,11 +662,13 @@ function Tabs({ value, onChange, tabs }) {
           onClick={() => onChange(t.value)}
           style={{
             ...styles.btn2,
-            padding: "6px 9px",
+            padding: "7px 11px",
             fontSize: 12,
             lineHeight: 1.2,
-            background: value === t.value ? "rgba(31,111,235,0.18)" : "transparent",
-            borderColor: value === t.value ? "rgba(31,111,235,0.55)" : "rgba(255,255,255,0.18)",
+            background: value === t.value ? "rgba(59,130,246,0.10)" : "#FFFFFF",
+            color: value === t.value ? UI.accent : UI.textSecondary,
+            borderColor: value === t.value ? "rgba(59,130,246,0.42)" : UI.border,
+            boxShadow: value === t.value ? "inset 0 0 0 1px rgba(59,130,246,0.06)" : "none",
           }}
         >
           {t.label}
@@ -709,11 +711,11 @@ function AssignedStaffDropdown({ label = "Assigned Staff", selectedIds, staffOpt
             minWidth: 280,
             maxHeight: 240,
             overflowY: "auto",
-            border: "1px solid rgba(255,255,255,0.18)",
+            border: `1px solid ${UI.border}`,
             borderRadius: 12,
-            background: "#10131b",
+            background: "#FFFFFF",
             padding: 8,
-            boxShadow: "0 10px 28px rgba(0,0,0,0.45)",
+            boxShadow: UI.shadowLg,
           }}
         >
           {staffOptions.length === 0 ? (
@@ -722,7 +724,7 @@ function AssignedStaffDropdown({ label = "Assigned Staff", selectedIds, staffOpt
             staffOptions.map((st) => {
               const checked = ids.includes(st.id);
               return (
-                <label key={st.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 4px" }}>
+                <label key={st.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 4px", color: UI.text }}>
                   <input
                     type="checkbox"
                     checked={checked}
@@ -1684,7 +1686,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(7,12,20,0.62)",
+            background: "rgba(31,41,51,0.24)",
             zIndex: 1000,
             display: "flex",
             alignItems: "center",
@@ -1849,7 +1851,7 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts 
                                 marginLeft: 5,
                                 fontSize: 9,
                                 fontWeight: 900,
-                                color: "#4cc9f0",
+                                    color: UI.accent,
                                 border: "1px solid rgba(76,201,240,0.45)",
                                 borderRadius: 999,
                                 padding: "0 5px",
@@ -3332,7 +3334,7 @@ export default function Page() {
                   ) : null}
                 </div>
                 {entry.isPrimary && suggestedStaff ? (
-                  <div style={{ fontSize: 12, color: "#4cc9f0", marginTop: 2 }}>
+                  <div style={{ fontSize: 12, color: UI.accent, marginTop: 2 }}>
                     Best match: {suggestedStaff.name} (no conflict, lowest OT)
                   </div>
                 ) : null}
@@ -3493,8 +3495,8 @@ export default function Page() {
     </div>
 
     {builderOpen ? (
-      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(4,8,16,0.76)", zIndex: 1300, padding: 14 }} className="no-print">
-        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: UI.panel, border: `1px solid ${UI.border}`, borderRadius: 14, display: "grid", gridTemplateRows: "auto minmax(0, 1fr) auto", overflow: "hidden", boxShadow: "0 18px 44px rgba(0,0,0,0.42)", position: "relative" }}>
+      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(31,41,51,0.28)", zIndex: 1300, padding: 14 }} className="no-print">
+        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: UI.panel, border: `1px solid ${UI.border}`, borderRadius: 14, display: "grid", gridTemplateRows: "auto minmax(0, 1fr) auto", overflow: "hidden", boxShadow: UI.shadowLg, position: "relative" }}>
           <div style={{ padding: "12px 14px 8px 14px", borderBottom: `1px solid ${UI.borderSoft}` }}>
           <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
             <div style={styles.tiny}>
@@ -3696,11 +3698,11 @@ export default function Page() {
                   </div>
                   <div style={{ ...styles.shift, padding: 8 }}>
                     <div style={styles.tiny}>Staff Over 40h</div>
-                    <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? "#ff8b8b" : "inherit" }}>{builderSummary.staffOver40Count}</div>
+                    <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? UI.danger : "inherit" }}>{builderSummary.staffOver40Count}</div>
                   </div>
                   <div style={{ ...styles.shift, padding: 8 }}>
                     <div style={styles.tiny}>Staffing Status</div>
-                    <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.currentStaffingEnough ? "inherit" : "#ffcf7a" }}>
+                    <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.currentStaffingEnough ? "inherit" : UI.warning }}>
                       {builderSummary.currentStaffingEnough ? "Enough" : "Need more staff"}
                     </div>
                   </div>
@@ -3865,11 +3867,11 @@ export default function Page() {
           </div>
           <div style={{ ...styles.shift, padding: 8 }}>
             <div style={styles.tiny}>Staff Over 40h</div>
-            <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? "#ff8b8b" : "inherit" }}>{builderSummary.staffOver40Count}</div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.staffOver40Count ? UI.danger : "inherit" }}>{builderSummary.staffOver40Count}</div>
           </div>
           <div style={{ ...styles.shift, padding: 8 }}>
             <div style={styles.tiny}>Staffing Status</div>
-            <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.currentStaffingEnough ? "inherit" : "#ffcf7a" }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: builderSummary.currentStaffingEnough ? "inherit" : UI.warning }}>
               {builderSummary.currentStaffingEnough ? "Enough" : "Need more staff"}
             </div>
           </div>
@@ -3993,7 +3995,7 @@ export default function Page() {
               </div>
               <div style={{ ...styles.card, padding: 8 }}>
                 <div style={styles.tiny}>Staff In OT</div>
-                <div style={{ fontSize: 18, fontWeight: 900, color: hoursSummary.staffInOt ? "#ff8b8b" : "inherit" }}>{hoursSummary.staffInOt}</div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: hoursSummary.staffInOt ? UI.danger : "inherit" }}>{hoursSummary.staffInOt}</div>
               </div>
               <div style={{ ...styles.card, padding: 8 }}>
                 <div style={styles.tiny}>Clients With Hours</div>
@@ -4055,7 +4057,7 @@ export default function Page() {
                       <tr key={st.id}>
                         <td style={styles.staffHoursTdName}><b>{st.name}</b></td>
                         <td style={styles.staffHoursTdNum}>{fmtHoursFromMin(min)}</td>
-                        <td style={{ ...styles.staffHoursTdNum, color: otMin > 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
+                        <td style={{ ...styles.staffHoursTdNum, color: otMin > 0 ? UI.danger : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
                         <td style={styles.staffHoursTdNum}>{fmtHoursFromMin(sharedSupportMin)}</td>
                       </tr>
                     ))}
@@ -4106,7 +4108,7 @@ export default function Page() {
                         <td style={styles.tdCompact}><b>{c.name}</b></td>
                         <td style={styles.tdCompactNum}>{fmtHoursFromMin(allottedMin)}</td>
                         <td style={styles.tdCompactNum}>{fmtHoursFromMin(h.totalMin)}</td>
-                        <td style={{ ...styles.tdCompactNum, color: remainingMin < 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(remainingMin)}</td>
+                        <td style={{ ...styles.tdCompactNum, color: remainingMin < 0 ? UI.danger : "inherit" }}>{fmtHoursFromMin(remainingMin)}</td>
                         <td style={styles.tdCompactNum}>{fmtHoursFromMin(h.dayMin)}</td>
                         <td style={styles.tdCompactNum}>{fmtHoursFromMin(h.nightMin)}</td>
                       </tr>
@@ -4194,7 +4196,7 @@ export default function Page() {
                           style={{
                             height: "100%",
                             width: `${Math.min(100, selectedClientWeekHours.allottedMin ? Math.round((selectedClientWeekHours.totalMin / selectedClientWeekHours.allottedMin) * 100) : 0)}%`,
-                            background: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "#4cc9f0",
+                            background: selectedClientWeekHours.remainingMin < 0 ? UI.danger : UI.accent,
                           }}
                         />
                       </div>
@@ -4202,7 +4204,7 @@ export default function Page() {
                     <div style={{ fontSize: 13, minWidth: 120 }}>
                       {fmtHoursFromMin(selectedClientWeekHours.totalMin)} / {fmtHoursFromMin(selectedClientWeekHours.allottedMin)}
                     </div>
-                    <div style={{ fontSize: 13, color: selectedClientWeekHours.remainingMin < 0 ? "#ff8b8b" : "inherit" }}>
+                    <div style={{ fontSize: 13, color: selectedClientWeekHours.remainingMin < 0 ? UI.danger : "inherit" }}>
                       Rem: {fmtHoursFromMin(selectedClientWeekHours.remainingMin)}
                     </div>
                   </div>
@@ -4591,43 +4593,79 @@ export default function Page() {
       </div>
 
       <style jsx global>{`
+        :root {
+          color-scheme: light;
+        }
+
+        html, body {
+          background: ${UI.bg};
+          color: ${UI.text};
+          font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        input,
+        select,
+        textarea,
+        button {
+          font: inherit;
+        }
+
         select {
           background-color: #ffffff;
-          color: #111111;
-          border: 1px solid #444;
-          -webkit-text-fill-color: #111111;
+          color: ${UI.text};
+          border: 1px solid ${UI.border};
+          -webkit-text-fill-color: ${UI.text};
         }
 
         select option {
-          color: #111111;
+          color: ${UI.text};
           background-color: #ffffff;
         }
 
-        select:focus {
-          border-color: #3f73d8;
-          outline: 2px solid rgba(63, 115, 216, 0.35);
+        input:focus,
+        select:focus,
+        textarea:focus {
+          border-color: ${UI.accent};
+          outline: 3px solid rgba(59, 130, 246, 0.18);
           outline-offset: 1px;
+        }
+
+        button {
+          transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
         }
 
         .app-table {
           width: 100%;
           border-collapse: collapse;
           table-layout: auto;
+          background: #ffffff;
         }
 
         .app-table thead th {
           position: sticky;
           top: 0;
           z-index: 1;
-          background: #131a24;
+          background: #f8fafc;
         }
 
         .app-table tbody tr:nth-child(even) td {
-          background: rgba(255, 255, 255, 0.018);
+          background: #fbfcfd;
         }
 
         .app-table tbody tr:hover td {
-          background: rgba(76, 201, 240, 0.06);
+          background: rgba(59, 130, 246, 0.05);
+        }
+
+        summary {
+          list-style: none;
+        }
+
+        summary::-webkit-details-marker {
+          display: none;
         }
       `}</style>
     </div>
@@ -4639,13 +4677,22 @@ export default function Page() {
 ========================= */
 
 const UI = {
-  bg: "#0b1018",
-  panel: "#131a24",
-  panelAlt: "#101722",
-  border: "rgba(226,232,240,0.14)",
-  borderSoft: "rgba(226,232,240,0.08)",
-  text: "#e6edf7",
-  textMuted: "rgba(230,237,247,0.72)",
+  bg: "#F4F6F8",
+  panel: "#FFFFFF",
+  panelAlt: "#F8FAFC",
+  border: "#E3E7EB",
+  borderSoft: "#EDF1F4",
+  text: "#1F2933",
+  textSecondary: "#6B7280",
+  textMuted: "#9CA3AF",
+  accent: "#3B82F6",
+  accentHover: "#2563EB",
+  success: "#22C55E",
+  warning: "#F59E0B",
+  danger: "#EF4444",
+  shadowSm: "0 1px 2px rgba(15, 23, 42, 0.04)",
+  shadowMd: "0 6px 18px rgba(15, 23, 42, 0.05)",
+  shadowLg: "0 14px 34px rgba(15, 23, 42, 0.12)",
 };
 
 const styles = {
@@ -4654,61 +4701,63 @@ const styles = {
     borderRadius: 12,
     padding: 12,
     background: UI.panel,
+    boxShadow: UI.shadowSm,
   },
   btn: {
-    padding: "8px 11px",
+    padding: "8px 12px",
     borderRadius: 10,
-    border: "1px solid rgba(81,124,230,0.55)",
-    background: "#3f73d8",
-    color: UI.text,
-    fontWeight: 900,
+    border: `1px solid ${UI.accent}`,
+    background: UI.accent,
+    color: "#FFFFFF",
+    fontWeight: 700,
     cursor: "pointer",
+    boxShadow: "0 1px 2px rgba(59,130,246,0.14)",
   },
   btn2: {
     padding: "7px 10px",
     borderRadius: 10,
     border: `1px solid ${UI.border}`,
-    background: UI.panelAlt,
-    color: UI.text,
-    fontWeight: 850,
+    background: "#FFFFFF",
+    color: UI.textSecondary,
+    fontWeight: 600,
     cursor: "pointer",
   },
   btnDanger: {
     padding: "7px 10px",
     borderRadius: 10,
-    border: "1px solid rgba(228,95,112,0.45)",
-    background: "rgba(228,95,112,0.14)",
-    color: "#ffb3be",
-    fontWeight: 850,
+    border: "1px solid rgba(239,68,68,0.24)",
+    background: "#FEF2F2",
+    color: UI.danger,
+    fontWeight: 600,
     cursor: "pointer",
   },
   input: {
     width: "100%",
-    padding: "8px 9px",
+    padding: "8px 10px",
     borderRadius: 10,
     border: `1px solid ${UI.border}`,
-    background: "rgba(255,255,255,0.025)",
+    background: "#FFFFFF",
     color: UI.text,
     outline: "none",
   },
   select: {
     width: "100%",
-    padding: "8px 9px",
+    padding: "8px 10px",
     borderRadius: 10,
-    border: "1px solid #444",
+    border: `1px solid ${UI.border}`,
     background: "#ffffff",
-    color: "#111111",
+    color: UI.text,
     outline: "none",
   },
-  grid4: { display: "grid", gridTemplateColumns: "repeat(4, minmax(220px, 1fr))", gap: 8 },
-  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
-  tiny: { fontSize: 11, color: UI.textMuted, lineHeight: 1.35 },
-  shift: { border: `1px solid ${UI.border}`, borderRadius: 12, padding: 9, background: UI.panelAlt },
+  grid4: { display: "grid", gridTemplateColumns: "repeat(4, minmax(220px, 1fr))", gap: 10 },
+  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+  tiny: { fontSize: 11, color: UI.textMuted, lineHeight: 1.4 },
+  shift: { border: `1px solid ${UI.border}`, borderRadius: 12, padding: 10, background: UI.panelAlt },
   shiftTop: { display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" },
-  shiftTitle: { fontWeight: 900, fontSize: 13, marginBottom: 3 },
-  shiftMeta: { fontSize: 11, color: UI.textMuted, lineHeight: 1.35 },
+  shiftTitle: { fontWeight: 700, fontSize: 13, marginBottom: 4, color: UI.text },
+  shiftMeta: { fontSize: 11, color: UI.textSecondary, lineHeight: 1.4 },
   hr: { height: 1, background: UI.borderSoft, margin: "10px 0" },
-  warn: { color: "#f59e0b", fontSize: 13, marginTop: 6 },
+  warn: { color: UI.warning, fontSize: 12, marginTop: 6 },
   tableWrap: {
     marginTop: 10,
     overflowX: "auto",
@@ -4743,8 +4792,8 @@ const styles = {
     textAlign: "left",
     fontSize: 12,
     fontWeight: 700,
-    color: UI.textMuted,
-    padding: "8px 12px",
+    color: UI.textSecondary,
+    padding: "9px 12px",
     borderBottom: `1px solid ${UI.border}`,
     whiteSpace: "nowrap",
   },
@@ -4752,8 +4801,8 @@ const styles = {
     textAlign: "right",
     fontSize: 12,
     fontWeight: 700,
-    color: UI.textMuted,
-    padding: "8px 12px",
+    color: UI.textSecondary,
+    padding: "9px 12px",
     borderBottom: `1px solid ${UI.border}`,
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
@@ -4762,48 +4811,51 @@ const styles = {
     textAlign: "center",
     fontSize: 12,
     fontWeight: 700,
-    color: UI.textMuted,
-    padding: "8px 12px",
+    color: UI.textSecondary,
+    padding: "9px 12px",
     borderBottom: `1px solid ${UI.border}`,
     whiteSpace: "nowrap",
   },
   td: {
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "left",
     verticalAlign: "top",
+    color: UI.text,
   },
   tdNum: {
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "right",
     verticalAlign: "top",
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
+    color: UI.text,
   },
   tdCenter: {
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "center",
     verticalAlign: "top",
     whiteSpace: "nowrap",
+    color: UI.text,
   },
   tdMuted: {
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "left",
     verticalAlign: "top",
-    opacity: 0.7,
+    color: UI.textMuted,
   },
   thCompact: {
     textAlign: "left",
     fontSize: 12,
     fontWeight: 700,
-    color: UI.textMuted,
+    color: UI.textSecondary,
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.border}`,
     whiteSpace: "nowrap",
@@ -4812,7 +4864,7 @@ const styles = {
     textAlign: "right",
     fontSize: 12,
     fontWeight: 700,
-    color: UI.textMuted,
+    color: UI.textSecondary,
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.border}`,
     whiteSpace: "nowrap",
@@ -4821,24 +4873,27 @@ const styles = {
   tdCompact: {
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "left",
     verticalAlign: "top",
+    color: UI.text,
   },
   tdCompactNum: {
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "right",
     verticalAlign: "top",
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
+    color: UI.text,
   },
   tdCompactEmpty: {
     padding: "8px 12px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "left",
+    color: UI.textMuted,
   },
   staffHoursTable: {
     width: "100%",
@@ -4851,7 +4906,7 @@ const styles = {
       textAlign: "left",
       fontSize: 12,
       fontWeight: 700,
-      color: UI.textMuted,
+      color: UI.textSecondary,
       padding: "8px 14px",
       borderBottom: `1px solid ${UI.border}`,
     },
@@ -4862,7 +4917,7 @@ const styles = {
       textAlign: "right",
       fontSize: 12,
       fontWeight: 700,
-      color: UI.textMuted,
+      color: UI.textSecondary,
       padding: "8px 14px",
       borderBottom: `1px solid ${UI.border}`,
     },
@@ -4872,22 +4927,25 @@ const styles = {
   staffHoursTdName: {
     padding: "8px 14px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "left",
     whiteSpace: "nowrap",
+    color: UI.text,
   },
   staffHoursTdNum: {
     padding: "8px 14px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "right",
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
+    color: UI.text,
   },
   staffHoursTdEmpty: {
     padding: "8px 14px",
     borderBottom: `1px solid ${UI.borderSoft}`,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "left",
+    color: UI.textMuted,
   },
 };
