@@ -2986,8 +2986,8 @@ export default function Page() {
     </div>
 
     {builderOpen ? (
-      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(4,8,16,0.76)", zIndex: 1000, padding: 14 }} className="no-print">
-        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: UI.panel, border: `1px solid ${UI.border}`, borderRadius: 14, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 18px 44px rgba(0,0,0,0.42)" }}>
+      <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(4,8,16,0.76)", zIndex: 1300, padding: 14 }} className="no-print">
+        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: UI.panel, border: `1px solid ${UI.border}`, borderRadius: 14, display: "flex", flexDirection: "column", overflow: "visible", boxShadow: "0 18px 44px rgba(0,0,0,0.42)", position: "relative" }}>
           <div style={{ padding: "12px 14px 8px 14px", borderBottom: `1px solid ${UI.borderSoft}` }}>
           <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
             <div style={styles.tiny}>
@@ -2999,7 +2999,7 @@ export default function Page() {
             </div>
           </div>
 
-          <div style={{ padding: 14, overflowY: "auto", display: "grid", gap: 10 }}>
+          <div style={{ padding: 14, overflowY: "auto", overflowX: "visible", display: "grid", gap: 10, position: "relative", zIndex: 1, paddingBottom: 18 }}>
             <div>
               <div style={styles.tiny}>Client</div>
               <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
@@ -3146,20 +3146,20 @@ export default function Page() {
               ) : null}
 
               {builderShiftInfo.shifts.length ? (
-                <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "grid", gap: 8, overflow: "visible", position: "relative", zIndex: 5 }}>
                   {builderShiftInfo.shifts.map((block, blockIdx) => (
-                    <div key={`${block.start}-${block.end}-${blockIdx}`} style={{ ...styles.card, padding: 10 }}>
+                    <div key={`${block.start}-${block.end}-${blockIdx}`} style={{ ...styles.card, padding: 10, overflow: "visible", position: "relative", zIndex: 6 }}>
                       <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6 }}>
                         Block {blockIdx + 1}: {formatTime12(block.start)} - {formatTime12(block.end)}
                       </div>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(70px, 1fr))", gap: 6 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(70px, 1fr))", gap: 6, overflow: "visible" }}>
                         {WEEKDAY_NAMES.map((day, dayIdx) => {
                           const key = `${dayIdx}_${blockIdx}`;
                           return (
-                            <div key={key} style={{ display: "flex", flexDirection: "column" }}>
+                            <div key={key} style={{ display: "flex", flexDirection: "column", minWidth: 0, overflow: "visible", position: "relative", zIndex: 7 }}>
                               <div style={{ fontSize: 11, opacity: 0.7 }}>{day}</div>
                               <select
-                                style={styles.select}
+                                style={{ ...styles.select, position: "relative", zIndex: 8, pointerEvents: "auto" }}
                                 value={builderBlockAssignments[key] || ""}
                                 onChange={(e) =>
                                   setBuilderBlockAssignments((p) => ({
@@ -3314,7 +3314,7 @@ export default function Page() {
             </div>
           </div>
 
-          <div style={{ position: "sticky", bottom: 0, display: "flex", gap: 8, justifyContent: "flex-end", padding: 12, borderTop: `1px solid ${UI.borderSoft}`, background: UI.panel }}>
+          <div style={{ position: "relative", zIndex: 2, display: "flex", gap: 8, justifyContent: "flex-end", padding: 12, borderTop: `1px solid ${UI.borderSoft}`, background: UI.panel }}>
               <button
                 style={styles.btn2}
                 onClick={() => setBuilderOpen(false)}
