@@ -671,7 +671,7 @@ function saveClientSchedule(clientId, shifts) {
 
 function Tabs({ value, onChange, tabs }) {
   return (
-    <div className="no-print" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+    <div className="no-print" style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: 6, borderRadius: 12, background: UI.nav, border: `1px solid ${UI.border}` }}>
       {tabs.map((t) => (
         <button
           key={t.value}
@@ -681,10 +681,10 @@ function Tabs({ value, onChange, tabs }) {
             padding: "7px 11px",
             fontSize: 12,
             lineHeight: 1.2,
-            background: value === t.value ? "rgba(59,130,246,0.10)" : "#FFFFFF",
+            background: value === t.value ? "rgba(79,125,243,0.12)" : UI.nav,
             color: value === t.value ? UI.accent : UI.textSecondary,
-            borderColor: value === t.value ? "rgba(59,130,246,0.42)" : UI.border,
-            boxShadow: value === t.value ? "inset 0 0 0 1px rgba(59,130,246,0.06)" : "none",
+            borderColor: value === t.value ? "rgba(79,125,243,0.42)" : UI.border,
+            boxShadow: value === t.value ? "inset 0 0 0 1px rgba(79,125,243,0.08)" : "none",
           }}
         >
           {t.label}
@@ -729,7 +729,7 @@ function AssignedStaffDropdown({ label = "Assigned Staff", selectedIds, staffOpt
             overflowY: "auto",
             border: `1px solid ${UI.border}`,
             borderRadius: 12,
-            background: "#FFFFFF",
+            background: UI.panel,
             padding: 8,
             boxShadow: UI.shadowLg,
           }}
@@ -3605,7 +3605,7 @@ export default function Page() {
 
     {builderOpen ? (
       <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(31,41,51,0.28)", zIndex: 1300, padding: 14 }} className="no-print">
-        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: UI.panel, border: `1px solid ${UI.border}`, borderRadius: 14, display: "grid", gridTemplateRows: "auto minmax(0, 1fr) auto", overflow: "hidden", boxShadow: UI.shadowLg, position: "relative" }}>
+        <div style={{ width: "min(980px, 96vw)", maxHeight: "90vh", background: UI.panel, border: `1px solid ${UI.border}`, borderRadius: 12, display: "grid", gridTemplateRows: "auto minmax(0, 1fr) auto", overflow: "hidden", boxShadow: UI.shadowLg, position: "relative" }}>
           <div style={{ padding: "12px 14px 8px 14px", borderBottom: `1px solid ${UI.borderSoft}` }}>
           <h3 style={{ marginTop: 0 }}>24-Hour Builder</h3>
             <div style={styles.tiny}>
@@ -4749,7 +4749,7 @@ export default function Page() {
         }
 
         select {
-          background-color: #ffffff;
+          background-color: ${UI.field};
           color: ${UI.text};
           border: 1px solid ${UI.border};
           -webkit-text-fill-color: ${UI.text};
@@ -4757,14 +4757,14 @@ export default function Page() {
 
         select option {
           color: ${UI.text};
-          background-color: #ffffff;
+          background-color: ${UI.panel};
         }
 
         input:focus,
         select:focus,
         textarea:focus {
           border-color: ${UI.accent};
-          outline: 3px solid rgba(59, 130, 246, 0.18);
+          outline: 3px solid rgba(79, 125, 243, 0.18);
           outline-offset: 1px;
         }
 
@@ -4776,22 +4776,22 @@ export default function Page() {
           width: 100%;
           border-collapse: collapse;
           table-layout: auto;
-          background: #ffffff;
+          background: ${UI.panel};
         }
 
         .app-table thead th {
           position: sticky;
           top: 0;
           z-index: 1;
-          background: #f8fafc;
+          background: ${UI.tableHeader};
         }
 
         .app-table tbody tr:nth-child(even) td {
-          background: #fbfcfd;
+          background: ${UI.panel};
         }
 
         .app-table tbody tr:hover td {
-          background: rgba(59, 130, 246, 0.05);
+          background: ${UI.rowHover};
         }
 
         summary {
@@ -4811,22 +4811,26 @@ export default function Page() {
 ========================= */
 
 const UI = {
-  bg: "#F4F6F8",
-  panel: "#FFFFFF",
-  panelAlt: "#F8FAFC",
-  border: "#E3E7EB",
-  borderSoft: "#EDF1F4",
-  text: "#1F2933",
+  bg: "#EEF1F4",
+  panel: "#F8FAFB",
+  panelAlt: "#F2F4F7",
+  nav: "#F2F4F7",
+  tableHeader: "#F1F4F7",
+  rowHover: "#E9EEF3",
+  field: "#F8FAFB",
+  border: "#D9DEE5",
+  borderSoft: "#E4E9EF",
+  text: "#2F3742",
   textSecondary: "#6B7280",
-  textMuted: "#9CA3AF",
-  accent: "#3B82F6",
-  accentHover: "#2563EB",
+  textMuted: "#7D8794",
+  accent: "#4F7DF3",
+  accentHover: "#3E67D6",
   success: "#22C55E",
   warning: "#F59E0B",
   danger: "#EF4444",
-  shadowSm: "0 1px 2px rgba(15, 23, 42, 0.04)",
-  shadowMd: "0 6px 18px rgba(15, 23, 42, 0.05)",
-  shadowLg: "0 14px 34px rgba(15, 23, 42, 0.12)",
+  shadowSm: "0 1px 2px rgba(47, 55, 66, 0.05)",
+  shadowMd: "0 8px 22px rgba(47, 55, 66, 0.06)",
+  shadowLg: "0 18px 38px rgba(47, 55, 66, 0.12)",
 };
 
 const styles = {
@@ -4839,7 +4843,7 @@ const styles = {
   },
   btn: {
     padding: "8px 12px",
-    borderRadius: 10,
+    borderRadius: 12,
     border: `1px solid ${UI.accent}`,
     background: UI.accent,
     color: "#FFFFFF",
@@ -4849,16 +4853,16 @@ const styles = {
   },
   btn2: {
     padding: "7px 10px",
-    borderRadius: 10,
+    borderRadius: 12,
     border: `1px solid ${UI.border}`,
-    background: "#FFFFFF",
+    background: UI.panel,
     color: UI.textSecondary,
     fontWeight: 600,
     cursor: "pointer",
   },
   btnDanger: {
     padding: "7px 10px",
-    borderRadius: 10,
+    borderRadius: 12,
     border: "1px solid rgba(239,68,68,0.24)",
     background: "#FEF2F2",
     color: UI.danger,
@@ -4868,18 +4872,18 @@ const styles = {
   input: {
     width: "100%",
     padding: "8px 10px",
-    borderRadius: 10,
+    borderRadius: 12,
     border: `1px solid ${UI.border}`,
-    background: "#FFFFFF",
+    background: UI.field,
     color: UI.text,
     outline: "none",
   },
   select: {
     width: "100%",
     padding: "8px 10px",
-    borderRadius: 10,
+    borderRadius: 12,
     border: `1px solid ${UI.border}`,
-    background: "#ffffff",
+    background: UI.field,
     color: UI.text,
     outline: "none",
   },
