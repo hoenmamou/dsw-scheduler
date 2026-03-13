@@ -855,6 +855,28 @@ function staffWeekMinutesDedup(shifts, staffId) {
   return total;
 }
 
+function staffSharedSupportMinutesDedup(shifts, staffId) {
+  const seen = new Set();
+  let total = 0;
+  for (const sh of shifts) {
+    if (sh.staffId !== staffId) continue;
+    if (!(sh.isShared || sh.is_shared)) continue;
+    const key = staffShiftUniqueKey(sh);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    total += minutesBetweenISO(sh.startISO, sh.endISO);
+  }
+  return total;
+}
+
+function getSharedSupportMinutesByStaff(shifts, staffList) {
+  const out = {};
+  for (const st of staffList || []) {
+    out[st.id] = staffSharedSupportMinutesDedup(shifts, st.id);
+  }
+  return out;
+}
+
 function localDateKeyFromISO(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return null;
@@ -1795,6 +1817,10 @@ export default function Page() {
     return out;
   }, [state.staff, shiftsInSelectedWeek]);
 
+  const staffSharedSupportMinutesMap = useMemo(() => {
+    return getSharedSupportMinutesByStaff(shiftsInSelectedWeek, state.staff || []);
+  }, [state.staff, shiftsInSelectedWeek]);
+
   const crossWeekConsecutiveProtection = !!state.settings?.crossWeekConsecutiveProtection;
   const maxConsecutiveDays = Math.max(1, Number(state.settings?.maxConsecutiveDays) || 6);
   const [staffHoursSearch, setStaffHoursSearch] = useState("");
@@ -2502,17 +2528,19 @@ export default function Page() {
     return (state.staff || [])
       .map((st) => {
         const min = staffWeekMinutesMap[st.id] || 0;
+        const sharedSupportMin = staffSharedSupportMinutesMap[st.id] || 0;
         const otMin = Math.max(0, min - OT_THRESHOLD_MIN);
-        return { st, min, otMin };
+        return { st, min, otMin, sharedSupportMin };
       })
-      .filter(({ st, min, otMin }) => {
+      .filter(({ st, min, otMin, sharedSupportMin }) => {
         if (staffHoursFilter === "worked" && min <= 0) return false;
         if (staffHoursFilter === "ot" && otMin <= 0) return false;
+        if (staffHoursFilter === "shared" && sharedSupportMin <= 0) return false;
         if (!q) return true;
         return String(st.name || "").toLowerCase().includes(q);
       })
       .sort((a, b) => b.min - a.min || String(a.st.name || "").localeCompare(String(b.st.name || "")));
-  }, [state.staff, staffWeekMinutesMap, staffHoursSearch, staffHoursFilter]);
+  }, [state.staff, staffWeekMinutesMap, staffSharedSupportMinutesMap, staffHoursSearch, staffHoursFilter]);
 
   const clientHoursRows = useMemo(() => {
     const q = clientHoursSearch.trim().toLowerCase();
@@ -2534,10 +2562,11 @@ export default function Page() {
   const hoursSummary = useMemo(() => {
     const staffWorking = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > 0).length;
     const staffInOt = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > OT_THRESHOLD_MIN).length;
+    const totalSharedSupportMin = (state.staff || []).reduce((sum, st) => sum + (staffSharedSupportMinutesMap[st.id] || 0), 0);
     const clientsWithHours = (visibleClients || []).filter((c) => (weekClientHours[c.id]?.totalMin || 0) > 0).length;
     const totalClientMin = (visibleClients || []).reduce((sum, c) => sum + (weekClientHours[c.id]?.totalMin || 0), 0);
-    return { staffWorking, staffInOt, clientsWithHours, totalClientMin };
-  }, [state.staff, staffWeekMinutesMap, visibleClients, weekClientHours]);
+    return { staffWorking, staffInOt, totalSharedSupportMin, clientsWithHours, totalClientMin };
+  }, [state.staff, staffWeekMinutesMap, staffSharedSupportMinutesMap, visibleClients, weekClientHours]);
 
   if (!mounted) return null;
 
@@ -3325,7 +3354,7 @@ export default function Page() {
             <h3 style={{ marginTop: 0, marginBottom: 6 }}>Hours & Overtime</h3>
             <div style={styles.tiny}>Shared support counts once for staff OT, and client totals stay unchanged.</div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(150px, 1fr))", gap: 8, marginTop: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(150px, 1fr))", gap: 8, marginTop: 10 }}>
               <div style={{ ...styles.card, padding: 8 }}>
                 <div style={styles.tiny}>Staff Working This Week</div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>{hoursSummary.staffWorking}</div>
@@ -3337,6 +3366,10 @@ export default function Page() {
               <div style={{ ...styles.card, padding: 8 }}>
                 <div style={styles.tiny}>Clients With Hours</div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>{hoursSummary.clientsWithHours}</div>
+              </div>
+              <div style={{ ...styles.card, padding: 8 }}>
+                <div style={styles.tiny}>Total Shared Support Hours This Week</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>{fmtHoursFromMin(hoursSummary.totalSharedSupportMin)}</div>
               </div>
               <div style={{ ...styles.card, padding: 8 }}>
                 <div style={styles.tiny}>Total Scheduled Client Hours</div>
@@ -3364,6 +3397,7 @@ export default function Page() {
                 >
                   <option value="worked">Worked This Week</option>
                   <option value="ot">Overtime Only</option>
+                  <option value="shared">Shared Support Only</option>
                   <option value="all">All Staff</option>
                 </select>
               </div>
@@ -3375,19 +3409,21 @@ export default function Page() {
                       <th style={styles.thCompact}>Staff</th>
                       <th style={styles.thCompact}>Week Hours</th>
                       <th style={styles.thCompact}>OT Hours</th>
+                      <th style={styles.thCompact}>Shared Support Hours</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {staffHoursRows.map(({ st, min, otMin }) => (
+                    {staffHoursRows.map(({ st, min, otMin, sharedSupportMin }) => (
                       <tr key={st.id}>
                         <td style={styles.tdCompact}><b>{st.name}</b></td>
                         <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(min)}</td>
                         <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums", color: otMin > 0 ? "#ff8b8b" : "inherit" }}>{fmtHoursFromMin(otMin)}</td>
+                        <td style={{ ...styles.tdCompact, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtHoursFromMin(sharedSupportMin)}</td>
                       </tr>
                     ))}
                     {staffHoursRows.length === 0 ? (
                       <tr>
-                        <td style={styles.tdCompact} colSpan={3}>No staff rows match this filter.</td>
+                        <td style={styles.tdCompact} colSpan={4}>No staff rows match this filter.</td>
                       </tr>
                     ) : null}
                   </tbody>
