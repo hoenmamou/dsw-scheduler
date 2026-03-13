@@ -29,6 +29,9 @@ const DAY_START_MIN = 7 * 60;  // 07:00
 const DAY_END_MIN = 23 * 60;   // 23:00
 const OT_THRESHOLD_MIN = 40 * 60;
 const MAX_HOURS_PER_24_MIN = 16 * 60;
+const PAYROLL_CYCLE_DAYS = 14;
+const PAYROLL_BUCKET_DAYS = 7;
+const DEFAULT_PAYROLL_CYCLE_ANCHOR = "2026-03-08";
 
 function normalizeRole(role) {
   return String(role || "").trim().toLowerCase();
@@ -157,6 +160,146 @@ function startOfWeekSunday(dateInput) {
   return d;
 }
 
+function parseDateOnlyLocal(value) {
+  const raw = String(value || "").trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const d = new Date(`${raw}T00:00:00`);
+  return isNaN(d) ? null : d;
+}
+
+function formatDateOnlyLocal(dateInput) {
+  const d = new Date(dateInput);
+  if (isNaN(d)) return "";
+  d.setHours(0, 0, 0, 0);
+  return isoLocal(d).slice(0, 10);
+}
+
+function daysBetweenDateOnly(startInput, endInput) {
+  const start = new Date(startInput);
+  const end = new Date(endInput);
+  if (isNaN(start) || isNaN(end)) return 0;
+  start.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
+  return Math.round((end - start) / 86400000);
+}
+
+function getInclusiveDateRange(startInput, finishInput) {
+  const start = parseDateOnlyLocal(startInput);
+  const finish = parseDateOnlyLocal(finishInput);
+  if (!start || !finish || finish < start) return [];
+
+  const days = [];
+  for (let cursor = new Date(start); cursor <= finish; cursor = addDays(cursor, 1)) {
+    days.push(new Date(cursor));
+  }
+  return days;
+}
+
+function getPayrollCycleRangeForReferenceDate(referenceDateInput, anchorDateInput = DEFAULT_PAYROLL_CYCLE_ANCHOR, cycleDays = PAYROLL_CYCLE_DAYS) {
+  const reference = parseDateOnlyLocal(referenceDateInput) || parseDateOnlyLocal(new Date()) || new Date();
+  const anchor = parseDateOnlyLocal(anchorDateInput) || parseDateOnlyLocal(DEFAULT_PAYROLL_CYCLE_ANCHOR) || new Date();
+  const diffDays = daysBetweenDateOnly(anchor, reference);
+  const cycleIndex = Math.floor(diffDays / cycleDays);
+  const startDate = addDays(anchor, cycleIndex * cycleDays);
+  const finishDate = addDays(startDate, cycleDays - 1);
+  return {
+    startDate: formatDateOnlyLocal(startDate),
+    finishDate: formatDateOnlyLocal(finishDate),
+  };
+}
+
+function getPayrollBucketStartKey(dateInput, anchorDateInput, bucketDays = PAYROLL_BUCKET_DAYS) {
+  const anchor = parseDateOnlyLocal(anchorDateInput);
+  const date = parseDateOnlyLocal(String(dateInput || "").slice(0, 10)) || new Date(dateInput);
+  if (!anchor || isNaN(date)) return null;
+  date.setHours(0, 0, 0, 0);
+  const diffDays = daysBetweenDateOnly(anchor, date);
+  const bucketIndex = Math.floor(diffDays / bucketDays);
+  const bucketStart = addDays(anchor, bucketIndex * bucketDays);
+  return formatDateOnlyLocal(bucketStart);
+}
+
+function getMinutesForWeeklyHoursAcrossRange(weeklyHours, rangeDayCount) {
+  return Math.round((Number(weeklyHours) || 0) * 60 * (Math.max(1, rangeDayCount) / 7));
+}
+
+function getDateRangeWindow(startDateValue, finishDateValue) {
+  const start = parseDateOnlyLocal(startDateValue);
+  const finish = parseDateOnlyLocal(finishDateValue);
+  if (!start || !finish || finish < start) return null;
+  const endExclusive = addDays(finish, 1);
+  return {
+    startDate: start,
+    finishDate: finish,
+    startISO: `${formatDateOnlyLocal(start)}T00:00:00`,
+    endExclusiveISO: `${formatDateOnlyLocal(endExclusive)}T00:00:00`,
+  };
+}
+
+function overlapsWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
+  return splitShiftIntoWindowMinutes(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) > 0;
+}
+
+function clipShiftToWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
+  const shiftStart = new Date(shiftStartISO);
+  const shiftEnd = new Date(shiftEndISO);
+  const windowStart = new Date(windowStartISO);
+  const windowEnd = new Date(windowEndISO);
+  if (
+    isNaN(shiftStart) || isNaN(shiftEnd)
+    || isNaN(windowStart) || isNaN(windowEnd)
+    || shiftEnd <= shiftStart
+    || windowEnd <= windowStart
+  ) {
+    return null;
+  }
+
+  const clippedStart = shiftStart > windowStart ? shiftStart : windowStart;
+  const clippedEnd = shiftEnd < windowEnd ? shiftEnd : windowEnd;
+  if (clippedEnd <= clippedStart) return null;
+  return {
+    startISO: isoLocal(clippedStart),
+    endISO: isoLocal(clippedEnd),
+  };
+}
+
+function splitDayNightMinutesInWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
+  const clipped = clipShiftToWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO);
+  if (!clipped) return { totalMin: 0, dayMin: 0, nightMin: 0 };
+  return splitDayNightMinutes(clipped.startISO, clipped.endISO);
+}
+
+function calculateShiftHoursInWindow(shifts, windowStartISO, windowEndISO) {
+  return (shifts || []).reduce(
+    (sum, sh) => sum + splitShiftIntoWindowMinutes(sh.startISO, sh.endISO, windowStartISO, windowEndISO),
+    0
+  );
+}
+
+function staffMinutesDedupInWindow(shifts, staffId, windowStartISO, windowEndISO, sharedOnly = false) {
+  const seen = new Set();
+  let total = 0;
+  for (const sh of shifts || []) {
+    if (sh.staffId !== staffId) continue;
+    if (sharedOnly && !(sh.isShared || sh.is_shared)) continue;
+    const key = staffShiftUniqueKey(sh);
+    if (seen.has(key)) continue;
+    const overlapMinutes = splitShiftIntoWindowMinutes(sh.startISO, sh.endISO, windowStartISO, windowEndISO);
+    if (overlapMinutes <= 0) continue;
+    seen.add(key);
+    total += overlapMinutes;
+  }
+  return total;
+}
+
+function getSharedSupportMinutesByStaffInWindow(shifts, staffList, windowStartISO, windowEndISO) {
+  const out = {};
+  for (const st of staffList || []) {
+    out[st.id] = staffMinutesDedupInWindow(shifts, st.id, windowStartISO, windowEndISO, true);
+  }
+  return out;
+}
+
 function minutesBetweenISO(aISO, bISO) {
   const a = new Date(aISO);
   const b = new Date(bISO);
@@ -220,6 +363,30 @@ function splitDayNightMinutes(startISO, endISO) {
   }
 
   return { totalMin, dayMin, nightMin };
+}
+
+function normalizeShiftDraftDates(draft) {
+  const next = { ...draft };
+  const startDate = next.startDate;
+  const startTime = next.startTime;
+  const endTime = next.endTime;
+  if (!startDate || !startTime || !endTime) return next;
+
+  const [sh, sm] = String(startTime).split(":").map(Number);
+  const [eh, em] = String(endTime).split(":").map(Number);
+  if ([sh, sm, eh, em].some((n) => !Number.isFinite(n))) return next;
+
+  const startMin = sh * 60 + sm;
+  const endMin = eh * 60 + em;
+  if (endMin < startMin) {
+    const d = new Date(`${startDate}T00:00:00`);
+    d.setDate(d.getDate() + 1);
+    next.endDate = isoLocal(d).slice(0, 10);
+  } else if (!next.endDate || new Date(`${next.endDate}T00:00:00`) < new Date(`${startDate}T00:00:00`)) {
+    next.endDate = startDate;
+  }
+
+  return next;
 }
 
 function fmtHoursFromMin(min) {
@@ -1031,70 +1198,63 @@ function getGeneratedShiftEndISO(dateStr, startTime, endTime) {
 
 function createShiftRowsFromTemplate({
   clientId,
-  weekStartDate,
+  rangeStartDate,
+  rangeFinishDate,
   shiftsDef,
-  weeks,
-  repeatInterval,
   assignments,
   createdBy,
 }) {
   const rows = [];
   const generatedShifts = [];
-  const start = new Date(weekStartDate);
+  const days = getInclusiveDateRange(rangeStartDate, rangeFinishDate);
 
-  for (let w = 0; w < weeks; w += repeatInterval) {
-    const weekStartForRun = addDays(start, w * 7);
-    for (let d = 0; d < 7; d++) {
-      const day = addDays(weekStartForRun, d);
-      const dateStr = isoLocal(day).slice(0, 10);
+  for (const day of days) {
+    const dateStr = formatDateOnlyLocal(day);
 
-      for (let blockIdx = 0; blockIdx < shiftsDef.length; blockIdx++) {
-        const { start: startTime, end: endTime } = shiftsDef[blockIdx];
-        const { startISO, endISO } = getGeneratedShiftEndISO(dateStr, startTime, endTime);
-        const weekday = new Date(`${dateStr}T00:00:00`).getDay();
-        const assignedStaffId = assignments[`${weekday}_${blockIdx}`] || null;
+    for (let blockIdx = 0; blockIdx < shiftsDef.length; blockIdx++) {
+      const { start: startTime, end: endTime } = shiftsDef[blockIdx];
+      const { startISO, endISO } = getGeneratedShiftEndISO(dateStr, startTime, endTime);
+      const weekday = new Date(`${dateStr}T00:00:00`).getDay();
+      const assignedStaffId = assignments[`${weekday}_${blockIdx}`] || null;
 
-        const row = {
-          id: uid("sh"),
-          client_id: clientId,
-          staff_id: assignedStaffId,
-          start_iso: startISO,
-          end_iso: endISO,
-          created_by: createdBy,
-          is_shared: false,
-          shared_group_id: "",
-        };
+      const row = {
+        id: uid("sh"),
+        client_id: clientId,
+        staff_id: assignedStaffId,
+        start_iso: startISO,
+        end_iso: endISO,
+        created_by: createdBy,
+        is_shared: false,
+        shared_group_id: "",
+      };
 
-        rows.push(row);
-        generatedShifts.push({
-          id: row.id,
-          clientId,
-          staffId: assignedStaffId,
-          startISO,
-          endISO,
-          createdBy,
-          isShared: false,
-          sharedGroupId: "",
-        });
-      }
+      rows.push(row);
+      generatedShifts.push({
+        id: row.id,
+        clientId,
+        staffId: assignedStaffId,
+        startISO,
+        endISO,
+        createdBy,
+        isShared: false,
+        sharedGroupId: "",
+      });
     }
   }
 
   return { rows, generatedShifts };
 }
 
-function getStaffWeeklyHoursMap(shifts, staffList, weekStartValue) {
-  const weekStartDate = new Date(`${weekStartValue}T00:00:00`);
-  const weekEndDate = addDays(weekStartDate, 7);
-  const shiftsInWeek = (shifts || []).filter((sh) => {
-    if (!sh?.staffId) return false;
-    const start = new Date(sh.startISO);
-    return !isNaN(start) && start >= weekStartDate && start < weekEndDate;
-  });
+function getStaffHoursMapForBucket(shifts, staffList, bucketStartValue, bucketDays = PAYROLL_BUCKET_DAYS) {
+  const bucketStartDate = parseDateOnlyLocal(bucketStartValue);
+  if (!bucketStartDate) return {};
+  const bucketEndDate = addDays(bucketStartDate, bucketDays);
+  const bucketStartISO = `${formatDateOnlyLocal(bucketStartDate)}T00:00:00`;
+  const bucketEndISO = `${formatDateOnlyLocal(bucketEndDate)}T00:00:00`;
 
   const out = {};
   for (const st of staffList || []) {
-    out[st.id] = staffWeekMinutesDedup(shiftsInWeek, st.id);
+    out[st.id] = staffMinutesDedupInWindow(shifts, st.id, bucketStartISO, bucketEndISO);
   }
   return out;
 }
@@ -1139,15 +1299,24 @@ function calculateAdditionalStaffNeeded(totalMinutes, assignedMinutes, remaining
   return Math.max(extraFromHours, extraFromHeadcount);
 }
 
-function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList }) {
+function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList, payrollStartDate, payrollFinishDate }) {
   const generated = generatedShifts || [];
   const assignedGenerated = generated.filter((sh) => !!sh.staffId);
   const unassignedGenerated = generated.filter((sh) => !sh.staffId);
-  const totalScheduledMinutes = calculateUnassignedShiftHours(generated);
-  const assignedScheduledMinutes = calculateUnassignedShiftHours(assignedGenerated);
-  const weekKeys = Array.from(
-    new Set(generated.map((sh) => getWeekStartKey(sh.startISO)).filter(Boolean))
-  ).sort();
+  const payrollWindow = getDateRangeWindow(payrollStartDate, payrollFinishDate);
+  const totalScheduledMinutes = payrollWindow
+    ? calculateShiftHoursInWindow(generated, payrollWindow.startISO, payrollWindow.endExclusiveISO)
+    : 0;
+  const assignedScheduledMinutes = payrollWindow
+    ? calculateShiftHoursInWindow(assignedGenerated, payrollWindow.startISO, payrollWindow.endExclusiveISO)
+    : 0;
+  const weekKeys = [];
+  if (payrollWindow) {
+    for (let cursor = new Date(payrollWindow.startDate); cursor <= payrollWindow.finishDate; cursor = addDays(cursor, PAYROLL_BUCKET_DAYS)) {
+      weekKeys.push(formatDateOnlyLocal(cursor));
+    }
+  }
+  if (!weekKeys.length && payrollStartDate) weekKeys.push(payrollStartDate);
 
   const at40Set = new Set();
   const over40Set = new Set();
@@ -1155,16 +1324,23 @@ function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList
 
   for (const weekKey of weekKeys) {
     const combinedShifts = [...(existingShifts || []), ...assignedGenerated];
-    const weeklyHoursMap = getStaffWeeklyHoursMap(combinedShifts, staffList, weekKey);
+    const weeklyHoursMap = getStaffHoursMapForBucket(combinedShifts, staffList, weekKey);
     const staffAt40 = (staffList || []).filter((st) => weeklyHoursMap[st.id] === OT_THRESHOLD_MIN);
     const staffOver40 = (staffList || []).filter((st) => weeklyHoursMap[st.id] > OT_THRESHOLD_MIN);
-    const weekUnassigned = unassignedGenerated.filter((sh) => getWeekStartKey(sh.startISO) === weekKey);
-    const unassignedMinutes = calculateUnassignedShiftHours(weekUnassigned);
-    const weekGenerated = generated.filter((sh) => getWeekStartKey(sh.startISO) === weekKey);
-    const weekAssigned = assignedGenerated.filter((sh) => getWeekStartKey(sh.startISO) === weekKey);
-    const weekTotalScheduledMinutes = calculateUnassignedShiftHours(weekGenerated);
-    const weekAssignedScheduledMinutes = calculateUnassignedShiftHours(weekAssigned);
-    const assignedStaffIds = weekAssigned.map((sh) => sh.staffId).filter(Boolean);
+    const bucketWindow = getDateRangeWindow(weekKey, formatDateOnlyLocal(addDays(parseDateOnlyLocal(weekKey), PAYROLL_BUCKET_DAYS - 1)));
+    const weekUnassigned = (unassignedGenerated || []).filter((sh) => bucketWindow && overlapsWindow(sh.startISO, sh.endISO, bucketWindow.startISO, bucketWindow.endExclusiveISO));
+    const unassignedMinutes = bucketWindow
+      ? calculateShiftHoursInWindow(weekUnassigned, bucketWindow.startISO, bucketWindow.endExclusiveISO)
+      : 0;
+    const weekGenerated = (generated || []).filter((sh) => bucketWindow && overlapsWindow(sh.startISO, sh.endISO, bucketWindow.startISO, bucketWindow.endExclusiveISO));
+    const weekAssigned = (assignedGenerated || []).filter((sh) => bucketWindow && overlapsWindow(sh.startISO, sh.endISO, bucketWindow.startISO, bucketWindow.endExclusiveISO));
+    const weekTotalScheduledMinutes = bucketWindow
+      ? calculateShiftHoursInWindow(weekGenerated, bucketWindow.startISO, bucketWindow.endExclusiveISO)
+      : 0;
+    const weekAssignedScheduledMinutes = bucketWindow
+      ? calculateShiftHoursInWindow(weekAssigned, bucketWindow.startISO, bucketWindow.endExclusiveISO)
+      : 0;
+    const assignedStaffIds = Array.from(new Set(weekAssigned.map((sh) => sh.staffId).filter(Boolean)));
     const remainingCapacity = calculateRemainingCapacityByStaff(weeklyHoursMap, assignedStaffIds, staffList);
     const minimumStaffRequired = calculateMinimumStaffRequired(weekTotalScheduledMinutes);
     const additionalStaffNeeded = calculateAdditionalStaffNeeded(
@@ -1198,14 +1374,14 @@ function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList
         .sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name)),
       unassignedShifts: weekUnassigned.map((sh) => ({
         id: sh.id,
-        startISO: sh.startISO,
-        endISO: sh.endISO,
+        startISO: bucketWindow ? (clipShiftToWindow(sh.startISO, sh.endISO, bucketWindow.startISO, bucketWindow.endExclusiveISO)?.startISO || sh.startISO) : sh.startISO,
+        endISO: bucketWindow ? (clipShiftToWindow(sh.startISO, sh.endISO, bucketWindow.startISO, bucketWindow.endExclusiveISO)?.endISO || sh.endISO) : sh.endISO,
       })),
     });
   }
 
   const combinedWeeklyHoursMap = weekKeys.reduce((acc, weekKey) => {
-    acc[weekKey] = getStaffWeeklyHoursMap([...(existingShifts || []), ...assignedGenerated], staffList, weekKey);
+    acc[weekKey] = getStaffHoursMapForBucket([...(existingShifts || []), ...assignedGenerated], staffList, weekKey);
     return acc;
   }, {});
   const allAssignedStaffIds = assignedGenerated.map((sh) => sh.staffId).filter(Boolean);
@@ -1237,7 +1413,9 @@ function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList
     assignedScheduledMinutes,
     assignedShifts: assignedGenerated.length,
     unassignedShifts: unassignedGenerated.length,
-    unassignedHours: calculateUnassignedShiftHours(unassignedGenerated),
+    unassignedHours: payrollWindow
+      ? calculateShiftHoursInWindow(unassignedGenerated, payrollWindow.startISO, payrollWindow.endExclusiveISO)
+      : 0,
     minimumStaffRequired,
     currentUsableStaff,
     totalRemainingCapacityMinutes,
@@ -1743,21 +1921,42 @@ export default function Page() {
   // UI
   const [tab, setTab] = useState("schedule");
 
-  // Week selection (Sunday start)
-  const [weekStart, setWeekStart] = useState(() => {
-    const d = startOfWeekSunday(new Date()) || new Date();
-    return isoLocal(d).slice(0, 10);
-  });
+  // Payroll period selection
+  const [payrollReferenceDate, setPayrollReferenceDate] = useState(() => formatDateOnlyLocal(new Date()));
+  const [payrollStartDate, setPayrollStartDate] = useState(() => getPayrollCycleRangeForReferenceDate(new Date()).startDate);
+  const [payrollFinishDate, setPayrollFinishDate] = useState(() => getPayrollCycleRangeForReferenceDate(new Date()).finishDate);
 
-  const weekStartDate = useMemo(() => new Date(`${weekStart}T00:00:00`), [weekStart]);
-  const weekEndDate = useMemo(() => addDays(weekStartDate, 7), [weekStartDate]);
+  const weekStartDate = useMemo(() => parseDateOnlyLocal(payrollStartDate) || parseDateOnlyLocal(new Date()) || new Date(), [payrollStartDate]);
+  const selectedPeriodFinishDate = useMemo(() => parseDateOnlyLocal(payrollFinishDate) || weekStartDate, [payrollFinishDate, weekStartDate]);
+  const weekEndDate = useMemo(() => addDays(selectedPeriodFinishDate, 1), [selectedPeriodFinishDate]);
+  const selectedPeriodDayCount = useMemo(
+    () => Math.max(1, daysBetweenDateOnly(weekStartDate, selectedPeriodFinishDate) + 1),
+    [weekStartDate, selectedPeriodFinishDate]
+  );
+  const selectedPeriodWindow = useMemo(
+    () => getDateRangeWindow(payrollStartDate, payrollFinishDate),
+    [payrollStartDate, payrollFinishDate]
+  );
 
   const monthStartDate = useMemo(() => {
-    const d = new Date(`${weekStart}T00:00:00`);
+    const d = new Date(weekStartDate);
     d.setDate(1);
     d.setHours(0, 0, 0, 0);
     return d;
-  }, [weekStart]);
+  }, [weekStartDate]);
+
+  function applyPayrollCycleFromReference(referenceDateValue = payrollReferenceDate) {
+    const nextRange = getPayrollCycleRangeForReferenceDate(referenceDateValue);
+    setPayrollReferenceDate(referenceDateValue);
+    setPayrollStartDate(nextRange.startDate);
+    setPayrollFinishDate(nextRange.finishDate);
+  }
+
+  useEffect(() => {
+    if (selectedPeriodFinishDate < weekStartDate) {
+      setPayrollFinishDate(payrollStartDate);
+    }
+  }, [payrollStartDate, payrollFinishDate, weekStartDate, selectedPeriodFinishDate]);
 
   const currentUser = useMemo(() => {
     const fromState = state.users.find((u) => u.id === sessionUserId) || null;
@@ -1902,38 +2101,82 @@ export default function Page() {
     return manageableClientIds.has(clientId);
   }
 
-  const shiftsInSelectedWeek = useMemo(() => {
+  const shiftsInSelectedPeriod = useMemo(() => {
+    if (!selectedPeriodWindow) return [];
     return (state.shifts || []).filter((sh) => {
-      const s = new Date(sh.startISO);
-      return s >= weekStartDate && s < weekEndDate;
+      return overlapsWindow(sh.startISO, sh.endISO, selectedPeriodWindow.startISO, selectedPeriodWindow.endExclusiveISO);
     });
-  }, [state.shifts, weekStartDate, weekEndDate]);
+  }, [state.shifts, selectedPeriodWindow]);
 
-  const weekClientHours = useMemo(() => {
+  const periodClientHours = useMemo(() => {
     const byClient = {};
-    for (const sh of shiftsInSelectedWeek) {
+    if (!selectedPeriodWindow) return byClient;
+    for (const sh of shiftsInSelectedPeriod) {
       const id = sh.clientId;
       if (!id) continue;
       if (!byClient[id]) byClient[id] = { totalMin: 0, dayMin: 0, nightMin: 0 };
-      const { totalMin, dayMin, nightMin } = splitDayNightMinutes(sh.startISO, sh.endISO);
+      const { totalMin, dayMin, nightMin } = splitDayNightMinutesInWindow(
+        sh.startISO,
+        sh.endISO,
+        selectedPeriodWindow.startISO,
+        selectedPeriodWindow.endExclusiveISO
+      );
       byClient[id].totalMin += totalMin;
       byClient[id].dayMin += dayMin;
       byClient[id].nightMin += nightMin;
     }
     return byClient;
-  }, [shiftsInSelectedWeek]);
+  }, [shiftsInSelectedPeriod, selectedPeriodWindow]);
 
-  const staffWeekMinutesMap = useMemo(() => {
+  const staffPeriodMinutesMap = useMemo(() => {
     const out = {};
     for (const st of state.staff || []) {
-      out[st.id] = staffWeekMinutesDedup(shiftsInSelectedWeek, st.id);
+      out[st.id] = selectedPeriodWindow
+        ? staffMinutesDedupInWindow(shiftsInSelectedPeriod, st.id, selectedPeriodWindow.startISO, selectedPeriodWindow.endExclusiveISO)
+        : 0;
     }
     return out;
-  }, [state.staff, shiftsInSelectedWeek]);
+  }, [state.staff, shiftsInSelectedPeriod, selectedPeriodWindow]);
 
   const staffSharedSupportMinutesMap = useMemo(() => {
-    return getSharedSupportMinutesByStaff(shiftsInSelectedWeek, state.staff || []);
-  }, [state.staff, shiftsInSelectedWeek]);
+    if (!selectedPeriodWindow) return {};
+    return getSharedSupportMinutesByStaffInWindow(
+      shiftsInSelectedPeriod,
+      state.staff || [],
+      selectedPeriodWindow.startISO,
+      selectedPeriodWindow.endExclusiveISO
+    );
+  }, [state.staff, shiftsInSelectedPeriod, selectedPeriodWindow]);
+
+  const payrollBucketKeys = useMemo(() => {
+    const keys = Array.from(
+      new Set(
+        (shiftsInSelectedPeriod || [])
+          .map((sh) => getPayrollBucketStartKey(sh.startISO, payrollStartDate))
+          .filter(Boolean)
+      )
+    ).sort();
+    if (!keys.length && payrollStartDate) keys.push(payrollStartDate);
+    return keys;
+  }, [shiftsInSelectedPeriod, payrollStartDate]);
+
+  const staffPayrollBucketMinutesMap = useMemo(() => {
+    return payrollBucketKeys.reduce((acc, bucketKey) => {
+      acc[bucketKey] = getStaffHoursMapForBucket(shiftsInSelectedPeriod, state.staff || [], bucketKey);
+      return acc;
+    }, {});
+  }, [payrollBucketKeys, shiftsInSelectedPeriod, state.staff]);
+
+  const staffOtMinutesByPeriod = useMemo(() => {
+    const out = {};
+    for (const st of state.staff || []) {
+      out[st.id] = payrollBucketKeys.reduce((sum, bucketKey) => {
+        const bucketMinutes = staffPayrollBucketMinutesMap[bucketKey]?.[st.id] || 0;
+        return sum + Math.max(0, bucketMinutes - OT_THRESHOLD_MIN);
+      }, 0);
+    }
+    return out;
+  }, [state.staff, payrollBucketKeys, staffPayrollBucketMinutesMap]);
 
   const crossWeekConsecutiveProtection = !!state.settings?.crossWeekConsecutiveProtection;
   const maxConsecutiveDays = Math.max(1, Number(state.settings?.maxConsecutiveDays) || 6);
@@ -1948,20 +2191,85 @@ export default function Page() {
     clientId2: "",
     clientId3: "",
     staffId: "",
-    startDate: weekStart,
+    startDate: payrollStartDate,
     startTime: "07:00",
-    endDate: weekStart,
+    endDate: payrollFinishDate,
     endTime: "15:00",
     staffingType: "single",
     isShared: false,
     sharedGroupId: "",
   });
+  const [extraShiftRows, setExtraShiftRows] = useState([]);
+  const [shiftRowErrors, setShiftRowErrors] = useState({});
+
+  function createShiftRowDraft(defaults = {}) {
+    return normalizeShiftDraftDates({
+      staffId: "",
+      startDate: payrollStartDate,
+      startTime: "07:00",
+      endDate: payrollStartDate,
+      endTime: "15:00",
+      staffingType: "single",
+      isShared: false,
+      clientId2: "",
+      clientId3: "",
+      sharedGroupId: "",
+      ...defaults,
+    });
+  }
+
+  function clearShiftRowError(rowKey) {
+    setShiftRowErrors((prev) => {
+      if (!prev[rowKey]) return prev;
+      const next = { ...prev };
+      delete next[rowKey];
+      return next;
+    });
+  }
+
+  function updateExtraShiftRow(index, updater) {
+    setExtraShiftRows((prev) => prev.map((row, rowIndex) => {
+      if (rowIndex !== index) return row;
+      const nextRow = typeof updater === "function" ? updater(row) : { ...row, ...updater };
+      return normalizeShiftDraftDates(nextRow);
+    }));
+    clearShiftRowError(`extra_${index}`);
+  }
+
+  function addShiftRow() {
+    setExtraShiftRows((prev) => [
+      ...prev,
+      createShiftRowDraft({
+        startDate: shiftDraft.startDate,
+        startTime: shiftDraft.startTime,
+        endDate: shiftDraft.endDate,
+        endTime: shiftDraft.endTime,
+        staffingType: shiftDraft.staffingType,
+        isShared: shiftDraft.isShared,
+      }),
+    ]);
+  }
+
+  function removeShiftRow(index) {
+    setExtraShiftRows((prev) => prev.filter((_, rowIndex) => rowIndex !== index));
+    setShiftRowErrors({});
+  }
 
   const shiftDraftStaffingType = useMemo(
     () => normalizeDraftStaffingType(shiftDraft.staffingType || (shiftDraft.isShared ? "shared2" : "single")),
     [shiftDraft.staffingType, shiftDraft.isShared]
   );
   const draftIsSharedSupport = shiftDraftStaffingType !== "single";
+
+  const draftPayrollBucketKey = useMemo(
+    () => getPayrollBucketStartKey(shiftDraft.startDate || payrollStartDate, payrollStartDate) || payrollStartDate,
+    [shiftDraft.startDate, payrollStartDate]
+  );
+
+  const staffDraftBucketMinutesMap = useMemo(
+    () => getStaffHoursMapForBucket(state.shifts || [], state.staff || [], draftPayrollBucketKey),
+    [state.shifts, state.staff, draftPayrollBucketKey]
+  );
 
   // Auto-suggest staff for shift
   const suggestedStaff = useMemo(() => {
@@ -1994,7 +2302,7 @@ export default function Page() {
       });
       if (projectedStreak > maxConsecutiveDays) continue;
       // Compute OT after this shift
-      const min = staffWeekMinutesMap[st.id] || 0;
+      const min = staffDraftBucketMinutesMap[st.id] || 0;
       const addMin = minutesBetweenISO(startISO, endISO);
       const afterMin = min + addMin;
       const ot = Math.max(0, afterMin - OT_THRESHOLD_MIN);
@@ -2010,7 +2318,7 @@ export default function Page() {
     shiftDraft,
     state.staff,
     state.shifts,
-    staffWeekMinutesMap,
+    staffDraftBucketMinutesMap,
     weekStartDate,
     weekEndDate,
     crossWeekConsecutiveProtection,
@@ -2024,8 +2332,6 @@ export default function Page() {
   const [builderScheduleSource, setBuilderScheduleSource] = useState("template"); // template | client | custom
   const [builderCustomTemplate, setBuilderCustomTemplate] = useState("07:00-15:00\n15:00-23:00\n23:00-07:00");
   const [builderBlockAssignments, setBuilderBlockAssignments] = useState({});
-  const [builderWeeks, setBuilderWeeks] = useState(1); // how many weeks to generate (1 = current week, 4 = month)
-  const [builderRepeatInterval, setBuilderRepeatInterval] = useState(1); // every N weeks
   const [builderSummary, setBuilderSummary] = useState(null);
   const clientSchedule = useMemo(() => {
     return builderClientId ? loadClientSchedule(builderClientId) : null;
@@ -2082,13 +2388,25 @@ export default function Page() {
   );
   const builderStaffPool = useMemo(() => activeStaff, [activeStaff]);
 
-  // keep startDate aligned with week when week changes, but preserve endDate if user set it differently
+  const previousPayrollRangeRef = useRef({ start: payrollStartDate, finish: payrollFinishDate });
+
+  // keep shift draft aligned with the selected payroll range unless the user has manually overridden it
   useEffect(() => {
+    const previous = previousPayrollRangeRef.current;
     setShiftDraft((p) => {
-      // Only update startDate; let endDate be user-controlled for multi-day shifts
-      return { ...p, startDate: weekStart };
+      const next = { ...p };
+      if (!p.startDate || p.startDate === previous.start) next.startDate = payrollStartDate;
+      if (!p.endDate || p.endDate === previous.finish || p.endDate === previous.start) next.endDate = payrollFinishDate;
+      return next;
     });
-  }, [weekStart]);
+    setExtraShiftRows((rows) => rows.map((row) => {
+      const next = { ...row };
+      if (!row.startDate || row.startDate === previous.start) next.startDate = payrollStartDate;
+      if (!row.endDate || row.endDate === previous.finish || row.endDate === previous.start) next.endDate = payrollFinishDate;
+      return normalizeShiftDraftDates(next);
+    }));
+    previousPayrollRangeRef.current = { start: payrollStartDate, finish: payrollFinishDate };
+  }, [payrollStartDate, payrollFinishDate]);
 
   // Load stored client schedule template into the builder when selecting a client
   useEffect(() => {
@@ -2126,6 +2444,234 @@ export default function Page() {
     return `${dateStr}T${timeStr}:00`;
   }
 
+  function resetPrimaryShiftDraft() {
+    setShiftDraft((prev) => createShiftRowDraft({ clientId: prev.clientId || "" }));
+  }
+
+  async function prepareRowsForShiftDraft({ draft, commonClientId, planned = [], rowLabel }) {
+    const clientId = commonClientId || draft.clientId;
+    const { clientId2, clientId3, staffId, startDate, startTime, endDate, endTime } = draft;
+    const staffingType = normalizeDraftStaffingType(draft.staffingType || (draft.isShared ? "shared2" : "single"));
+    const isShared = staffingType !== "single";
+    const extraClientIds = staffingType === "shared3"
+      ? [clientId2, clientId3]
+      : staffingType === "shared2"
+        ? [clientId2]
+        : [];
+    const selectedClientIds = [clientId, ...extraClientIds].filter(Boolean);
+    const errors = [];
+
+    if (!clientId) errors.push("Pick a client at the top of the form.");
+    if (!staffId) errors.push("Pick a staff member.");
+    if (!startDate || !startTime || !endDate || !endTime) errors.push("Start and end date/time are required.");
+
+    if (staffingType === "shared2" && !clientId2) {
+      errors.push("Client 2 is required for 2-to-1 staffing.");
+    }
+    if (staffingType === "shared3" && (!clientId2 || !clientId3)) {
+      errors.push("Client 2 and Client 3 are required for 3-to-1 staffing.");
+    }
+    if (selectedClientIds.length && new Set(selectedClientIds).size !== selectedClientIds.length) {
+      errors.push("All selected clients must be different.");
+    }
+    if (clientId && !canManageClientId(clientId)) {
+      errors.push("You can only create shifts for your assigned clients.");
+    }
+    for (const sharedClientId of extraClientIds) {
+      if (sharedClientId && !canManageClientId(sharedClientId)) {
+        errors.push("You can only create shared shifts for your assigned clients.");
+      }
+    }
+    if (errors.length) return { errors, rows: [], planned };
+
+    const shouldSplitDaily = shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime);
+
+    let windows = [];
+    if (shouldSplitDaily) {
+      windows = buildSeparateDailyShifts(startDate, endDate, startTime, endTime);
+    } else {
+      const startISO = toISO(startDate, startTime);
+      let endISO = toISO(endDate, endTime);
+
+      if (new Date(endISO) <= new Date(startISO) && startDate === endDate) {
+        const nextDay = addDays(new Date(`${startDate}T00:00:00`), 1);
+        endISO = `${isoLocal(nextDay).slice(0, 10)}T${endTime}:00`;
+      }
+
+      if (new Date(endISO) <= new Date(startISO)) {
+        return { errors: ["End must be after start."], rows: [], planned };
+      }
+      windows = [{ startISO, endISO, dateStr: startDate }];
+    }
+
+    if (!windows.length) {
+      return { errors: ["No valid shift windows were generated for this row."], rows: [], planned };
+    }
+
+    const sharedGroupBase = isShared
+      ? (String(draft.sharedGroupId || "").trim() || `SS-${Date.now().toString().slice(-6)}`)
+      : "";
+
+    const createdBy = currentUser?.id || "unknown";
+    const rows = [];
+    const nextPlanned = [...planned];
+    const projectedMinutesByBucket = {};
+
+    for (let idx = 0; idx < windows.length; idx++) {
+      const { startISO, endISO } = windows[idx];
+      const payrollBucketKey = getPayrollBucketStartKey(startISO, payrollStartDate) || payrollStartDate;
+      const sharedGroupId = isShared
+        ? (windows.length > 1 ? `${sharedGroupBase}-${startISO.slice(0, 10)}` : sharedGroupBase)
+        : "";
+
+      const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
+      const localConflicts = nextPlanned.filter((p) => overlaps(p.startISO, p.endISO, startISO, endISO));
+      const localAsDbShape = localConflicts.map((p) => ({
+        ...p,
+        clientId,
+        isShared: !!isShared,
+        sharedGroupId,
+      }));
+
+      const illegalConflicts = [...conflicts, ...localAsDbShape].filter((c) => {
+        if (!isShared) return true;
+        return !(
+          c.isShared
+          && c.sharedGroupId === sharedGroupId
+          && c.startISO === startISO
+          && c.endISO === endISO
+        );
+      });
+
+      if (illegalConflicts.length) {
+        const first = illegalConflicts[0];
+        const conflictClient = (state.clients || []).find((x) => x.id === first.clientId);
+        const sup = (state.users || []).find((u) => u.id === (conflictClient?.supervisorId || ""));
+        const message =
+          `${rowLabel}: conflict with ${conflictClient?.name || "Unknown"}` +
+          ` (${sup ? sup.name : "Unassigned"})` +
+          ` at ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}.`;
+        if (state.settings?.hardStopConflicts) {
+          return { errors: [message], rows: [], planned };
+        }
+        if (!confirm(`${message}\n\nContinue anyway?`)) {
+          return { errors: [message], rows: [], planned };
+        }
+      }
+
+      const workedDaysStreak = projectedConsecutiveStreak({
+        allShifts: [...(state.shifts || []), ...nextPlanned],
+        staffId,
+        weekStartDate,
+        weekEndDate,
+        crossWeekProtection: crossWeekConsecutiveProtection,
+        candidateShift: {
+          id: `candidate_${rowLabel}_${idx}`,
+          staffId,
+          startISO,
+          endISO,
+        },
+      });
+      if (workedDaysStreak > maxConsecutiveDays) {
+        const message =
+          `${rowLabel}: projected consecutive days would be ${workedDaysStreak} ` +
+          `(max ${maxConsecutiveDays}) for ${formatShiftDateTimeFromISO(startISO)} → ${formatShiftDateTimeFromISO(endISO)}.`;
+        if (state.settings?.hardStopConflicts) {
+          return { errors: [message], rows: [], planned };
+        }
+        if (!confirm(`${message}\n\nContinue anyway?`)) {
+          return { errors: [message], rows: [], planned };
+        }
+      }
+
+      if (wouldExceed16HoursIn24(staffId, startISO, endISO, [...(state.shifts || []), ...nextPlanned])) {
+        return {
+          errors: [`${rowLabel}: this staff would exceed 16 hours in a 24-hour period.`],
+          rows: [],
+          planned,
+        };
+      }
+
+      const currentBucketMinutes = projectedMinutesByBucket[payrollBucketKey]
+        ?? getStaffHoursMapForBucket([...(state.shifts || []), ...nextPlanned], [{ id: staffId }], payrollBucketKey)[staffId]
+        ?? 0;
+      const shiftMinutes = minutesBetweenISO(startISO, endISO);
+      const afterMin = currentBucketMinutes + shiftMinutes;
+      const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
+      if (otMin > 0 && !confirm(`${rowLabel}: this shift creates overtime (${fmtHoursFromMin(otMin)}).\n\nContinue?`)) {
+        return { errors: [`${rowLabel}: overtime was not approved.`], rows: [], planned };
+      }
+
+      projectedMinutesByBucket[payrollBucketKey] = afterMin;
+      nextPlanned.push({ id: `planned_${rowLabel}_${idx}`, staffId, startISO, endISO });
+
+      for (const selectedClientId of selectedClientIds) {
+        rows.push({
+          id: uid("sh"),
+          client_id: selectedClientId,
+          staff_id: staffId,
+          start_iso: startISO,
+          end_iso: endISO,
+          created_by: createdBy,
+          is_shared: !!isShared,
+          shared_group_id: sharedGroupId,
+        });
+      }
+    }
+
+    return { errors: [], rows, planned: nextPlanned };
+  }
+
+  async function saveShiftDraftEntries(entries, { keepSavedFailures = false } = {}) {
+    const commonClientId = shiftDraft.clientId;
+    const nextErrors = {};
+    const rowsToSave = [];
+    let planned = [];
+
+    for (const entry of entries) {
+      const result = await prepareRowsForShiftDraft({
+        draft: entry.draft,
+        commonClientId,
+        planned,
+        rowLabel: entry.label,
+      });
+      if (result.errors.length) {
+        nextErrors[entry.key] = result.errors;
+        continue;
+      }
+      rowsToSave.push(...result.rows);
+      planned = result.planned;
+    }
+
+    if (!rowsToSave.length) {
+      setShiftRowErrors(nextErrors);
+      return { saved: 0, errors: nextErrors };
+    }
+
+    await sbUpsert("shifts", rowsToSave);
+    await refreshState(setState);
+
+    if (!nextErrors.primary) {
+      resetPrimaryShiftDraft();
+    }
+
+    if (keepSavedFailures) {
+      const failedExtraEntries = entries.filter((entry) => entry.key.startsWith("extra_") && nextErrors[entry.key]);
+      const remappedErrors = {};
+      if (nextErrors.primary) remappedErrors.primary = nextErrors.primary;
+      failedExtraEntries.forEach((entry, index) => {
+        remappedErrors[`extra_${index}`] = nextErrors[entry.key];
+      });
+      setExtraShiftRows(failedExtraEntries.map((entry) => entry.draft));
+      setShiftRowErrors(remappedErrors);
+    } else {
+      setExtraShiftRows([]);
+      setShiftRowErrors(nextErrors);
+    }
+
+    return { saved: rowsToSave.length, errors: nextErrors };
+  }
+
   async function runBuilder() {
     if (!builderClientId) return alert("Pick a client for the builder.");
     if (!canManageClientId(builderClientId)) {
@@ -2141,10 +2687,9 @@ export default function Page() {
 
     const { rows, generatedShifts } = createShiftRowsFromTemplate({
       clientId: client.id,
-      weekStartDate,
+      rangeStartDate: payrollStartDate,
+      rangeFinishDate: payrollFinishDate,
       shiftsDef,
-      weeks: builderWeeks,
-      repeatInterval: builderRepeatInterval,
       assignments: builderBlockAssignments,
       createdBy: currentUser?.id || "builder",
     });
@@ -2158,6 +2703,8 @@ export default function Page() {
       existingShifts: state.shifts || [],
       generatedShifts,
       staffList: activeStaff,
+      payrollStartDate,
+      payrollFinishDate,
     });
 
     setBuilderSummary(summary);
@@ -2224,185 +2771,35 @@ export default function Page() {
   }
 
   async function addShift() {
-    // Works with Supabase or localStorage fallback via sbUpsert
-
-    const { clientId, clientId2, clientId3, staffId, startDate, startTime, endDate, endTime } = shiftDraft;
-    const staffingType = normalizeDraftStaffingType(shiftDraft.staffingType || (shiftDraft.isShared ? "shared2" : "single"));
-    const isShared = staffingType !== "single";
-    const extraClientIds = staffingType === "shared3"
-      ? [clientId2, clientId3]
-      : staffingType === "shared2"
-        ? [clientId2]
-        : [];
-    const selectedClientIds = [clientId, ...extraClientIds].filter(Boolean);
-
-    if (!clientId || !staffId) return alert("Pick a client and staff.");
-    if (!canManageClientId(clientId)) {
-      return alert("You can only create shifts for your assigned clients.");
+    clearShiftRowError("primary");
+    const result = await saveShiftDraftEntries([
+      { key: "primary", draft: shiftDraft, label: "Shift row 1" },
+    ]);
+    if (result.saved === 0 && result.errors.primary?.length) {
+      alert(result.errors.primary.join("\n"));
     }
+  }
 
-    if (staffingType === "shared2" && !clientId2) {
-      return alert("Client 2 is required for 2-to-1 staffing.");
+  async function saveAllShifts() {
+    clearShiftRowError("primary");
+    const entries = [
+      { key: "primary", draft: shiftDraft, label: "Shift row 1" },
+      ...extraShiftRows.map((row, index) => ({
+        key: `extra_${index}`,
+        draft: row,
+        label: `Shift row ${index + 2}`,
+      })),
+    ];
+    const result = await saveShiftDraftEntries(entries, { keepSavedFailures: true });
+    if (result.saved > 0 && Object.keys(result.errors).length > 0) {
+      alert(`Saved ${result.saved} shift record(s). Some rows still need attention.`);
+      return;
     }
-    if (staffingType === "shared3" && (!clientId2 || !clientId3)) {
-      return alert("Client 2 and Client 3 are required for 3-to-1 staffing.");
+    if (result.saved > 0) {
+      alert(`Saved ${result.saved} shift record(s).`);
+      return;
     }
-    if (new Set(selectedClientIds).size !== selectedClientIds.length) {
-      return alert("All selected clients must be different.");
-    }
-    for (const sharedClientId of extraClientIds) {
-      if (!canManageClientId(sharedClientId)) {
-        return alert("You can only create shared shifts for your assigned clients.");
-      }
-    }
-
-    const shouldSplitDaily = shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime);
-
-    let windows = [];
-    if (shouldSplitDaily) {
-      windows = buildSeparateDailyShifts(startDate, endDate, startTime, endTime);
-    } else {
-      const startISO = toISO(startDate, startTime);
-      let endISO = toISO(endDate, endTime);
-
-      // Single-day overnight fallback: 19:00 -> 07:00 becomes next day.
-      if (new Date(endISO) <= new Date(startISO) && startDate === endDate) {
-        const nd = addDays(new Date(`${startDate}T00:00:00`), 1);
-        endISO = `${isoLocal(nd).slice(0, 10)}T${endTime}:00`;
-      }
-
-      if (new Date(endISO) <= new Date(startISO)) return alert("End must be after start.");
-      windows = [{ startISO, endISO, dateStr: startDate }];
-    }
-
-    if (!windows.length) return alert("No valid shift windows were generated for the selected date range.");
-
-    const sharedGroupBase = isShared
-      ? (shiftDraft.sharedGroupId.trim() || `SS-${Date.now().toString().slice(-6)}`)
-      : "";
-
-    const createdBy = currentUser?.id || "unknown";
-    const rows = [];
-    const planned = [];
-    let projectedMinutes = staffWeekMinutesMap[staffId] || 0;
-
-    for (let idx = 0; idx < windows.length; idx++) {
-      const { startISO, endISO } = windows[idx];
-      const sharedGroupId = isShared
-        ? (windows.length > 1 ? `${sharedGroupBase}-${startISO.slice(0, 10)}` : sharedGroupBase)
-        : "";
-
-      // Check conflicts globally for each generated daily shift.
-      const conflicts = await findStaffConflictsDB({ staffId, startISO, endISO });
-
-      // Also block conflicts against already-planned windows in this same add action.
-      const localConflicts = planned.filter((p) => overlaps(p.startISO, p.endISO, startISO, endISO));
-      const localAsDbShape = localConflicts.map((p) => ({
-        ...p,
-        clientId,
-        isShared: !!isShared,
-        sharedGroupId,
-      }));
-
-      const illegalConflicts = [...conflicts, ...localAsDbShape].filter((c) => {
-        if (!isShared) return true;
-        return !(
-          c.isShared &&
-          c.sharedGroupId === sharedGroupId &&
-          c.startISO === startISO &&
-          c.endISO === endISO
-        );
-      });
-
-      if (illegalConflicts.length) {
-        const first = illegalConflicts[0];
-        const conflictClient = (state.clients || []).find((x) => x.id === first.clientId);
-        const sup = (state.users || []).find((u) => u.id === (conflictClient?.supervisorId || ""));
-        const msg =
-          `Conflict: staff already scheduled.\n\n` +
-          `Client: ${conflictClient?.name || "Unknown"}\n` +
-          `Supervisor: ${sup ? sup.name : "Unassigned"}\n` +
-          `Time: ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}`;
-
-        if (state.settings?.hardStopConflicts) return alert(msg);
-        if (!confirm(msg + "\n\nContinue anyway?")) return;
-      }
-
-      const workedDaysStreak = projectedConsecutiveStreak({
-        allShifts: [...(state.shifts || []), ...planned],
-        staffId,
-        weekStartDate,
-        weekEndDate,
-        crossWeekProtection: crossWeekConsecutiveProtection,
-        candidateShift: {
-          id: `candidate_${idx}`,
-          staffId,
-          startISO,
-          endISO,
-        },
-      });
-      if (workedDaysStreak > maxConsecutiveDays) {
-        const msg =
-          `Consecutive-day limit reached.\n\n` +
-          `Projected streak: ${workedDaysStreak} days\n` +
-          `Max allowed: ${maxConsecutiveDays} days\n` +
-          `Shift: ${formatShiftDateTimeFromISO(startISO)} → ${formatShiftDateTimeFromISO(endISO)}\n\n` +
-          (crossWeekConsecutiveProtection
-            ? "Cross-week consecutive protection is ON."
-            : "Only the selected week is included in this check.");
-
-        if (state.settings?.hardStopConflicts) return alert(msg);
-        if (!confirm(msg + "\n\nContinue anyway?")) return;
-      }
-
-      const newMin = minutesBetweenISO(startISO, endISO);
-
-      if (
-        wouldExceed16HoursIn24(
-          staffId,
-          startISO,
-          endISO,
-          [...(state.shifts || []), ...planned]
-        )
-      ) {
-        alert("This staff cannot be scheduled because it would exceed 16 hours in a 24-hour period.");
-        return;
-      }
-
-      const afterMin = projectedMinutes + newMin;
-      const otMin = Math.max(0, afterMin - OT_THRESHOLD_MIN);
-      if (otMin > 0) {
-        if (!confirm(`This shift will create overtime: ${fmtHoursFromMin(otMin)}.\n\nContinue?`)) return;
-      }
-
-      projectedMinutes = afterMin;
-      planned.push({ id: `planned_${idx}`, staffId, startISO, endISO });
-
-      for (const selectedClientId of selectedClientIds) {
-        rows.push({
-          id: uid("sh"),
-          client_id: selectedClientId,
-          staff_id: staffId,
-          start_iso: startISO,
-          end_iso: endISO,
-          created_by: createdBy,
-          is_shared: !!isShared,
-          shared_group_id: sharedGroupId,
-        });
-      }
-    }
-
-    await sbUpsert("shifts", rows);
-    // refresh UI and reset draft
-    await refreshState(setState);
-    setShiftDraft((p) => ({
-      ...p,
-      staffingType: "single",
-      isShared: false,
-      clientId2: "",
-      clientId3: "",
-      sharedGroupId: "",
-    }));
+    alert("No shifts were saved. Check the row errors and try again.");
   }
 
   async function deleteShift(id) {
@@ -2623,15 +3020,14 @@ export default function Page() {
   // Memo: all shifts for selected client in selected week
   const selectedClientShifts = useMemo(() => {
     if (!selectedClientId) return [];
+    if (!selectedPeriodWindow) return [];
     return (state.shifts || [])
       .filter(sh => sh.clientId === selectedClientId)
       .filter(sh => {
-        // Only shifts in the selected week
-        const shStart = new Date(sh.startISO);
-        return shStart >= weekStartDate && shStart < weekEndDate;
+        return overlapsWindow(sh.startISO, sh.endISO, selectedPeriodWindow.startISO, selectedPeriodWindow.endExclusiveISO);
       })
       .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-  }, [state.shifts, selectedClientId, weekStartDate, weekEndDate]);
+  }, [state.shifts, selectedClientId, selectedPeriodWindow]);
 
   // Memo: unique staff assigned to this client in selected week, with total minutes
   const selectedClientStaffSummary = useMemo(() => {
@@ -2640,22 +3036,26 @@ export default function Page() {
     for (const sh of selectedClientShifts) {
       if (!sh.staffId) continue;
       if (!staffMap[sh.staffId]) staffMap[sh.staffId] = { staff: (state.staff || []).find(s => s.id === sh.staffId), min: 0 };
-      staffMap[sh.staffId].min += minutesBetweenISO(sh.startISO, sh.endISO);
+      staffMap[sh.staffId].min += selectedPeriodWindow
+        ? splitShiftIntoWindowMinutes(sh.startISO, sh.endISO, selectedPeriodWindow.startISO, selectedPeriodWindow.endExclusiveISO)
+        : 0;
     }
     return Object.values(staffMap).sort((a, b) => (a.staff?.name || "").localeCompare(b.staff?.name || ""));
-  }, [selectedClientShifts, state.staff]);
+  }, [selectedClientShifts, selectedPeriodWindow, state.staff]);
 
-  // Memo: client weekly hours summary (total, day, night, remaining)
+  // Memo: client payroll-period hours summary (total, day, night, remaining)
   const selectedClientWeekHours = useMemo(() => {
     let totalMin = 0, dayMin = 0, nightMin = 0;
     for (const sh of selectedClientShifts) {
-      const { totalMin: t, dayMin: d, nightMin: n } = splitDayNightMinutes(sh.startISO, sh.endISO);
+      const { totalMin: t, dayMin: d, nightMin: n } = selectedPeriodWindow
+        ? splitDayNightMinutesInWindow(sh.startISO, sh.endISO, selectedPeriodWindow.startISO, selectedPeriodWindow.endExclusiveISO)
+        : { totalMin: 0, dayMin: 0, nightMin: 0 };
       totalMin += t; dayMin += d; nightMin += n;
     }
-    const allottedMin = (Number(selectedClient?.weeklyHours) || 0) * 60;
+    const allottedMin = getMinutesForWeeklyHoursAcrossRange(selectedClient?.weeklyHours, selectedPeriodDayCount);
     const remainingMin = allottedMin - totalMin;
     return { totalMin, dayMin, nightMin, allottedMin, remainingMin };
-  }, [selectedClientShifts, selectedClient]);
+  }, [selectedClientShifts, selectedClient, selectedPeriodDayCount, selectedPeriodWindow]);
 
   const selectedClientAssignedStaffIds = useMemo(() => {
     if (!selectedClientId) return [];
@@ -2676,9 +3076,9 @@ export default function Page() {
     const q = staffHoursSearch.trim().toLowerCase();
     return (state.staff || [])
       .map((st) => {
-        const min = staffWeekMinutesMap[st.id] || 0;
+        const min = staffPeriodMinutesMap[st.id] || 0;
         const sharedSupportMin = staffSharedSupportMinutesMap[st.id] || 0;
-        const otMin = Math.max(0, min - OT_THRESHOLD_MIN);
+        const otMin = staffOtMinutesByPeriod[st.id] || 0;
         return { st, min, otMin, sharedSupportMin };
       })
       .filter(({ st, min, otMin, sharedSupportMin }) => {
@@ -2689,14 +3089,14 @@ export default function Page() {
         return String(st.name || "").toLowerCase().includes(q);
       })
       .sort((a, b) => b.min - a.min || String(a.st.name || "").localeCompare(String(b.st.name || "")));
-  }, [state.staff, staffWeekMinutesMap, staffSharedSupportMinutesMap, staffHoursSearch, staffHoursFilter]);
+  }, [state.staff, staffPeriodMinutesMap, staffOtMinutesByPeriod, staffSharedSupportMinutesMap, staffHoursSearch, staffHoursFilter]);
 
   const clientHoursRows = useMemo(() => {
     const q = clientHoursSearch.trim().toLowerCase();
     return (visibleClients || [])
       .map((c) => {
-        const h = weekClientHours[c.id] || { totalMin: 0, dayMin: 0, nightMin: 0 };
-        const allottedMin = (Number(c.weeklyHours) || 0) * 60;
+        const h = periodClientHours[c.id] || { totalMin: 0, dayMin: 0, nightMin: 0 };
+        const allottedMin = getMinutesForWeeklyHoursAcrossRange(c.weeklyHours, selectedPeriodDayCount);
         const remainingMin = allottedMin - h.totalMin;
         return { c, h, allottedMin, remainingMin };
       })
@@ -2706,16 +3106,16 @@ export default function Page() {
         return String(c.name || "").toLowerCase().includes(q);
       })
       .sort((a, b) => b.h.totalMin - a.h.totalMin || String(a.c.name || "").localeCompare(String(b.c.name || "")));
-  }, [visibleClients, weekClientHours, clientHoursSearch, showAllClientHours]);
+  }, [visibleClients, periodClientHours, clientHoursSearch, selectedPeriodDayCount, showAllClientHours]);
 
   const hoursSummary = useMemo(() => {
-    const staffWorking = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > 0).length;
-    const staffInOt = (state.staff || []).filter((st) => (staffWeekMinutesMap[st.id] || 0) > OT_THRESHOLD_MIN).length;
+    const staffWorking = (state.staff || []).filter((st) => (staffPeriodMinutesMap[st.id] || 0) > 0).length;
+    const staffInOt = (state.staff || []).filter((st) => (staffOtMinutesByPeriod[st.id] || 0) > 0).length;
     const totalSharedSupportMin = (state.staff || []).reduce((sum, st) => sum + (staffSharedSupportMinutesMap[st.id] || 0), 0);
-    const clientsWithHours = (visibleClients || []).filter((c) => (weekClientHours[c.id]?.totalMin || 0) > 0).length;
-    const totalClientMin = (visibleClients || []).reduce((sum, c) => sum + (weekClientHours[c.id]?.totalMin || 0), 0);
+    const clientsWithHours = (visibleClients || []).filter((c) => (periodClientHours[c.id]?.totalMin || 0) > 0).length;
+    const totalClientMin = (visibleClients || []).reduce((sum, c) => sum + (periodClientHours[c.id]?.totalMin || 0), 0);
     return { staffWorking, staffInOt, totalSharedSupportMin, clientsWithHours, totalClientMin };
-  }, [state.staff, staffWeekMinutesMap, staffSharedSupportMinutesMap, visibleClients, weekClientHours]);
+  }, [state.staff, staffPeriodMinutesMap, staffOtMinutesByPeriod, staffSharedSupportMinutesMap, visibleClients, periodClientHours]);
 
   if (!mounted) return null;
 
@@ -2765,18 +3165,37 @@ export default function Page() {
 
         <div className="no-print" style={{ marginTop: 4, display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center", paddingBottom: 2 }}>
           <Tabs value={tab} onChange={setTab} tabs={tabs} />
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <div style={styles.tiny}>Week start</div>
-            <input
-              style={{ ...styles.input, width: 160, padding: "7px 9px" }}
-              type="date"
-              value={weekStart}
-              onChange={(e) => {
-                const sunday = startOfWeekSunday(`${e.target.value}T00:00:00`);
-                if (!sunday) return;
-                setWeekStart(isoLocal(sunday).slice(0, 10));
-              }}
-            />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(140px, auto))", gap: 6, alignItems: "end" }}>
+            <div>
+              <div style={styles.tiny}>Payroll Start Date</div>
+              <input
+                style={{ ...styles.input, width: 150, padding: "7px 9px" }}
+                type="date"
+                value={payrollStartDate}
+                onChange={(e) => setPayrollStartDate(e.target.value)}
+              />
+            </div>
+            <div>
+              <div style={styles.tiny}>Payroll Finish Date</div>
+              <input
+                style={{ ...styles.input, width: 150, padding: "7px 9px" }}
+                type="date"
+                value={payrollFinishDate}
+                onChange={(e) => setPayrollFinishDate(e.target.value)}
+              />
+            </div>
+            <div>
+              <div style={styles.tiny}>Payroll Reference Date</div>
+              <input
+                style={{ ...styles.input, width: 150, padding: "7px 9px" }}
+                type="date"
+                value={payrollReferenceDate}
+                onChange={(e) => setPayrollReferenceDate(e.target.value)}
+              />
+            </div>
+            <button style={{ ...styles.btn2, height: 34 }} onClick={() => applyPayrollCycleFromReference()}>
+              Auto-fill Cycle
+            </button>
           </div>
         </div>
 
@@ -2799,208 +3218,278 @@ export default function Page() {
       </button>
     </div>
 
-    <div style={{ marginTop: 10, ...styles.grid4 }}>
-      <div>
-        <div style={styles.tiny}>Staffing Type</div>
-        <select
-          style={styles.select}
-          value={shiftDraftStaffingType}
-          onChange={(e) => {
-            const nextType = normalizeDraftStaffingType(e.target.value);
-            setShiftDraft((p) => ({
-              ...p,
-              staffingType: nextType,
-              isShared: nextType !== "single",
-              clientId2: nextType === "single" ? "" : p.clientId2,
-              clientId3: nextType === "shared3" ? p.clientId3 : "",
-              sharedGroupId: nextType === "single" ? "" : p.sharedGroupId,
-            }));
-          }}
-        >
-          <option value="single">Normal 1:1</option>
-          <option value="shared2">Shared Support 2:1</option>
-          <option value="shared3">Shared Support 3:1</option>
-        </select>
-      </div>
-
-      <div>
-        <div style={styles.tiny}>Client 1</div>
-        <select
-          style={styles.select}
-          value={shiftDraft.clientId}
-          onChange={(e) =>
-            setShiftDraft((p) => ({
-              ...p,
-              clientId: e.target.value,
-              clientId2: p.clientId2 === e.target.value ? "" : p.clientId2,
-              clientId3: p.clientId3 === e.target.value ? "" : p.clientId3,
-            }))
-          }
-        >
-          <option value="">Select…</option>
-          {visibleClients.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div>
-        <div style={styles.tiny}>Staff</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+    <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 320px) 1fr", gap: 10, alignItems: "end" }}>
+        <div>
+          <div style={styles.tiny}>Client 1</div>
           <select
             style={styles.select}
-            value={shiftDraft.staffId}
-            onChange={(e) =>
-              setShiftDraft((p) => ({ ...p, staffId: e.target.value }))
-            }
+            value={shiftDraft.clientId}
+            onChange={(e) => {
+              clearShiftRowError("primary");
+              setShiftDraft((p) => ({
+                ...p,
+                clientId: e.target.value,
+                clientId2: p.clientId2 === e.target.value ? "" : p.clientId2,
+                clientId3: p.clientId3 === e.target.value ? "" : p.clientId3,
+              }));
+            }}
           >
             <option value="">Select…</option>
-            {suggestedStaff ? (
-              <option value={suggestedStaff.id}>
-                ⭐ Suggested: {suggestedStaff.name}
-              </option>
-            ) : null}
-            {(state.staff || []).filter((s) => !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
+            {visibleClients.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
-          {suggestedStaff && shiftDraft.staffId !== suggestedStaff.id ? (
-            <button
-              style={{ ...styles.btn2, padding: "2px 8px", fontSize: 13 }}
-              type="button"
-              onClick={() => setShiftDraft((p) => ({ ...p, staffId: suggestedStaff.id }))}
-            >
-              Suggest
-            </button>
-          ) : null}
         </div>
-        {suggestedStaff ? (
-          <div style={{ fontSize: 12, color: "#4cc9f0", marginTop: 2 }}>
-            Best match: {suggestedStaff.name} (no conflict, lowest OT)
-          </div>
-        ) : null}
-      </div>
-
-      <div>
-        <div style={styles.tiny}>Start</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            style={styles.input}
-            type="date"
-            value={shiftDraft.startDate}
-            onChange={(e) =>
-              setShiftDraft((p) => ({ ...p, startDate: e.target.value }))
-            }
-          />
-          <input
-            style={styles.input}
-            type="time"
-            value={shiftDraft.startTime}
-            onChange={(e) =>
-              setShiftDraft((p) => ({ ...p, startTime: e.target.value }))
-            }
-          />
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" style={styles.btn2} onClick={addShiftRow}>+ Add Shift Row</button>
+          <button type="button" style={styles.btn2} onClick={saveAllShifts}>Save All Shifts</button>
+          <button style={styles.btn} onClick={addShift}>Add Shift</button>
         </div>
       </div>
 
-      <div>
-        <div style={styles.tiny}>End</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            style={styles.input}
-            type="date"
-            value={shiftDraft.endDate}
-            onChange={(e) =>
-              setShiftDraft((p) => ({ ...p, endDate: e.target.value }))
-            }
-          />
-          <input
-            style={styles.input}
-            type="time"
-            value={shiftDraft.endTime}
-            onChange={(e) =>
-              setShiftDraft((p) => ({ ...p, endTime: e.target.value }))
-            }
-          />
-        </div>
-        <div style={styles.tiny}>
-          Auto bump end date if end time is earlier than start.
-        </div>
-      </div>
+      {[{ key: "primary", draft: shiftDraft, isPrimary: true }, ...extraShiftRows.map((draft, index) => ({ key: `extra_${index}`, draft, index, isPrimary: false }))].map((entry, visualIndex) => {
+        const rowDraft = entry.draft;
+        const rowStaffingType = normalizeDraftStaffingType(rowDraft.staffingType || (rowDraft.isShared ? "shared2" : "single"));
+        const rowIsSharedSupport = rowStaffingType !== "single";
+        const rowErrors = shiftRowErrors[entry.key] || [];
 
-      <div style={{ gridColumn: "1 / -1", display: "grid", gap: 8 }}>
-        {draftIsSharedSupport ? (
-          <div style={{ ...styles.grid4, gap: 8 }}>
-            <div>
-              <div style={styles.tiny}>Client 2</div>
-              <select
-                style={styles.select}
-                value={shiftDraft.clientId2 || ""}
-                onChange={(e) =>
-                  setShiftDraft((p) => ({ ...p, clientId2: e.target.value }))
-                }
-              >
-                <option value="">Select…</option>
-                {visibleClients
-                  .filter((c) => c.id !== shiftDraft.clientId && c.id !== shiftDraft.clientId3)
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-              </select>
+        return (
+          <div key={entry.key} style={{ ...styles.card, padding: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 900 }}>Shift Row {visualIndex + 1}</div>
+              {!entry.isPrimary ? (
+                <button type="button" style={{ ...styles.btnDanger, padding: "4px 8px", fontSize: 12 }} onClick={() => removeShiftRow(entry.index)}>
+                  Remove Row
+                </button>
+              ) : null}
             </div>
 
-            {shiftDraftStaffingType === "shared3" ? (
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(150px, 180px) minmax(200px, 1fr) minmax(220px, 1fr) minmax(220px, 1fr)", gap: 8 }}>
               <div>
-                <div style={styles.tiny}>Client 3</div>
+                <div style={styles.tiny}>Staffing Type</div>
                 <select
                   style={styles.select}
-                  value={shiftDraft.clientId3 || ""}
-                  onChange={(e) =>
-                    setShiftDraft((p) => ({ ...p, clientId3: e.target.value }))
-                  }
+                  value={rowStaffingType}
+                  onChange={(e) => {
+                    const nextType = normalizeDraftStaffingType(e.target.value);
+                    const updater = (p) => ({
+                      ...p,
+                      staffingType: nextType,
+                      isShared: nextType !== "single",
+                      clientId2: nextType === "single" ? "" : p.clientId2,
+                      clientId3: nextType === "shared3" ? p.clientId3 : "",
+                      sharedGroupId: nextType === "single" ? "" : p.sharedGroupId,
+                    });
+                    clearShiftRowError(entry.key);
+                    if (entry.isPrimary) {
+                      setShiftDraft((p) => updater(p));
+                    } else {
+                      updateExtraShiftRow(entry.index, updater);
+                    }
+                  }}
                 >
-                  <option value="">Select…</option>
-                  {visibleClients
-                    .filter((c) => c.id !== shiftDraft.clientId && c.id !== shiftDraft.clientId2)
-                    .map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
+                  <option value="single">Normal 1:1</option>
+                  <option value="shared2">Shared Support 2:1</option>
+                  <option value="shared3">Shared Support 3:1</option>
                 </select>
+              </div>
+
+              <div>
+                <div style={styles.tiny}>Staff</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <select
+                    style={styles.select}
+                    value={rowDraft.staffId}
+                    onChange={(e) => {
+                      clearShiftRowError(entry.key);
+                      if (entry.isPrimary) {
+                        setShiftDraft((p) => ({ ...p, staffId: e.target.value }));
+                      } else {
+                        updateExtraShiftRow(entry.index, { staffId: e.target.value });
+                      }
+                    }}
+                  >
+                    <option value="">Select…</option>
+                    {entry.isPrimary && suggestedStaff ? (
+                      <option value={suggestedStaff.id}>⭐ Suggested: {suggestedStaff.name}</option>
+                    ) : null}
+                    {(state.staff || []).filter((s) => !entry.isPrimary || !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                  {entry.isPrimary && suggestedStaff && rowDraft.staffId !== suggestedStaff.id ? (
+                    <button
+                      type="button"
+                      style={{ ...styles.btn2, padding: "2px 8px", fontSize: 12 }}
+                      onClick={() => {
+                        clearShiftRowError(entry.key);
+                        setShiftDraft((p) => ({ ...p, staffId: suggestedStaff.id }));
+                      }}
+                    >
+                      Suggest
+                    </button>
+                  ) : null}
+                </div>
+                {entry.isPrimary && suggestedStaff ? (
+                  <div style={{ fontSize: 12, color: "#4cc9f0", marginTop: 2 }}>
+                    Best match: {suggestedStaff.name} (no conflict, lowest OT)
+                  </div>
+                ) : null}
+              </div>
+
+              <div>
+                <div style={styles.tiny}>Start</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    style={styles.input}
+                    type="date"
+                    value={rowDraft.startDate}
+                    onChange={(e) => {
+                      clearShiftRowError(entry.key);
+                      const updater = (p) => normalizeShiftDraftDates({ ...p, startDate: e.target.value });
+                      if (entry.isPrimary) {
+                        setShiftDraft((p) => updater(p));
+                      } else {
+                        updateExtraShiftRow(entry.index, updater);
+                      }
+                    }}
+                  />
+                  <input
+                    style={styles.input}
+                    type="time"
+                    value={rowDraft.startTime}
+                    onChange={(e) => {
+                      clearShiftRowError(entry.key);
+                      const updater = (p) => normalizeShiftDraftDates({ ...p, startTime: e.target.value });
+                      if (entry.isPrimary) {
+                        setShiftDraft((p) => updater(p));
+                      } else {
+                        updateExtraShiftRow(entry.index, updater);
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div style={styles.tiny}>End</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    style={styles.input}
+                    type="date"
+                    value={rowDraft.endDate}
+                    onChange={(e) => {
+                      clearShiftRowError(entry.key);
+                      if (entry.isPrimary) {
+                        setShiftDraft((p) => ({ ...p, endDate: e.target.value }));
+                      } else {
+                        updateExtraShiftRow(entry.index, { endDate: e.target.value });
+                      }
+                    }}
+                  />
+                  <input
+                    style={styles.input}
+                    type="time"
+                    value={rowDraft.endTime}
+                    onChange={(e) => {
+                      clearShiftRowError(entry.key);
+                      const updater = (p) => normalizeShiftDraftDates({ ...p, endTime: e.target.value });
+                      if (entry.isPrimary) {
+                        setShiftDraft((p) => updater(p));
+                      } else {
+                        updateExtraShiftRow(entry.index, updater);
+                      }
+                    }}
+                  />
+                </div>
+                <div style={styles.tiny}>Auto bump end date if end time is earlier than start.</div>
+              </div>
+            </div>
+
+            {rowIsSharedSupport ? (
+              <div style={{ ...styles.grid4, gap: 8, marginTop: 8 }}>
+                <div>
+                  <div style={styles.tiny}>Client 2</div>
+                  <select
+                    style={styles.select}
+                    value={rowDraft.clientId2 || ""}
+                    onChange={(e) => {
+                      clearShiftRowError(entry.key);
+                      if (entry.isPrimary) {
+                        setShiftDraft((p) => ({ ...p, clientId2: e.target.value }));
+                      } else {
+                        updateExtraShiftRow(entry.index, { clientId2: e.target.value });
+                      }
+                    }}
+                  >
+                    <option value="">Select…</option>
+                    {visibleClients
+                      .filter((c) => c.id !== shiftDraft.clientId && c.id !== rowDraft.clientId3)
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                  </select>
+                </div>
+
+                {rowStaffingType === "shared3" ? (
+                  <div>
+                    <div style={styles.tiny}>Client 3</div>
+                    <select
+                      style={styles.select}
+                      value={rowDraft.clientId3 || ""}
+                      onChange={(e) => {
+                        clearShiftRowError(entry.key);
+                        if (entry.isPrimary) {
+                          setShiftDraft((p) => ({ ...p, clientId3: e.target.value }));
+                        } else {
+                          updateExtraShiftRow(entry.index, { clientId3: e.target.value });
+                        }
+                      }}
+                    >
+                      <option value="">Select…</option>
+                      {visibleClients
+                        .filter((c) => c.id !== shiftDraft.clientId && c.id !== rowDraft.clientId2)
+                        .map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                    </select>
+                  </div>
+                ) : null}
+
+                <div>
+                  <div style={styles.tiny}>Shared Group ID (optional)</div>
+                  <input
+                    style={styles.input}
+                    value={rowDraft.sharedGroupId || ""}
+                    onChange={(e) => {
+                      clearShiftRowError(entry.key);
+                      if (entry.isPrimary) {
+                        setShiftDraft((p) => ({ ...p, sharedGroupId: e.target.value }));
+                      } else {
+                        updateExtraShiftRow(entry.index, { sharedGroupId: e.target.value });
+                      }
+                    }}
+                    placeholder="Auto-generated if empty"
+                  />
+                </div>
+
+                <div style={{ ...styles.tiny, alignSelf: "end" }}>
+                  One staff + one time block is applied to each selected client while staff worked hours are deduped to count once.
+                </div>
               </div>
             ) : null}
 
-            <div>
-              <div style={styles.tiny}>Shared Group ID (optional)</div>
-              <input
-                style={styles.input}
-                value={shiftDraft.sharedGroupId || ""}
-                onChange={(e) =>
-                  setShiftDraft((p) => ({ ...p, sharedGroupId: e.target.value }))
-                }
-                placeholder="Auto-generated if empty"
-              />
-            </div>
-
-            <div style={{ ...styles.tiny, alignSelf: "end" }}>
-              One staff + one time block is applied to each selected client while staff worked hours are deduped to count once.
-            </div>
+            {rowErrors.length ? (
+              <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
+                {rowErrors.map((message) => (
+                  <div key={message} style={{ ...styles.warn, marginTop: 0 }}>{message}</div>
+                ))}
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
-    </div>
-
-    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
-      <button style={styles.btn} onClick={addShift}>
-        Add Shift
-      </button>
+        );
+      })}
     </div>
 
     {builderOpen ? (
@@ -3094,63 +3583,20 @@ export default function Page() {
             ) : null}
 
             <div>
-              <div style={styles.tiny}>Generate horizon</div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="radio"
-                    name="builderWeeks"
-                    value={1}
-                    checked={builderWeeks === 1}
-                    onChange={() => setBuilderWeeks(1)}
-                  />
-                  1 week
-                </label>
-                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="radio"
-                    name="builderWeeks"
-                    value={4}
-                    checked={builderWeeks === 4}
-                    onChange={() => setBuilderWeeks(4)}
-                  />
-                  4 weeks
-                </label>
+              <div style={styles.tiny}>Payroll generation window</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(180px, 1fr))", gap: 8, marginTop: 4 }}>
+                <div style={{ ...styles.shift, padding: 8 }}>
+                  <div style={styles.tiny}>Payroll Start Date</div>
+                  <div style={{ fontSize: 13, fontWeight: 900 }}>{payrollStartDate}</div>
+                </div>
+                <div style={{ ...styles.shift, padding: 8 }}>
+                  <div style={styles.tiny}>Payroll Finish Date</div>
+                  <div style={{ fontSize: 13, fontWeight: 900 }}>{payrollFinishDate}</div>
+                </div>
               </div>
-              <div style={{ marginTop: 8, ...styles.tiny }}>Repeat interval</div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="radio"
-                    name="builderRepeatInterval"
-                    value={1}
-                    checked={builderRepeatInterval === 1}
-                    onChange={() => setBuilderRepeatInterval(1)}
-                  />
-                  Every week
-                </label>
-                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="radio"
-                    name="builderRepeatInterval"
-                    value={2}
-                    checked={builderRepeatInterval === 2}
-                    onChange={() => setBuilderRepeatInterval(2)}
-                  />
-                  Every 2 weeks
-                </label>
-                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="radio"
-                    name="builderRepeatInterval"
-                    value={4}
-                    checked={builderRepeatInterval === 4}
-                    onChange={() => setBuilderRepeatInterval(4)}
-                  />
-                  Every 4 weeks
-                </label>
+              <div style={{ ...styles.tiny, marginTop: 6 }}>
+                Builder generation follows the selected payroll range exactly and creates separate daily shifts for each date in that range.
               </div>
-              <div style={styles.tiny}>For example: select 4 weeks + every 2 weeks to schedule Week 1 + Week 3.</div>
             </div>
 
             <div>
@@ -3263,7 +3709,7 @@ export default function Page() {
                 <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
                   {builderSummary.weeklyBreakdown.map((week) => (
                     <div key={week.weekStart} style={{ ...styles.shift, padding: 8 }}>
-                      <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Week of {week.weekStart}</div>
+                      <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Payroll Week Starting {week.weekStart}</div>
                       <div style={styles.tiny}>
                         Total scheduled hours: {fmtHoursFromMin(week.totalScheduledMinutes)} | Assigned staff hours: {fmtHoursFromMin(week.assignedScheduledMinutes)} | Open hours: {fmtHoursFromMin(week.unassignedHours)}
                       </div>
@@ -3284,7 +3730,7 @@ export default function Page() {
                           <thead>
                             <tr>
                               <th style={styles.thCompact}>Staff</th>
-                              <th style={styles.thCompactNum}>Week Hours</th>
+                              <th style={styles.thCompactNum}>Payroll Week Hours</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -3295,7 +3741,7 @@ export default function Page() {
                               </tr>
                             )) : (
                               <tr>
-                                <td style={styles.tdCompactEmpty} colSpan={2}>No assigned staff hours for this week.</td>
+                                <td style={styles.tdCompactEmpty} colSpan={2}>No assigned staff hours for this payroll week.</td>
                               </tr>
                             )}
                           </tbody>
@@ -3432,7 +3878,7 @@ export default function Page() {
         <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
           {builderSummary.weeklyBreakdown.map((week) => (
             <div key={`summary_${week.weekStart}`} style={{ ...styles.shift, padding: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Week of {week.weekStart}</div>
+              <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 4 }}>Payroll Week Starting {week.weekStart}</div>
               <div style={styles.tiny}>
                 Total scheduled hours: {fmtHoursFromMin(week.totalScheduledMinutes)} | Assigned staff hours: {fmtHoursFromMin(week.assignedScheduledMinutes)} | Open hours: {fmtHoursFromMin(week.unassignedHours)}
               </div>
@@ -3482,7 +3928,7 @@ export default function Page() {
         {tab === "staffSchedule" && (
           <div style={{ marginTop: 12, ...styles.card }}>
             <h3 style={{ marginTop: 0 }}>Staff Schedule</h3>
-            <div style={styles.tiny}>Shows upcoming shifts for each staff member in the selected week.</div>
+            <div style={styles.tiny}>Shows shifts for each staff member in the selected payroll period.</div>
 
             <div style={styles.tableWrap}>
               <table className="app-table" style={styles.tableBase}>
@@ -3495,7 +3941,7 @@ export default function Page() {
                 </thead>
                 <tbody>
                   {(state.staff || []).map((st) => {
-                    const shifts = shiftsInSelectedWeek
+                    const shifts = shiftsInSelectedPeriod
                       .filter((sh) => sh.staffId === st.id)
                       .filter((sh) => (canSeeAllShifts ? true : visibleClients.some((c) => c.id === sh.clientId)))
                       .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
@@ -3505,7 +3951,7 @@ export default function Page() {
                         <tr key={st.id}>
                           <td style={styles.td}><b>{st.name}</b></td>
                           <td style={styles.tdMuted} colSpan={2}>
-                            No shifts this week
+                            No shifts in this payroll period
                           </td>
                         </tr>
                       );
@@ -3542,7 +3988,7 @@ export default function Page() {
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(150px, 1fr))", gap: 8, marginTop: 10 }}>
               <div style={{ ...styles.card, padding: 8 }}>
-                <div style={styles.tiny}>Staff Working This Week</div>
+                <div style={styles.tiny}>Staff Working This Payroll Period</div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>{hoursSummary.staffWorking}</div>
               </div>
               <div style={{ ...styles.card, padding: 8 }}>
@@ -3554,7 +4000,7 @@ export default function Page() {
                 <div style={{ fontSize: 18, fontWeight: 900 }}>{hoursSummary.clientsWithHours}</div>
               </div>
               <div style={{ ...styles.card, padding: 8 }}>
-                <div style={styles.tiny}>Total Shared Support Hours This Week</div>
+                <div style={styles.tiny}>Total Shared Support Hours This Payroll Period</div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>{fmtHoursFromMin(hoursSummary.totalSharedSupportMin)}</div>
               </div>
               <div style={{ ...styles.card, padding: 8 }}>
@@ -3564,7 +4010,7 @@ export default function Page() {
             </div>
 
             {(isSupervisor || isAdmin) && hoursSummary.staffInOt > 0 ? (
-              <div style={styles.warn}>One or more staff have reached 40 hours this week.</div>
+              <div style={styles.warn}>One or more staff have reached overtime in this payroll period.</div>
             ) : null}
 
             <details open style={{ marginTop: 10 }}>
@@ -3581,7 +4027,7 @@ export default function Page() {
                   value={staffHoursFilter}
                   onChange={(e) => setStaffHoursFilter(e.target.value)}
                 >
-                  <option value="worked">Worked This Week</option>
+                  <option value="worked">Worked This Payroll Period</option>
                   <option value="ot">Overtime Only</option>
                   <option value="shared">Shared Support Only</option>
                   <option value="all">All Staff</option>
@@ -3599,7 +4045,7 @@ export default function Page() {
                   <thead>
                     <tr>
                       <th style={styles.staffHoursThName}>Staff</th>
-                      <th style={styles.staffHoursThNum}>Week Hours</th>
+                      <th style={styles.staffHoursThNum}>Payroll Period Hours</th>
                       <th style={styles.staffHoursThNum}>OT Hours</th>
                       <th style={styles.staffHoursThNum}>Shared Support Hours</th>
                     </tr>
@@ -3624,7 +4070,7 @@ export default function Page() {
             </details>
 
             <details style={{ marginTop: 10 }}>
-              <summary style={{ cursor: "pointer", fontWeight: 900 }}>Client Weekly Hours</summary>
+              <summary style={{ cursor: "pointer", fontWeight: 900 }}>Client Payroll Period Hours</summary>
               <div style={{ display: "grid", gridTemplateColumns: "minmax(200px, 1fr) auto", gap: 8, marginTop: 8, alignItems: "center" }}>
                 <input
                   style={{ ...styles.input, padding: "7px 9px" }}
@@ -3648,7 +4094,7 @@ export default function Page() {
                     <tr>
                       <th style={styles.thCompact}>Client</th>
                       <th style={styles.thCompactNum}>Allotted</th>
-                      <th style={styles.thCompactNum}>Weekly Total</th>
+                      <th style={styles.thCompactNum}>Payroll Total</th>
                       <th style={styles.thCompactNum}>Remaining</th>
                       <th style={styles.thCompactNum}>Day</th>
                       <th style={styles.thCompactNum}>Night</th>
@@ -3712,7 +4158,7 @@ export default function Page() {
                       Weekly Allotment: <b>{Number(selectedClient.weeklyHours) || 0}h</b>
                     </div>
                     <div style={styles.tiny}>
-                      Week of: <b>{weekStart}</b>
+                      Payroll Range: <b>{payrollStartDate}</b> to <b>{payrollFinishDate}</b>
                     </div>
                   </div>
 
@@ -3740,7 +4186,7 @@ export default function Page() {
                 </div>
 
                 <div style={{ marginTop: 18, marginBottom: 10 }}>
-                  <div style={styles.tiny}>Weekly Hours Summary</div>
+                  <div style={styles.tiny}>Payroll Period Hours Summary</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <div style={{ flex: 1 }}>
                       <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
@@ -3799,7 +4245,7 @@ export default function Page() {
                 <div style={{ marginTop: 18 }}>
                   <h4 style={{ margin: "10px 0 6px 0" }}>Client Schedule</h4>
                   {selectedClientShifts.length === 0 ? (
-                    <div style={styles.tiny}>No shifts scheduled for this client this week.</div>
+                    <div style={styles.tiny}>No shifts scheduled for this client in this payroll period.</div>
                   ) : (
                     <div style={styles.tableWrap}>
                       <table className="app-table" style={styles.tableBase}>
@@ -3836,7 +4282,7 @@ export default function Page() {
                 <div style={{ marginTop: 18 }}>
                   <h4 style={{ margin: "10px 0 6px 0" }}>Assigned Staff</h4>
                   {selectedClientStaffSummary.length === 0 ? (
-                    <div style={styles.tiny}>No staff assigned this week.</div>
+                    <div style={styles.tiny}>No staff assigned in this payroll period.</div>
                   ) : (
                     <div style={styles.tableWrapCompact}>
                       <table className="app-table app-table-report" style={styles.tableCompact}>
@@ -4118,7 +4564,7 @@ export default function Page() {
                   }))
                 }
               />
-              Cross-week consecutive protection (include 7-day buffer before/after selected week)
+              Cross-week consecutive protection (include 7-day buffer before/after selected payroll period)
             </label>
 
             <div style={{ marginTop: 10, maxWidth: 280 }}>
