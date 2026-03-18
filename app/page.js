@@ -42,20 +42,11 @@ function readUserNameParts(user) {
 }
 
 function readUserNameValue(user) {
-  const directCandidates = [
-    user?.full_name,
-    user?.fullName,
-    user?.name,
-    user?.display_name,
-    user?.displayName,
-    user?.user_name,
-    user?.username,
-  ];
+  const name = String(user?.name || "").trim();
+  if (name) return name;
 
-  for (const candidate of directCandidates) {
-    const value = String(candidate || "").trim();
-    if (value) return value;
-  }
+  const username = String(user?.username ?? user?.user_name ?? "").trim();
+  if (username) return username;
 
   const combinedName = readUserNameParts(user);
   if (combinedName) return combinedName;
@@ -931,6 +922,7 @@ async function fetchAllDataSnapshot() {
     console.info(`Users loaded from ${tableSources.users === "supabase" ? "Supabase" : "local fallback"}.`, {
       count: snapshot.users?.length || 0,
       ids: (snapshot.users || []).map((user) => user.id),
+      displayNames: (snapshot.users || []).map((user) => readUserNameValue(user) || "Unknown User"),
     });
     return { source: tableSources.users === "supabase" ? "supabase" : "local", snapshot, tableSources };
   }
@@ -939,6 +931,7 @@ async function fetchAllDataSnapshot() {
   console.info("Users loaded from local fallback.", {
     count: snapshot.users?.length || 0,
     ids: (snapshot.users || []).map((user) => user.id),
+    displayNames: (snapshot.users || []).map((user) => readUserNameValue(user) || "Unknown User"),
   });
   return { source: "local", snapshot };
 }
