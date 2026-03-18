@@ -66,7 +66,7 @@ function readUserNameValue(user) {
   return "";
 }
 
-function getUserDisplayName(user, fallback = "Unknown Supervisor") {
+function getUserDisplayName(user, fallback = "Unknown User") {
   return readUserNameValue(user) || fallback;
 }
 
@@ -83,7 +83,7 @@ function getSupervisorNameById(users, supervisorId, { unassignedLabel = "Unassig
 }
 
 function formatUserOptionLabel(user) {
-  const label = getUserDisplayName(user, "Unknown Supervisor");
+  const label = getUserDisplayName(user, "Unknown User");
   const role = getUserRoleValue(user);
   return `${label} (${role})`;
 }
@@ -886,24 +886,53 @@ function createDataRequestError(operation, table, error) {
   return wrapped;
 }
 
+function hasOnlyDefaultUsers(rows) {
+  const users = Array.isArray(rows) ? rows : [];
+  if (users.length !== DEFAULT_DB.users.length) return false;
+  const ids = new Set(users.map((user) => user?.id));
+  return DEFAULT_DB.users.every((user) => ids.has(user.id));
+}
+
 async function fetchAllDataSnapshot() {
   if (SUPABASE_CONFIGURED && supabase) {
-    const entries = await Promise.all(
+    const localDb = readLocalDb();
+    const snapshot = { ...getLocalDbSnapshot() };
+    const tableSources = {};
+    const results = await Promise.allSettled(
       DATA_TABLES.map(async (table) => {
         const { data, error } = await supabase.from(table).select("*");
         if (error) throw createDataRequestError("select", table, error);
-        return [table, data || []];
+        return { table, data: data || [] };
       })
     );
 
-    const snapshot = Object.fromEntries(entries);
-    const localDb = readLocalDb();
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        const { table, data } = result.value;
+        snapshot[table] = data;
+        replaceLocalTable(table, data);
+        tableSources[table] = "supabase";
+        continue;
+      }
+
+      const error = result.reason;
+      const table = error?.table || "unknown";
+      reportSupabaseError(error);
+      tableSources[table] = "local";
+      snapshot[table] = getLocalDbSnapshot()[table] || [];
+    }
+
+    if (tableSources.users === "local" && hasOnlyDefaultUsers(snapshot.users)) {
+      console.warn("Users query fell back to local placeholder users; suppressing demo users while Supabase is configured.");
+      snapshot.users = [];
+    }
+
     writeLocalDb({ ...localDb, ...snapshot });
-    console.info("Users loaded from Supabase.", {
+    console.info(`Users loaded from ${tableSources.users === "supabase" ? "Supabase" : "local fallback"}.`, {
       count: snapshot.users?.length || 0,
       ids: (snapshot.users || []).map((user) => user.id),
     });
-    return { source: "supabase", snapshot };
+    return { source: tableSources.users === "supabase" ? "supabase" : "local", snapshot, tableSources };
   }
 
   const snapshot = getLocalDbSnapshot();
@@ -989,7 +1018,7 @@ function collectProfileDataIssues({ users, staff, clients, shifts }) {
   for (const user of users || []) {
     const rawName = readUserNameValue(user);
     if (!rawName) {
-      issues.push(`User "${user?.id || "unknown-user"}" is missing a display name; the UI will show Unknown Supervisor.`);
+      issues.push(`User "${user?.id || "unknown-user"}" is missing a display name; the UI will show Unknown User.`);
     }
   }
 
@@ -1114,7 +1143,7 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
     },
     users: (users || []).map((u) => ({
       id: u.id,
-      name: getUserDisplayName(u, "Unknown Supervisor"),
+      name: getUserDisplayName(u, "Unknown User"),
       role: getUserRoleValue(u),
       pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
     })),
@@ -1162,7 +1191,7 @@ function toDB(state) {
   return {
     users: (state.users || []).map((u) => ({
       id: u.id,
-      name: getUserDisplayName(u, "Unknown Supervisor"),
+      name: getUserDisplayName(u, "Unknown User"),
       role: getUserRoleValue(u),
       pin: u.pin,
     })),
@@ -1196,16 +1225,17 @@ function toDB(state) {
 // Refresh in-memory state from DB or localStorage
 async function refreshState(setStateLocal, setIssuesLocal) {
   try {
-    let { source, snapshot } = await fetchAllDataSnapshot();
+    let { source, snapshot, tableSources } = await fetchAllDataSnapshot();
 
     if (source === "supabase" && (!snapshot.users || snapshot.users.length === 0)) {
       console.warn("Users table returned zero rows from Supabase.", {
         source,
         supabaseConfigured: SUPABASE_CONFIGURED,
+        tableSources,
       });
     }
 
-    if (source === "local" && (!snapshot.users || snapshot.users.length === 0)) {
+    if (!SUPABASE_CONFIGURED && source === "local" && (!snapshot.users || snapshot.users.length === 0)) {
       console.warn("No users found in local mode; seeding default users.");
       snapshot = { ...snapshot, users: DEFAULT_DB.users };
       await sbUpsert("users", DEFAULT_DB.users);
