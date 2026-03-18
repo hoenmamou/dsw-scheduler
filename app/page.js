@@ -1,17 +1,19 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { SUPABASE_CONFIGURED, supabase } from "../lib/supabaseClient";
+import { supabase } from "../lib/supabaseClient";
 
-const LOCAL_DB_STORAGE_KEY = "dsw_local_db";
-const DATA_TABLES = ["users", "staff", "clients", "shifts"];
+// On the client, Next.js replaces env vars at build time.
+const SUPABASE_CONFIGURED = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
+// Supabase errors (auth/RLS) should not break the app. When they happen we
+// fall back to localStorage (and log a warning).
 let supabaseErrorHandler = null;
 function setSupabaseErrorHandler(fn) {
   supabaseErrorHandler = fn;
 }
 function reportSupabaseError(error) {
-  console.warn("Supabase request failed.", error);
+  console.warn("Supabase request failed; falling back to local storage.", error);
   if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
 }
 
@@ -33,50 +35,6 @@ const DEFAULT_PAYROLL_CYCLE_ANCHOR = "2026-03-08";
 
 function normalizeRole(role) {
   return String(role || "").trim().toLowerCase();
-}
-
-function readUserNameParts(user) {
-  const first = String(user?.first_name ?? user?.firstName ?? "").trim();
-  const last = String(user?.last_name ?? user?.lastName ?? "").trim();
-  return [first, last].filter(Boolean).join(" ").trim();
-}
-
-function readUserNameValue(user) {
-  const name = String(user?.name || "").trim();
-  if (name) return name;
-
-  const username = String(user?.username ?? user?.user_name ?? "").trim();
-  if (username) return username;
-
-  const combinedName = readUserNameParts(user);
-  if (combinedName) return combinedName;
-
-  const email = String(user?.email || "").trim();
-  if (email) return email;
-
-  return "";
-}
-
-function getUserDisplayName(user, fallback = "Unknown User") {
-  return readUserNameValue(user) || fallback;
-}
-
-function getUserRoleValue(user) {
-  return normalizeRole(user?.role ?? user?.dashboard_role ?? user?.user_role) || "supervisor";
-}
-
-function getSupervisorNameById(users, supervisorId, { unassignedLabel = "Unassigned", unknownLabel = "Unknown Supervisor" } = {}) {
-  const id = String(supervisorId || "").trim();
-  if (!id) return unassignedLabel;
-  const match = (users || []).find((user) => user.id === id);
-  if (!match) return unknownLabel;
-  return getUserDisplayName(match, unknownLabel);
-}
-
-function formatUserOptionLabel(user) {
-  const label = getUserDisplayName(user, "Unknown User");
-  const role = getUserRoleValue(user);
-  return `${label} (${role})`;
 }
 
 function isSupervisorRole(role) {
@@ -808,132 +766,21 @@ function AssignedStaffDropdown({ label = "Assigned Staff", selectedIds, staffOpt
    Supabase data helpers
 ========================= */
 
-function createEmptyDb() {
-  return {
-    users: [],
-    staff: [],
-    clients: [],
-    shifts: [],
-  };
+function cloneDefaultDb() {
+  return JSON.parse(JSON.stringify(DEFAULT_DB));
 }
 
 function readLocalDb() {
   try {
-    const raw = localStorage.getItem(LOCAL_DB_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : createEmptyDb();
+    const raw = localStorage.getItem("dsw_local_db");
+    return raw ? JSON.parse(raw) : cloneDefaultDb();
   } catch {
-    return createEmptyDb();
+    return cloneDefaultDb();
   }
 }
 
 function writeLocalDb(db) {
-  localStorage.setItem(LOCAL_DB_STORAGE_KEY, JSON.stringify(db));
-}
-
-function getLocalDbSnapshot() {
-  const db = readLocalDb();
-  return {
-    users: Array.isArray(db.users) ? db.users : [],
-    staff: Array.isArray(db.staff) ? db.staff : [],
-    clients: Array.isArray(db.clients) ? db.clients : [],
-    shifts: Array.isArray(db.shifts) ? db.shifts : [],
-  };
-}
-
-function replaceLocalTable(table, rows) {
-  const db = readLocalDb();
-  db[table] = Array.isArray(rows) ? rows : [];
-  writeLocalDb(db);
-}
-
-function mergeLocalTableRows(table, rows) {
-  const db = readLocalDb();
-  db[table] = db[table] || [];
-  for (const row of rows || []) {
-    const index = db[table].findIndex((item) => item.id === row.id);
-    if (index >= 0) db[table][index] = { ...db[table][index], ...row };
-    else db[table].push(row);
-  }
-  writeLocalDb(db);
-}
-
-function removeLocalTableRow(table, id) {
-  const db = readLocalDb();
-  db[table] = (db[table] || []).filter((row) => row.id !== id);
-  writeLocalDb(db);
-}
-
-function createDataRequestError(operation, table, error) {
-  const wrapped = new Error(
-    `Supabase ${operation} failed for ${table}: ${error?.message || error?.code || "Unknown error"}`
-  );
-  wrapped.name = "DataRequestError";
-  wrapped.operation = operation;
-  wrapped.table = table;
-  wrapped.code = error?.code;
-  wrapped.details = error?.details;
-  wrapped.hint = error?.hint;
-  wrapped.cause = error;
-  return wrapped;
-}
-
-function hasOnlyDefaultUsers(rows) {
-  const users = Array.isArray(rows) ? rows : [];
-  if (users.length !== DEFAULT_DB.users.length) return false;
-  const ids = new Set(users.map((user) => user?.id));
-  return DEFAULT_DB.users.every((user) => ids.has(user.id));
-}
-
-async function fetchAllDataSnapshot() {
-  if (SUPABASE_CONFIGURED && supabase) {
-    const localDb = readLocalDb();
-    const snapshot = { ...getLocalDbSnapshot() };
-    const tableSources = {};
-    const results = await Promise.allSettled(
-      DATA_TABLES.map(async (table) => {
-        const { data, error } = await supabase.from(table).select("*");
-        if (error) throw createDataRequestError("select", table, error);
-        return { table, data: data || [] };
-      })
-    );
-
-    for (const result of results) {
-      if (result.status === "fulfilled") {
-        const { table, data } = result.value;
-        snapshot[table] = data;
-        replaceLocalTable(table, data);
-        tableSources[table] = "supabase";
-        continue;
-      }
-
-      const error = result.reason;
-      const table = error?.table || "unknown";
-      reportSupabaseError(error);
-      tableSources[table] = "local";
-      snapshot[table] = getLocalDbSnapshot()[table] || [];
-    }
-
-    if (tableSources.users === "local" && hasOnlyDefaultUsers(snapshot.users)) {
-      console.warn("Users query fell back to local placeholder users; suppressing demo users while Supabase is configured.");
-      snapshot.users = [];
-    }
-
-    writeLocalDb({ ...localDb, ...snapshot });
-    console.info(`Users loaded from ${tableSources.users === "supabase" ? "Supabase" : "local fallback"}.`, {
-      count: snapshot.users?.length || 0,
-      ids: (snapshot.users || []).map((user) => user.id),
-      displayNames: (snapshot.users || []).map((user) => readUserNameValue(user) || "Unknown User"),
-    });
-    return { source: tableSources.users === "supabase" ? "supabase" : "local", snapshot, tableSources };
-  }
-
-  const snapshot = getLocalDbSnapshot();
-  console.info("Users loaded from local fallback.", {
-    count: snapshot.users?.length || 0,
-    ids: (snapshot.users || []).map((user) => user.id),
-    displayNames: (snapshot.users || []).map((user) => readUserNameValue(user) || "Unknown User"),
-  });
-  return { source: "local", snapshot };
+  localStorage.setItem("dsw_local_db", JSON.stringify(db));
 }
 
 function toClientSnakeCaseRow(row) {
@@ -978,95 +825,21 @@ function toClientMinimalRow(row) {
   };
 }
 
-function buildClientUpsertRow(inputRow, existingRow = null) {
-  const merged = toClientCamelCaseRow({ ...(existingRow || {}), ...(inputRow || {}) });
-  return toClientSnakeCaseRow(merged);
-}
-
-function collectDuplicateIdIssues(label, rows) {
-  const counts = new Map();
-  for (const row of rows || []) {
-    const id = String(row?.id || "").trim();
-    if (!id) continue;
-    counts.set(id, (counts.get(id) || 0) + 1);
-  }
-
-  return Array.from(counts.entries())
-    .filter(([, count]) => count > 1)
-    .map(([id, count]) => `${label} contains duplicate id "${id}" (${count} rows).`);
-}
-
-function collectProfileDataIssues({ users, staff, clients, shifts }) {
-  const issues = [
-    ...collectDuplicateIdIssues("Users", users),
-    ...collectDuplicateIdIssues("Staff", staff),
-    ...collectDuplicateIdIssues("Clients", clients),
-    ...collectDuplicateIdIssues("Shifts", shifts),
-  ];
-
-  const userIds = new Set((users || []).map((user) => user.id));
-  const staffIds = new Set((staff || []).map((member) => member.id));
-  const clientIds = new Set((clients || []).map((client) => client.id));
-
-  for (const user of users || []) {
-    const rawName = readUserNameValue(user);
-    if (!rawName) {
-      issues.push(`User "${user?.id || "unknown-user"}" is missing a display name; the UI will show Unknown User.`);
-    }
-  }
-
-  for (const client of clients || []) {
-    const clientId = client?.id || "unknown-client";
-    const supervisorId = client?.supervisor_id ?? client?.supervisorId ?? "";
-    if (supervisorId && !userIds.has(supervisorId)) {
-      issues.push(`Client "${clientId}" points to missing supervisor "${supervisorId}".`);
-    }
-
-    const hasHoursField = [client?.hours_allotted, client?.weekly_hours, client?.weeklyHours].some((value) => value != null && value !== "");
-    if (!hasHoursField) {
-      issues.push(`Client "${clientId}" is missing weekly hours; the UI defaulted it to 40.`);
-    }
-
-    const hasCoverageStart = [client?.coverage_start, client?.coverageStart].some((value) => String(value || "").trim());
-    const hasCoverageEnd = [client?.coverage_end, client?.coverageEnd].some((value) => String(value || "").trim());
-    if (!hasCoverageStart || !hasCoverageEnd) {
-      issues.push(`Client "${clientId}" is missing coverage hours; the UI defaulted the missing value.`);
-    }
-
-    const assignedIds = parseAssignedStaffIds(client?.assigned_staff_ids ?? client?.assignedStaffIds);
-    const unknownAssignedIds = assignedIds.filter((staffId) => !staffIds.has(staffId));
-    if (unknownAssignedIds.length) {
-      issues.push(`Client "${clientId}" references missing assigned staff: ${unknownAssignedIds.join(", ")}.`);
-    }
-  }
-
-  for (const shift of shifts || []) {
-    const shiftId = shift?.id || "unknown-shift";
-    const clientId = shift?.client_id ?? shift?.clientId ?? "";
-    const staffId = shift?.staff_id ?? shift?.staffId ?? "";
-    if (!clientId) issues.push(`Shift "${shiftId}" is missing client_id.`);
-    else if (!clientIds.has(clientId)) issues.push(`Shift "${shiftId}" references missing client "${clientId}".`);
-    if (staffId && !staffIds.has(staffId)) {
-      issues.push(`Shift "${shiftId}" references missing staff "${staffId}".`);
-    }
-  }
-
-  return Array.from(new Set(issues));
-}
-
 async function sbSelect(table) {
+  // Supabase or localStorage fallback
   if (SUPABASE_CONFIGURED && supabase) {
     const { data, error } = await supabase.from(table).select("*");
-    if (!error) {
-      replaceLocalTable(table, data || []);
-      return data || [];
-    }
-    const wrappedError = createDataRequestError("select", table, error);
-    reportSupabaseError(wrappedError);
-    throw wrappedError;
+    if (!error) return data || [];
+    reportSupabaseError(error);
   }
 
-  return getLocalDbSnapshot()[table] || [];
+  // localStorage fallback
+  try {
+    const db = readLocalDb();
+    return db[table] || [];
+  } catch {
+    return [];
+  }
 }
 
 async function sbUpsert(table, rows) {
@@ -1083,31 +856,40 @@ async function sbUpsert(table, rows) {
         if (!error) break;
       }
     }
-    if (!error) {
-      mergeLocalTableRows(table, rows);
-      return;
-    }
-    const wrappedError = createDataRequestError("upsert", table, error);
-    reportSupabaseError(wrappedError);
-    throw wrappedError;
+    if (!error) return;
+    reportSupabaseError(error);
   }
 
-  mergeLocalTableRows(table, rows);
+  // localStorage upsert
+  try {
+    const db = readLocalDb();
+    db[table] = db[table] || [];
+    for (const r of rows) {
+      const idx = db[table].findIndex((x) => x.id === r.id);
+      if (idx >= 0) db[table][idx] = { ...db[table][idx], ...r };
+      else db[table].push(r);
+    }
+    writeLocalDb(db);
+    // refresh in-memory state by triggering loadAll externally (caller should reload)
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 async function sbDelete(table, id) {
   if (SUPABASE_CONFIGURED && supabase) {
     const { error } = await supabase.from(table).delete().eq("id", id);
-    if (!error) {
-      removeLocalTableRow(table, id);
-      return;
-    }
-    const wrappedError = createDataRequestError("delete", table, error);
-    reportSupabaseError(wrappedError);
-    throw wrappedError;
+    if (!error) return;
+    reportSupabaseError(error);
   }
 
-  removeLocalTableRow(table, id);
+  try {
+    const db = readLocalDb();
+    db[table] = (db[table] || []).filter((x) => x.id !== id);
+    writeLocalDb(db);
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 // Local data fallback default seed
@@ -1136,9 +918,9 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
     },
     users: (users || []).map((u) => ({
       id: u.id,
-      name: getUserDisplayName(u, "Unknown User"),
-      role: getUserRoleValue(u),
-      pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
+      name: u.name,
+      role: normalizeRole(u.role ?? u.dashboard_role) || "supervisor",
+      pin: u.pin,
     })),
     staff: (staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
     clients: (clients || []).map((c) => ({
@@ -1184,8 +966,8 @@ function toDB(state) {
   return {
     users: (state.users || []).map((u) => ({
       id: u.id,
-      name: getUserDisplayName(u, "Unknown User"),
-      role: getUserRoleValue(u),
+      name: u.name,
+      role: normalizeRole(u.role) || "supervisor",
       pin: u.pin,
     })),
     staff: (state.staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
@@ -1216,35 +998,19 @@ function toDB(state) {
 }
 
 // Refresh in-memory state from DB or localStorage
-async function refreshState(setStateLocal, setIssuesLocal) {
+async function refreshState(setStateLocal) {
   try {
-    let { source, snapshot, tableSources } = await fetchAllDataSnapshot();
-
-    if (source === "supabase" && (!snapshot.users || snapshot.users.length === 0)) {
-      console.warn("Users table returned zero rows from Supabase.", {
-        source,
-        supabaseConfigured: SUPABASE_CONFIGURED,
-        tableSources,
-      });
-    }
-
-    if (!SUPABASE_CONFIGURED && source === "local" && (!snapshot.users || snapshot.users.length === 0)) {
-      console.warn("No users found in local mode; seeding default users.");
-      snapshot = { ...snapshot, users: DEFAULT_DB.users };
-      await sbUpsert("users", DEFAULT_DB.users);
-    }
-
-    const issues = collectProfileDataIssues(snapshot);
-    if (issues.length) {
-      console.warn("Profile data diagnostics", issues);
-    }
-
-    const normalized = normalizeFromDB(snapshot);
+    const [users, staff, clients, shifts] = await Promise.all([
+      sbSelect("users"),
+      sbSelect("staff"),
+      sbSelect("clients"),
+      sbSelect("shifts"),
+    ]);
+    const normalized = normalizeFromDB({ users, staff, clients, shifts });
     if (typeof setStateLocal === "function") setStateLocal((p) => ({ ...p, ...normalized }));
-    if (typeof setIssuesLocal === "function") setIssuesLocal(issues);
     return normalized;
   } catch (e) {
-    console.error("refreshState failed", e);
+    console.error(e);
     return null;
   }
 }
@@ -1810,7 +1576,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
             <select style={styles.select} value={picked} onChange={(e) => setPicked(e.target.value)}>
               {users.map((u) => (
                 <option key={u.id} value={u.id}>
-                  {formatUserOptionLabel(u)}
+                  {u.name} ({u.role})
                 </option>
               ))}
             </select>
@@ -2511,7 +2277,6 @@ export default function Page() {
 
   // Supabase error state (used to show a warning banner when auth/RLS fails)
   const [supabaseError, setSupabaseError] = useState(null);
-  const [profileDataIssues, setProfileDataIssues] = useState([]);
 
   // UI
   const [tab, setTab] = useState("schedule");
@@ -2592,14 +2357,22 @@ export default function Page() {
     let alive = true;
 
     async function loadAll() {
-      await refreshState(
-        (updater) => {
-          if (alive) setState(updater);
-        },
-        (issues) => {
-          if (alive) setProfileDataIssues(issues);
-        }
-      );
+      let [users, staff, clients, shifts] = await Promise.all([
+        sbSelect("users"),
+        sbSelect("staff"),
+        sbSelect("clients"),
+        sbSelect("shifts"),
+      ]);
+
+      // If the DB has never been seeded (e.g. fresh localStorage), ensure the default login user exists.
+      if (!users || users.length === 0) {
+        console.warn("No users found in DB — seeding default users for local dev.");
+        users = DEFAULT_DB.users;
+        await sbUpsert("users", users);
+      }
+
+      if (!alive) return;
+      setState((prev) => ({ ...prev, ...normalizeFromDB({ users, staff, clients, shifts }) }));
     }
 
     loadAll().catch((e) => console.error(e));
@@ -2649,21 +2422,11 @@ export default function Page() {
     setSessionUserSnapshot(null);
   }
 
-  function showDataActionError(action, error) {
-    console.error(`${action} failed`, error);
-    const message = error?.message || "Check the console for details.";
-    alert(`${action} failed.\n\n${message}`);
-  }
-
   async function createAdminUser({ id, name, pin }) {
-    try {
-      const row = { id, name, role: "admin", pin };
-      await sbUpsert("users", [row]);
-      await refreshState(setState, setProfileDataIssues);
-      loginAs(id);
-    } catch (error) {
-      showDataActionError("Create admin", error);
-    }
+    const row = { id, name, role: "admin", pin };
+    await sbUpsert("users", [row]);
+    await refreshState(setState);
+    loginAs(id);
   }
 
   const visibleClients = useMemo(() => {
@@ -3140,7 +2903,7 @@ export default function Page() {
         const sup = (state.users || []).find((u) => u.id === (conflictClient?.supervisorId || ""));
         const message =
           `${rowLabel}: conflict with ${conflictClient?.name || "Unknown"}` +
-          ` (${sup ? getUserDisplayName(sup) : "Unknown Supervisor"})` +
+          ` (${sup ? sup.name : "Unassigned"})` +
           ` at ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}.`;
         if (state.settings?.hardStopConflicts) {
           return { errors: [message], rows: [], planned };
@@ -3240,7 +3003,7 @@ export default function Page() {
     }
 
     await sbUpsert("shifts", rowsToSave);
-    await refreshState(setState, setProfileDataIssues);
+    await refreshState(setState);
 
     if (!nextErrors.primary) {
       resetPrimaryShiftDraft();
@@ -3264,62 +3027,59 @@ export default function Page() {
   }
 
   async function runBuilder() {
-    try {
-      if (!builderClientId) return alert("Pick a client for the builder.");
-      if (!canManageClientId(builderClientId)) {
-        return alert("You can only manage schedules for your assigned clients.");
-      }
-      const client = (state.clients || []).find((c) => c.id === builderClientId);
-      if (!client) return alert("Selected client was not found.");
-
-      const shiftsDef = builderShiftInfo.shifts;
-      if (builderShiftInfo.error) return alert(builderShiftInfo.error);
-      if (!shiftsDef.length) return alert("No shift blocks found for the selected schedule source.");
-
-      const { rows, generatedShifts } = createShiftRowsFromTemplate({
-        clientId: client.id,
-        rangeStartDate: payrollStartDate,
-        rangeFinishDate: payrollFinishDate,
-        shiftsDef,
-        assignments: builderBlockAssignments,
-        createdBy: currentUser?.id || "builder",
-      });
-
-      if (!rows.length) return alert("No shifts were generated from the selected template.");
-
-      await sbUpsert("shifts", rows);
-      await refreshState(setState, setProfileDataIssues);
-
-      const summary = analyzeWeeklyStaffingNeeds({
-        existingShifts: state.shifts || [],
-        generatedShifts,
-        staffList: activeStaff,
-        payrollStartDate,
-        payrollFinishDate,
-      });
-
-      setBuilderSummary(summary);
-      setBuilderOpen(false);
-
-      const summaryText = [
-        `Created ${summary.totalShiftsCreated} shifts.`,
-        `Total scheduled hours: ${fmtHoursFromMin(summary.totalScheduledMinutes)}.`,
-        `Assigned staff hours: ${fmtHoursFromMin(summary.assignedScheduledMinutes)}.`,
-        `Open hours: ${fmtHoursFromMin(summary.unassignedHours)}.`,
-        `Minimum staff required at 40h max: ${summary.minimumStaffRequired}.`,
-        `Current usable staff: ${summary.currentUsableStaff}.`,
-        `Assigned: ${summary.assignedShifts}.`,
-        `Unassigned: ${summary.unassignedShifts}.`,
-        `Staff at 40h: ${summary.staffAt40Count}.`,
-        `Staff over 40h: ${summary.staffOver40Count}.`,
-        `${summary.currentStaffingEnough ? "Current staffing is enough." : "Current staffing is not enough."}`,
-        `Additional staff needed: ${summary.additionalStaffNeeded}.`,
-      ].join(" ");
-
-      alert(summaryText);
-    } catch (error) {
-      showDataActionError("Run 24-hour builder", error);
+    if (!builderClientId) return alert("Pick a client for the builder.");
+    if (!canManageClientId(builderClientId)) {
+      return alert("You can only manage schedules for your assigned clients.");
     }
+    const client = (state.clients || []).find((c) => c.id === builderClientId);
+    if (!client) return alert("Selected client was not found.");
+
+    // Determine shift definitions based on selected source
+    const shiftsDef = builderShiftInfo.shifts;
+    if (builderShiftInfo.error) return alert(builderShiftInfo.error);
+    if (!shiftsDef.length) return alert("No shift blocks found for the selected schedule source.");
+
+    const { rows, generatedShifts } = createShiftRowsFromTemplate({
+      clientId: client.id,
+      rangeStartDate: payrollStartDate,
+      rangeFinishDate: payrollFinishDate,
+      shiftsDef,
+      assignments: builderBlockAssignments,
+      createdBy: currentUser?.id || "builder",
+    });
+
+    if (!rows.length) return alert("No shifts were generated from the selected template.");
+
+    await sbUpsert("shifts", rows);
+    await refreshState(setState);
+
+    const summary = analyzeWeeklyStaffingNeeds({
+      existingShifts: state.shifts || [],
+      generatedShifts,
+      staffList: activeStaff,
+      payrollStartDate,
+      payrollFinishDate,
+    });
+
+    setBuilderSummary(summary);
+    setBuilderOpen(false);
+
+    const summaryText = [
+      `Created ${summary.totalShiftsCreated} shifts.`,
+      `Total scheduled hours: ${fmtHoursFromMin(summary.totalScheduledMinutes)}.`,
+      `Assigned staff hours: ${fmtHoursFromMin(summary.assignedScheduledMinutes)}.`,
+      `Open hours: ${fmtHoursFromMin(summary.unassignedHours)}.`,
+      `Minimum staff required at 40h max: ${summary.minimumStaffRequired}.`,
+      `Current usable staff: ${summary.currentUsableStaff}.`,
+      `Assigned: ${summary.assignedShifts}.`,
+      `Unassigned: ${summary.unassignedShifts}.`,
+      `Staff at 40h: ${summary.staffAt40Count}.`,
+      `Staff over 40h: ${summary.staffOver40Count}.`,
+      `${summary.currentStaffingEnough ? "Current staffing is enough." : "Current staffing is not enough."}`,
+      `Additional staff needed: ${summary.additionalStaffNeeded}.`,
+    ].join(" ");
+
+    alert(summaryText);
   }
 
   function getBuilderAssignmentValue(slotKey) {
@@ -3368,78 +3128,66 @@ export default function Page() {
   }
 
   async function addShift() {
-    try {
-      clearShiftRowError("primary");
-      const result = await saveShiftDraftEntries([
-        { key: "primary", draft: shiftDraft, label: "Shift row 1" },
-      ]);
-      if (result.saved === 0 && result.errors.primary?.length) {
-        alert(result.errors.primary.join("\n"));
-      }
-    } catch (error) {
-      showDataActionError("Save shift", error);
+    clearShiftRowError("primary");
+    const result = await saveShiftDraftEntries([
+      { key: "primary", draft: shiftDraft, label: "Shift row 1" },
+    ]);
+    if (result.saved === 0 && result.errors.primary?.length) {
+      alert(result.errors.primary.join("\n"));
     }
   }
 
   async function saveAllShifts() {
-    try {
-      clearShiftRowError("primary");
-      const entries = [
-        { key: "primary", draft: shiftDraft, label: "Shift row 1" },
-        ...extraShiftRows.map((row, index) => ({
-          key: `extra_${index}`,
-          draft: row,
-          label: `Shift row ${index + 2}`,
-        })),
-      ];
-      const result = await saveShiftDraftEntries(entries, { keepSavedFailures: true });
-      if (result.saved > 0 && Object.keys(result.errors).length > 0) {
-        alert(`Saved ${result.saved} shift record(s). Some rows still need attention.`);
-        return;
-      }
-      if (result.saved > 0) {
-        alert(`Saved ${result.saved} shift record(s).`);
-        return;
-      }
-      alert("No shifts were saved. Check the row errors and try again.");
-    } catch (error) {
-      showDataActionError("Save shifts", error);
+    clearShiftRowError("primary");
+    const entries = [
+      { key: "primary", draft: shiftDraft, label: "Shift row 1" },
+      ...extraShiftRows.map((row, index) => ({
+        key: `extra_${index}`,
+        draft: row,
+        label: `Shift row ${index + 2}`,
+      })),
+    ];
+    const result = await saveShiftDraftEntries(entries, { keepSavedFailures: true });
+    if (result.saved > 0 && Object.keys(result.errors).length > 0) {
+      alert(`Saved ${result.saved} shift record(s). Some rows still need attention.`);
+      return;
     }
+    if (result.saved > 0) {
+      alert(`Saved ${result.saved} shift record(s).`);
+      return;
+    }
+    alert("No shifts were saved. Check the row errors and try again.");
   }
 
   async function deleteShift(id) {
-    try {
-      const allShifts = await sbSelect("shifts");
-      const target = (allShifts || []).find((sh) => sh.id === id);
-      const targetClientId = target?.client_id || target?.clientId || "";
-      if (!canManageClientId(targetClientId)) {
-        return alert("You can only delete shifts for your assigned clients.");
-      }
-      const sharedGroupId = target?.shared_group_id || target?.sharedGroupId || "";
-      const idsToDelete = sharedGroupId
-        ? (allShifts || [])
-            .filter((sh) => (sh.shared_group_id || sh.sharedGroupId || "") === sharedGroupId)
-            .map((sh) => sh.id)
-        : [id];
-
-      const uniqueIds = Array.from(new Set(idsToDelete.length ? idsToDelete : [id]));
-      if (
-        !confirm(
-          uniqueIds.length > 1
-            ? `Delete this shared shift group (${uniqueIds.length} linked shifts)?`
-            : "Delete this shift?"
-        )
-      ) {
-        return;
-      }
-
-      for (const shiftId of uniqueIds) {
-        await sbDelete("shifts", shiftId);
-      }
-      await refreshState(setState, setProfileDataIssues);
-    } catch (error) {
-      showDataActionError("Delete shift", error);
+    const allShifts = await sbSelect("shifts");
+    const target = (allShifts || []).find((sh) => sh.id === id);
+    const targetClientId = target?.client_id || target?.clientId || "";
+    if (!canManageClientId(targetClientId)) {
+      return alert("You can only delete shifts for your assigned clients.");
     }
+    const sharedGroupId = target?.shared_group_id || target?.sharedGroupId || "";
+    const idsToDelete = sharedGroupId
+      ? (allShifts || [])
+          .filter((sh) => (sh.shared_group_id || sh.sharedGroupId || "") === sharedGroupId)
+          .map((sh) => sh.id)
+      : [id];
+
+    const uniqueIds = Array.from(new Set(idsToDelete.length ? idsToDelete : [id]));
+    if (
+      !confirm(
+        uniqueIds.length > 1
+          ? `Delete this shared shift group (${uniqueIds.length} linked shifts)?`
+          : "Delete this shift?"
+      )
+    ) {
+      return;
+    }
+
+    for (const shiftId of uniqueIds) {
+      await sbDelete("shifts", shiftId);
+    }
+    await refreshState(setState);
   }
 
   // Admin: drafts
@@ -3476,7 +3224,7 @@ export default function Page() {
 
     try {
       await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
-      await refreshState(setState, setProfileDataIssues);
+      await refreshState(setState);
       setStaffDraftName("");
     } catch (err) {
       console.error("addStaff error", err);
@@ -3485,22 +3233,14 @@ export default function Page() {
   }
 
   async function toggleStaff(id, active) {
-    try {
-      await sbUpsert("staff", [{ id, active: !active }]);
-      await refreshState(setState, setProfileDataIssues);
-    } catch (error) {
-      showDataActionError("Update staff", error);
-    }
+    await sbUpsert("staff", [{ id, active: !active }]);
+    await refreshState(setState);
   }
 
   async function removeStaff(id) {
-    try {
-      if (!confirm("Remove staff? (This does not delete their shifts automatically.)")) return;
-      await sbDelete("staff", id);
-      await refreshState(setState, setProfileDataIssues);
-    } catch (error) {
-      showDataActionError("Remove staff", error);
-    }
+    if (!confirm("Remove staff? (This does not delete their shifts automatically.)")) return;
+    await sbDelete("staff", id);
+    await refreshState(setState);
   }
 
   async function saveClient() {
@@ -3509,26 +3249,23 @@ export default function Page() {
     const name = clientDraft.name.trim();
     if (!name) return alert("Client name required.");
     const isEditingExisting = !!clientDraft.id;
-    const existingClient = (state.clients || []).find((client) => client.id === clientDraft.id) || null;
-    const row = buildClientUpsertRow(
-      {
-        id: clientDraft.id || uid("cl"),
-        name,
-        supervisorId: clientDraft.supervisorId || "",
-        coverageStart: clientDraft.coverageStart || "07:00",
-        coverageEnd: clientDraft.coverageEnd || "23:00",
-        weeklyHours: Number(clientDraft.weeklyHours) || 40,
-        assignedStaffIds: parseAssignedStaffIds(clientDraft.assignedStaffIds || []),
-        is24Hour: !!clientDraft.is24Hour,
-        active: clientDraft.active !== false,
-      },
-      existingClient
-    );
+    const row = {
+      id: clientDraft.id || uid("cl"),
+      name,
+      supervisor_id: clientDraft.supervisorId || null,
+      coverage_start: clientDraft.coverageStart || "07:00",
+      coverage_end: clientDraft.coverageEnd || "23:00",
+      // Canonical DB column for client weekly hours
+      hours_allotted: Number(clientDraft.weeklyHours) || 40,
+      assigned_staff_ids: serializeAssignedStaffIds(clientDraft.assignedStaffIds || []),
+      is_24_hour: !!clientDraft.is24Hour,
+      active: clientDraft.active !== false,
+    };
     try {
       setIsSavingClient(true);
       if (isEditingExisting) lastEditedClientIdRef.current = row.id;
       await sbUpsert("clients", [row]);
-      await refreshState(setState, setProfileDataIssues);
+      await refreshState(setState);
       resetClientDraft();
 
       // UX: after editing, jump back to that client row in the list.
@@ -3552,50 +3289,39 @@ export default function Page() {
   }
 
   async function deleteClient(id) {
-    try {
-      if (!canSeeAdminUI) return alert("Only admins can delete clients.");
-      if (!confirm("Delete this client?")) return;
-      const shifts = await sbSelect("shifts");
-      const toRemove = (shifts || []).filter((s) => (s.client_id || s.clientId) === id).map((s) => s.id);
-      for (const sid of toRemove) {
-        await sbDelete("shifts", sid);
-      }
-      await sbDelete("clients", id);
-      await refreshState(setState, setProfileDataIssues);
-    } catch (error) {
-      showDataActionError("Delete client", error);
+    if (!canSeeAdminUI) return alert("Only admins can delete clients.");
+    if (!confirm("Delete this client?")) return;
+    // remove shifts for that client first
+    const shifts = await sbSelect("shifts");
+    const toRemove = (shifts || []).filter((s) => (s.client_id || s.clientId) === id).map((s) => s.id);
+    for (const sid of toRemove) {
+      await sbDelete("shifts", sid);
     }
+    await sbDelete("clients", id);
+    await refreshState(setState);
   }
 
   async function saveUser() {
-    try {
-      if (!canSeeAdminUI) return alert("Only admins can manage users.");
-      if (!userDraft.id.trim() || !userDraft.name.trim() || !userDraft.pin.trim()) {
-        return alert("User id, name, and PIN required.");
-      }
-      const row = {
-        id: userDraft.id.trim(),
-        name: userDraft.name.trim(),
-        role: normalizeRole(userDraft.role) || "supervisor",
-        pin: userDraft.pin.trim(),
-      };
-      await sbUpsert("users", [row]);
-      await refreshState(setState, setProfileDataIssues);
-      setUserDraft({ id: "", name: "", role: "supervisor", pin: "" });
-    } catch (error) {
-      showDataActionError("Save user", error);
+    if (!canSeeAdminUI) return alert("Only admins can manage users.");
+    if (!userDraft.id.trim() || !userDraft.name.trim() || !userDraft.pin.trim()) {
+      return alert("User id, name, and PIN required.");
     }
+    const row = {
+      id: userDraft.id.trim(),
+      name: userDraft.name.trim(),
+      role: normalizeRole(userDraft.role) || "supervisor",
+      pin: userDraft.pin.trim(),
+    };
+    await sbUpsert("users", [row]);
+    await refreshState(setState);
+    setUserDraft({ id: "", name: "", role: "supervisor", pin: "" });
   }
 
   async function deleteUser(id) {
-    try {
-      if (!canSeeAdminUI) return alert("Only admins can manage users.");
-      if (!confirm("Delete this user?")) return;
-      await sbDelete("users", id);
-      await refreshState(setState, setProfileDataIssues);
-    } catch (error) {
-      showDataActionError("Delete user", error);
-    }
+    if (!canSeeAdminUI) return alert("Only admins can manage users.");
+    if (!confirm("Delete this user?")) return;
+    await sbDelete("users", id);
+    await refreshState(setState);
   }
 
   // Tabs
@@ -3779,30 +3505,17 @@ export default function Page() {
           </div>
         ) : supabaseError ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
-            <strong>Warning:</strong> Supabase requests are failing. The app kept the last successful snapshot and stopped writing browser-local fallback data.
+            <strong>Warning:</strong> Supabase requests are failing. The app is using localStorage fallback.
             <div style={{ marginTop: 6, opacity: 0.85, fontSize: 12 }}>
               {supabaseError.message || supabaseError.code || "Unknown error"} (check your anon key & table policies)
             </div>
-          </div>
-        ) : null}
-        {profileDataIssues.length > 0 ? (
-          <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
-            <strong>Data diagnostics:</strong> {profileDataIssues.length} potential profile data issue(s) detected.
-            <details style={{ marginTop: 8 }}>
-              <summary>Show issue details</summary>
-              <div style={{ marginTop: 8, display: "grid", gap: 6, fontSize: 12, opacity: 0.9 }}>
-                {profileDataIssues.map((issue, index) => (
-                  <div key={`${index}_${issue}`}>{issue}</div>
-                ))}
-              </div>
-            </details>
           </div>
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 2 }}>
           <div>
             <div style={{ fontSize: 22, fontWeight: 980, lineHeight: 1.12, letterSpacing: "0.01em" }}>DSW Scheduler</div>
             <div style={styles.tiny}>
-              Logged in as <b>{getUserDisplayName(currentUser)}</b> ({currentUser.role})
+              Logged in as <b>{currentUser.name}</b> ({currentUser.role})
             </div>
             <div style={{ ...styles.tiny, marginTop: 2 }}>
               <b>Access:</b> {accessSummary}
@@ -4821,12 +4534,12 @@ export default function Page() {
             {!selectedClient ? (
               <div style={{ ...styles.tiny, marginTop: 24 }}>Select a client to view profile.</div>
             ) : (
-              <div style={{ ...styles.card, background: UI.panel, marginTop: 0 }}>
+              <div style={{ ...styles.card, background: "rgba(255,255,255,0.02)", marginTop: 0 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                   <div>
                     <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
                     <div style={styles.tiny}>
-                      Supervisor: <b>{getSupervisorNameById(state.users, selectedClient.supervisorId)}</b> &nbsp;|&nbsp;
+                      Supervisor: <b>{(state.users || []).find((u) => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
                       Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
                       24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
                     </div>
@@ -4866,7 +4579,7 @@ export default function Page() {
                   <div style={styles.tiny}>Payroll Period Hours Summary</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ height: 10, width: "100%", background: UI.tableHeader, borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
                         <div
                           style={{
                             height: "100%",
@@ -4899,8 +4612,13 @@ export default function Page() {
                         alert("You can only edit assigned staff for your own clients.");
                         return;
                       }
-                      sbUpsert("clients", [buildClientUpsertRow({ id: selectedClient.id, assignedStaffIds: next }, selectedClient)])
-                        .then(() => refreshState(setState, setProfileDataIssues))
+                      sbUpsert("clients", [
+                        {
+                          id: selectedClient.id,
+                          assigned_staff_ids: serializeAssignedStaffIds(next),
+                        },
+                      ])
+                        .then(() => refreshState(setState))
                         .catch((err) => {
                           console.error("save assigned staff failed", err);
                           alert("Unable to save assigned staff.");
@@ -5032,7 +4750,7 @@ export default function Page() {
                 <select style={styles.select} value={clientDraft.supervisorId || ""} onChange={(e) => setClientDraft((p) => ({ ...p, supervisorId: e.target.value }))}>
                   <option value="">Unassigned</option>
                   {(state.users || []).filter((u) => isSupervisorRole(u.role)).map((u) => (
-                    <option key={u.id} value={u.id}>{formatUserOptionLabel(u)}</option>
+                    <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
                   ))}
                 </select>
               </div>
@@ -5093,7 +4811,7 @@ export default function Page() {
                           {c.name} {c.is24Hour ? <span style={{ opacity: 0.8 }}>(24h)</span> : null}
                         </div>
                         <div style={styles.shiftMeta}>
-                          Supervisor: <b>{sup ? getUserDisplayName(sup) : getSupervisorNameById(state.users, c.supervisorId)}</b>
+                          Supervisor: <b>{sup ? sup.name : "Unassigned"}</b>
                           <br />
                           Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
                           <br />
@@ -5104,7 +4822,17 @@ export default function Page() {
                         <button
                           style={styles.btn2}
                           onClick={() =>
-                            setClientDraft(toClientCamelCaseRow(c))
+                            setClientDraft({
+                              id: c.id,
+                              name: c.name,
+                              supervisorId: c.supervisorId || "",
+                              coverageStart: c.coverageStart || "07:00",
+                              coverageEnd: c.coverageEnd || "23:00",
+                              weeklyHours: Number(c.weeklyHours ?? c.hours_allotted ?? c.weekly_hours) || 40,
+                              assignedStaffIds: parseAssignedStaffIds(c.assignedStaffIds ?? c.assigned_staff_ids),
+                              is24Hour: !!c.is24Hour,
+                              active: c.active !== false,
+                            })
                           }
                         >
                           Edit
@@ -5168,7 +4896,7 @@ export default function Page() {
                 <div key={u.id} style={styles.shift}>
                   <div style={styles.shiftTop}>
                     <div>
-                      <div style={styles.shiftTitle}>{getUserDisplayName(u)}</div>
+                      <div style={styles.shiftTitle}>{u.name}</div>
                       <div style={styles.shiftMeta}>ID: <b>{u.id}</b> • Role: <b>{u.role}</b></div>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -5384,13 +5112,13 @@ export default function Page() {
 ========================= */
 
 const UI = {
-  bg: "#F4F6F8",
-  panel: "#FAFAFA",
-  panelAlt: "#F5F7F9",
-  nav: "#F1F3F5",
-  tableHeader: "#EEF1F4",
-  rowHover: "#E7ECF1",
-  field: "#FAFAFA",
+  bg: "#EEF1F4",
+  panel: "#F8FAFB",
+  panelAlt: "#F2F4F7",
+  nav: "#F2F4F7",
+  tableHeader: "#F1F4F7",
+  rowHover: "#E9EEF3",
+  field: "#F8FAFB",
   border: "#D9DEE5",
   borderSoft: "#E4E9EF",
   text: "#2F3742",
