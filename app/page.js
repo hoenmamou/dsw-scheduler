@@ -43,9 +43,9 @@ function readUserNameParts(user) {
 
 function readUserNameValue(user) {
   const directCandidates = [
-    user?.name,
     user?.full_name,
     user?.fullName,
+    user?.name,
     user?.display_name,
     user?.displayName,
     user?.user_name,
@@ -817,16 +817,21 @@ function AssignedStaffDropdown({ label = "Assigned Staff", selectedIds, staffOpt
    Supabase data helpers
 ========================= */
 
-function cloneDefaultDb() {
-  return JSON.parse(JSON.stringify(DEFAULT_DB));
+function createEmptyDb() {
+  return {
+    users: [],
+    staff: [],
+    clients: [],
+    shifts: [],
+  };
 }
 
 function readLocalDb() {
   try {
     const raw = localStorage.getItem(LOCAL_DB_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : cloneDefaultDb();
+    return raw ? JSON.parse(raw) : createEmptyDb();
   } catch {
-    return cloneDefaultDb();
+    return createEmptyDb();
   }
 }
 
@@ -894,10 +899,19 @@ async function fetchAllDataSnapshot() {
     const snapshot = Object.fromEntries(entries);
     const localDb = readLocalDb();
     writeLocalDb({ ...localDb, ...snapshot });
+    console.info("Users loaded from Supabase.", {
+      count: snapshot.users?.length || 0,
+      ids: (snapshot.users || []).map((user) => user.id),
+    });
     return { source: "supabase", snapshot };
   }
 
-  return { source: "local", snapshot: getLocalDbSnapshot() };
+  const snapshot = getLocalDbSnapshot();
+  console.info("Users loaded from local fallback.", {
+    count: snapshot.users?.length || 0,
+    ids: (snapshot.users || []).map((user) => user.id),
+  });
+  return { source: "local", snapshot };
 }
 
 function toClientSnakeCaseRow(row) {
@@ -1183,6 +1197,13 @@ function toDB(state) {
 async function refreshState(setStateLocal, setIssuesLocal) {
   try {
     let { source, snapshot } = await fetchAllDataSnapshot();
+
+    if (source === "supabase" && (!snapshot.users || snapshot.users.length === 0)) {
+      console.warn("Users table returned zero rows from Supabase.", {
+        source,
+        supabaseConfigured: SUPABASE_CONFIGURED,
+      });
+    }
 
     if (source === "local" && (!snapshot.users || snapshot.users.length === 0)) {
       console.warn("No users found in local mode; seeding default users.");
