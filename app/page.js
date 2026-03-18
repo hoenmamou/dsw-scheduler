@@ -35,6 +35,59 @@ function normalizeRole(role) {
   return String(role || "").trim().toLowerCase();
 }
 
+function readUserNameParts(user) {
+  const first = String(user?.first_name ?? user?.firstName ?? "").trim();
+  const last = String(user?.last_name ?? user?.lastName ?? "").trim();
+  return [first, last].filter(Boolean).join(" ").trim();
+}
+
+function readUserNameValue(user) {
+  const directCandidates = [
+    user?.name,
+    user?.full_name,
+    user?.fullName,
+    user?.display_name,
+    user?.displayName,
+    user?.user_name,
+    user?.username,
+  ];
+
+  for (const candidate of directCandidates) {
+    const value = String(candidate || "").trim();
+    if (value) return value;
+  }
+
+  const combinedName = readUserNameParts(user);
+  if (combinedName) return combinedName;
+
+  const email = String(user?.email || "").trim();
+  if (email) return email;
+
+  return "";
+}
+
+function getUserDisplayName(user, fallback = "Unknown Supervisor") {
+  return readUserNameValue(user) || fallback;
+}
+
+function getUserRoleValue(user) {
+  return normalizeRole(user?.role ?? user?.dashboard_role ?? user?.user_role) || "supervisor";
+}
+
+function getSupervisorNameById(users, supervisorId, { unassignedLabel = "Unassigned", unknownLabel = "Unknown Supervisor" } = {}) {
+  const id = String(supervisorId || "").trim();
+  if (!id) return unassignedLabel;
+  const match = (users || []).find((user) => user.id === id);
+  if (!match) return unknownLabel;
+  return getUserDisplayName(match, unknownLabel);
+}
+
+function formatUserOptionLabel(user) {
+  const label = getUserDisplayName(user, "Unknown Supervisor");
+  const role = getUserRoleValue(user);
+  return `${label} (${role})`;
+}
+
 function isSupervisorRole(role) {
   const normalized = normalizeRole(role);
   return normalized === "supervisor";
@@ -919,6 +972,13 @@ function collectProfileDataIssues({ users, staff, clients, shifts }) {
   const staffIds = new Set((staff || []).map((member) => member.id));
   const clientIds = new Set((clients || []).map((client) => client.id));
 
+  for (const user of users || []) {
+    const rawName = readUserNameValue(user);
+    if (!rawName) {
+      issues.push(`User "${user?.id || "unknown-user"}" is missing a display name; the UI will show Unknown Supervisor.`);
+    }
+  }
+
   for (const client of clients || []) {
     const clientId = client?.id || "unknown-client";
     const supervisorId = client?.supervisor_id ?? client?.supervisorId ?? "";
@@ -1040,9 +1100,9 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
     },
     users: (users || []).map((u) => ({
       id: u.id,
-      name: u.name,
-      role: normalizeRole(u.role ?? u.dashboard_role) || "supervisor",
-      pin: u.pin,
+      name: getUserDisplayName(u, "Unknown Supervisor"),
+      role: getUserRoleValue(u),
+      pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
     })),
     staff: (staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
     clients: (clients || []).map((c) => ({
@@ -1088,8 +1148,8 @@ function toDB(state) {
   return {
     users: (state.users || []).map((u) => ({
       id: u.id,
-      name: u.name,
-      role: normalizeRole(u.role) || "supervisor",
+      name: getUserDisplayName(u, "Unknown Supervisor"),
+      role: getUserRoleValue(u),
       pin: u.pin,
     })),
     staff: (state.staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
@@ -1706,7 +1766,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
             <select style={styles.select} value={picked} onChange={(e) => setPicked(e.target.value)}>
               {users.map((u) => (
                 <option key={u.id} value={u.id}>
-                  {u.name} ({u.role})
+                  {formatUserOptionLabel(u)}
                 </option>
               ))}
             </select>
@@ -3036,7 +3096,7 @@ export default function Page() {
         const sup = (state.users || []).find((u) => u.id === (conflictClient?.supervisorId || ""));
         const message =
           `${rowLabel}: conflict with ${conflictClient?.name || "Unknown"}` +
-          ` (${sup ? sup.name : "Unassigned"})` +
+          ` (${sup ? getUserDisplayName(sup) : "Unknown Supervisor"})` +
           ` at ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}.`;
         if (state.settings?.hardStopConflicts) {
           return { errors: [message], rows: [], planned };
@@ -3698,7 +3758,7 @@ export default function Page() {
           <div>
             <div style={{ fontSize: 22, fontWeight: 980, lineHeight: 1.12, letterSpacing: "0.01em" }}>DSW Scheduler</div>
             <div style={styles.tiny}>
-              Logged in as <b>{currentUser.name}</b> ({currentUser.role})
+              Logged in as <b>{getUserDisplayName(currentUser)}</b> ({currentUser.role})
             </div>
             <div style={{ ...styles.tiny, marginTop: 2 }}>
               <b>Access:</b> {accessSummary}
@@ -4722,7 +4782,7 @@ export default function Page() {
                   <div>
                     <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
                     <div style={styles.tiny}>
-                      Supervisor: <b>{(state.users || []).find((u) => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
+                      Supervisor: <b>{getSupervisorNameById(state.users, selectedClient.supervisorId)}</b> &nbsp;|&nbsp;
                       Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
                       24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
                     </div>
@@ -4928,7 +4988,7 @@ export default function Page() {
                 <select style={styles.select} value={clientDraft.supervisorId || ""} onChange={(e) => setClientDraft((p) => ({ ...p, supervisorId: e.target.value }))}>
                   <option value="">Unassigned</option>
                   {(state.users || []).filter((u) => isSupervisorRole(u.role)).map((u) => (
-                    <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
+                    <option key={u.id} value={u.id}>{formatUserOptionLabel(u)}</option>
                   ))}
                 </select>
               </div>
@@ -4989,7 +5049,7 @@ export default function Page() {
                           {c.name} {c.is24Hour ? <span style={{ opacity: 0.8 }}>(24h)</span> : null}
                         </div>
                         <div style={styles.shiftMeta}>
-                          Supervisor: <b>{sup ? sup.name : "Unassigned"}</b>
+                          Supervisor: <b>{sup ? getUserDisplayName(sup) : getSupervisorNameById(state.users, c.supervisorId)}</b>
                           <br />
                           Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
                           <br />
@@ -5064,7 +5124,7 @@ export default function Page() {
                 <div key={u.id} style={styles.shift}>
                   <div style={styles.shiftTop}>
                     <div>
-                      <div style={styles.shiftTitle}>{u.name}</div>
+                      <div style={styles.shiftTitle}>{getUserDisplayName(u)}</div>
                       <div style={styles.shiftMeta}>ID: <b>{u.id}</b> • Role: <b>{u.role}</b></div>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
