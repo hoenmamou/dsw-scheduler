@@ -1,19 +1,34 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { SUPABASE_CONFIGURED, supabase } from "../lib/supabaseClient";
+import {
+  fmtHours as calcFmtHours,
+  hoursToUnits, unitsToHours, minutesToHours, minutesToUnits,
+  getWeekWindow, getBiweeklyWindow,
+  staffMinutesInWindow as calcStaffMin, staffWeeklyMinutes, staffBiweeklyMinutes,
+  clientMinutesInWindow as calcClientMin, clientWeeklyMinutes, clientBiweeklyMinutes,
+  staffOvertimeMinutes, staffOvertimePercent, isNearOT, isInOT,
+  findShiftCausingOT, allStaffOTSummary,
+  clientAuthorizedVsScheduled, findOpenShifts, openShiftMinutes,
+  findAllConflicts, validateShiftSave, findReplacementCandidates,
+  computeDashboardSummary, computePayrollSummary,
+  OT_THRESHOLD_MIN as CALC_OT_THRESHOLD_MIN,
+} from "../lib/calculations";
+import {
+  logShiftCreate, logShiftEdit, logShiftDelete, logCallOut, logReassignment,
+  fetchAuditLogs,
+} from "../lib/auditLog";
 
-// On the client, Next.js replaces env vars at build time.
-const SUPABASE_CONFIGURED = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+const LOCAL_DB_STORAGE_KEY = "dsw_local_db";
+const DATA_TABLES = ["users", "staff", "clients", "shifts", "call_outs", "audit_logs"];
 
-// Supabase errors (auth/RLS) should not break the app. When they happen we
-// fall back to localStorage (and log a warning).
 let supabaseErrorHandler = null;
 function setSupabaseErrorHandler(fn) {
   supabaseErrorHandler = fn;
 }
 function reportSupabaseError(error) {
-  console.warn("Supabase request failed; falling back to local storage.", error);
+  console.warn("Supabase request failed.", error);
   if (typeof supabaseErrorHandler === "function") supabaseErrorHandler(error);
 }
 
@@ -35,6 +50,50 @@ const DEFAULT_PAYROLL_CYCLE_ANCHOR = "2026-03-08";
 
 function normalizeRole(role) {
   return String(role || "").trim().toLowerCase();
+}
+
+function readUserNameParts(user) {
+  const first = String(user?.first_name ?? user?.firstName ?? "").trim();
+  const last = String(user?.last_name ?? user?.lastName ?? "").trim();
+  return [first, last].filter(Boolean).join(" ").trim();
+}
+
+function readUserNameValue(user) {
+  const name = String(user?.name || "").trim();
+  if (name) return name;
+
+  const username = String(user?.username ?? user?.user_name ?? "").trim();
+  if (username) return username;
+
+  const combinedName = readUserNameParts(user);
+  if (combinedName) return combinedName;
+
+  const email = String(user?.email || "").trim();
+  if (email) return email;
+
+  return "";
+}
+
+function getUserDisplayName(user, fallback = "Unknown User") {
+  return readUserNameValue(user) || fallback;
+}
+
+function getUserRoleValue(user) {
+  return normalizeRole(user?.role ?? user?.dashboard_role ?? user?.user_role) || "supervisor";
+}
+
+function getSupervisorNameById(users, supervisorId, { unassignedLabel = "Unassigned", unknownLabel = "Unknown Supervisor" } = {}) {
+  const id = String(supervisorId || "").trim();
+  if (!id) return unassignedLabel;
+  const match = (users || []).find((user) => user.id === id);
+  if (!match) return unknownLabel;
+  return getUserDisplayName(match, unknownLabel);
+}
+
+function formatUserOptionLabel(user) {
+  const label = getUserDisplayName(user, "Unknown User");
+  const role = getUserRoleValue(user);
+  return `${label} (${role})`;
 }
 
 function isSupervisorRole(role) {
@@ -766,21 +825,136 @@ function AssignedStaffDropdown({ label = "Assigned Staff", selectedIds, staffOpt
    Supabase data helpers
 ========================= */
 
-function cloneDefaultDb() {
-  return JSON.parse(JSON.stringify(DEFAULT_DB));
+function createEmptyDb() {
+  return {
+    users: [],
+    staff: [],
+    clients: [],
+    shifts: [],
+    call_outs: [],
+    audit_logs: [],
+  };
 }
 
 function readLocalDb() {
   try {
-    const raw = localStorage.getItem("dsw_local_db");
-    return raw ? JSON.parse(raw) : cloneDefaultDb();
+    const raw = localStorage.getItem(LOCAL_DB_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : createEmptyDb();
   } catch {
-    return cloneDefaultDb();
+    return createEmptyDb();
   }
 }
 
 function writeLocalDb(db) {
-  localStorage.setItem("dsw_local_db", JSON.stringify(db));
+  localStorage.setItem(LOCAL_DB_STORAGE_KEY, JSON.stringify(db));
+}
+
+function getLocalDbSnapshot() {
+  const db = readLocalDb();
+  return {
+    users: Array.isArray(db.users) ? db.users : [],
+    staff: Array.isArray(db.staff) ? db.staff : [],
+    clients: Array.isArray(db.clients) ? db.clients : [],
+    shifts: Array.isArray(db.shifts) ? db.shifts : [],
+    call_outs: Array.isArray(db.call_outs) ? db.call_outs : [],
+    audit_logs: Array.isArray(db.audit_logs) ? db.audit_logs : [],
+  };
+}
+
+function replaceLocalTable(table, rows) {
+  const db = readLocalDb();
+  db[table] = Array.isArray(rows) ? rows : [];
+  writeLocalDb(db);
+}
+
+function mergeLocalTableRows(table, rows) {
+  const db = readLocalDb();
+  db[table] = db[table] || [];
+  for (const row of rows || []) {
+    const index = db[table].findIndex((item) => item.id === row.id);
+    if (index >= 0) db[table][index] = { ...db[table][index], ...row };
+    else db[table].push(row);
+  }
+  writeLocalDb(db);
+}
+
+function removeLocalTableRow(table, id) {
+  const db = readLocalDb();
+  db[table] = (db[table] || []).filter((row) => row.id !== id);
+  writeLocalDb(db);
+}
+
+function createDataRequestError(operation, table, error) {
+  const wrapped = new Error(
+    `Supabase ${operation} failed for ${table}: ${error?.message || error?.code || "Unknown error"}`
+  );
+  wrapped.name = "DataRequestError";
+  wrapped.operation = operation;
+  wrapped.table = table;
+  wrapped.code = error?.code;
+  wrapped.details = error?.details;
+  wrapped.hint = error?.hint;
+  wrapped.cause = error;
+  return wrapped;
+}
+
+function hasOnlyDefaultUsers(rows) {
+  const users = Array.isArray(rows) ? rows : [];
+  if (users.length !== DEFAULT_DB.users.length) return false;
+  const ids = new Set(users.map((user) => user?.id));
+  return DEFAULT_DB.users.every((user) => ids.has(user.id));
+}
+
+async function fetchAllDataSnapshot() {
+  if (SUPABASE_CONFIGURED && supabase) {
+    const localDb = readLocalDb();
+    const snapshot = { ...getLocalDbSnapshot() };
+    const tableSources = {};
+    const results = await Promise.allSettled(
+      DATA_TABLES.map(async (table) => {
+        const { data, error } = await supabase.from(table).select("*");
+        if (error) throw createDataRequestError("select", table, error);
+        return { table, data: data || [] };
+      })
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        const { table, data } = result.value;
+        snapshot[table] = data;
+        replaceLocalTable(table, data);
+        tableSources[table] = "supabase";
+        continue;
+      }
+
+      const error = result.reason;
+      const table = error?.table || "unknown";
+      reportSupabaseError(error);
+      tableSources[table] = "local";
+      snapshot[table] = getLocalDbSnapshot()[table] || [];
+    }
+
+    if (tableSources.users === "local" && hasOnlyDefaultUsers(snapshot.users)) {
+      console.warn("Users query fell back to local placeholder users; suppressing demo users while Supabase is configured.");
+      snapshot.users = [];
+    }
+
+    writeLocalDb({ ...localDb, ...snapshot });
+    console.info(`Users loaded from ${tableSources.users === "supabase" ? "Supabase" : "local fallback"}.`, {
+      count: snapshot.users?.length || 0,
+      ids: (snapshot.users || []).map((user) => user.id),
+      displayNames: (snapshot.users || []).map((user) => readUserNameValue(user) || "Unknown User"),
+    });
+    return { source: tableSources.users === "supabase" ? "supabase" : "local", snapshot, tableSources };
+  }
+
+  const snapshot = getLocalDbSnapshot();
+  console.info("Users loaded from local fallback.", {
+    count: snapshot.users?.length || 0,
+    ids: (snapshot.users || []).map((user) => user.id),
+    displayNames: (snapshot.users || []).map((user) => readUserNameValue(user) || "Unknown User"),
+  });
+  return { source: "local", snapshot };
 }
 
 function toClientSnakeCaseRow(row) {
@@ -825,21 +999,95 @@ function toClientMinimalRow(row) {
   };
 }
 
-async function sbSelect(table) {
-  // Supabase or localStorage fallback
-  if (SUPABASE_CONFIGURED && supabase) {
-    const { data, error } = await supabase.from(table).select("*");
-    if (!error) return data || [];
-    reportSupabaseError(error);
+function buildClientUpsertRow(inputRow, existingRow = null) {
+  const merged = toClientCamelCaseRow({ ...(existingRow || {}), ...(inputRow || {}) });
+  return toClientSnakeCaseRow(merged);
+}
+
+function collectDuplicateIdIssues(label, rows) {
+  const counts = new Map();
+  for (const row of rows || []) {
+    const id = String(row?.id || "").trim();
+    if (!id) continue;
+    counts.set(id, (counts.get(id) || 0) + 1);
   }
 
-  // localStorage fallback
-  try {
-    const db = readLocalDb();
-    return db[table] || [];
-  } catch {
-    return [];
+  return Array.from(counts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([id, count]) => `${label} contains duplicate id "${id}" (${count} rows).`);
+}
+
+function collectProfileDataIssues({ users, staff, clients, shifts }) {
+  const issues = [
+    ...collectDuplicateIdIssues("Users", users),
+    ...collectDuplicateIdIssues("Staff", staff),
+    ...collectDuplicateIdIssues("Clients", clients),
+    ...collectDuplicateIdIssues("Shifts", shifts),
+  ];
+
+  const userIds = new Set((users || []).map((user) => user.id));
+  const staffIds = new Set((staff || []).map((member) => member.id));
+  const clientIds = new Set((clients || []).map((client) => client.id));
+
+  for (const user of users || []) {
+    const rawName = readUserNameValue(user);
+    if (!rawName) {
+      issues.push(`User "${user?.id || "unknown-user"}" is missing a display name; the UI will show Unknown User.`);
+    }
   }
+
+  for (const client of clients || []) {
+    const clientId = client?.id || "unknown-client";
+    const supervisorId = client?.supervisor_id ?? client?.supervisorId ?? "";
+    if (supervisorId && !userIds.has(supervisorId)) {
+      issues.push(`Client "${clientId}" points to missing supervisor "${supervisorId}".`);
+    }
+
+    const hasHoursField = [client?.hours_allotted, client?.weekly_hours, client?.weeklyHours].some((value) => value != null && value !== "");
+    if (!hasHoursField) {
+      issues.push(`Client "${clientId}" is missing weekly hours; the UI defaulted it to 40.`);
+    }
+
+    const hasCoverageStart = [client?.coverage_start, client?.coverageStart].some((value) => String(value || "").trim());
+    const hasCoverageEnd = [client?.coverage_end, client?.coverageEnd].some((value) => String(value || "").trim());
+    if (!hasCoverageStart || !hasCoverageEnd) {
+      issues.push(`Client "${clientId}" is missing coverage hours; the UI defaulted the missing value.`);
+    }
+
+    const assignedIds = parseAssignedStaffIds(client?.assigned_staff_ids ?? client?.assignedStaffIds);
+    const unknownAssignedIds = assignedIds.filter((staffId) => !staffIds.has(staffId));
+    if (unknownAssignedIds.length) {
+      issues.push(`Client "${clientId}" references missing assigned staff: ${unknownAssignedIds.join(", ")}.`);
+    }
+  }
+
+  for (const shift of shifts || []) {
+    const shiftId = shift?.id || "unknown-shift";
+    const clientId = shift?.client_id ?? shift?.clientId ?? "";
+    const staffId = shift?.staff_id ?? shift?.staffId ?? "";
+    if (!clientId) issues.push(`Shift "${shiftId}" is missing client_id.`);
+    else if (!clientIds.has(clientId)) issues.push(`Shift "${shiftId}" references missing client "${clientId}".`);
+    if (staffId && !staffIds.has(staffId)) {
+      issues.push(`Shift "${shiftId}" references missing staff "${staffId}".`);
+    }
+  }
+
+  return Array.from(new Set(issues));
+}
+
+async function sbSelect(table) {
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { data, error } = await supabase.from(table).select("*");
+    if (!error) {
+      replaceLocalTable(table, data || []);
+      return data || [];
+    }
+    const wrappedError = createDataRequestError("select", table, error);
+    reportSupabaseError(wrappedError);
+    throw wrappedError;
+  }
+
+  return getLocalDbSnapshot()[table] || [];
 }
 
 async function sbUpsert(table, rows) {
@@ -856,40 +1104,31 @@ async function sbUpsert(table, rows) {
         if (!error) break;
       }
     }
-    if (!error) return;
-    reportSupabaseError(error);
+    if (!error) {
+      mergeLocalTableRows(table, rows);
+      return;
+    }
+    const wrappedError = createDataRequestError("upsert", table, error);
+    reportSupabaseError(wrappedError);
+    throw wrappedError;
   }
 
-  // localStorage upsert
-  try {
-    const db = readLocalDb();
-    db[table] = db[table] || [];
-    for (const r of rows) {
-      const idx = db[table].findIndex((x) => x.id === r.id);
-      if (idx >= 0) db[table][idx] = { ...db[table][idx], ...r };
-      else db[table].push(r);
-    }
-    writeLocalDb(db);
-    // refresh in-memory state by triggering loadAll externally (caller should reload)
-  } catch (e) {
-    console.error(e);
-  }
+  mergeLocalTableRows(table, rows);
 }
 
 async function sbDelete(table, id) {
   if (SUPABASE_CONFIGURED && supabase) {
     const { error } = await supabase.from(table).delete().eq("id", id);
-    if (!error) return;
-    reportSupabaseError(error);
+    if (!error) {
+      removeLocalTableRow(table, id);
+      return;
+    }
+    const wrappedError = createDataRequestError("delete", table, error);
+    reportSupabaseError(wrappedError);
+    throw wrappedError;
   }
 
-  try {
-    const db = readLocalDb();
-    db[table] = (db[table] || []).filter((x) => x.id !== id);
-    writeLocalDb(db);
-  } catch (e) {
-    console.error(e);
-  }
+  removeLocalTableRow(table, id);
 }
 
 // Local data fallback default seed
@@ -906,9 +1145,11 @@ const DEFAULT_DB = {
     { id: "cl1", name: "Client A", supervisor_id: "sup1", coverage_start: "07:00", coverage_end: "23:00", is_24_hour: false, active: true, hours_allotted: 40 },
   ],
   shifts: [],
+  call_outs: [],
+  audit_logs: [],
 };
 
-function normalizeFromDB({ users, staff, clients, shifts }) {
+function normalizeFromDB({ users, staff, clients, shifts, call_outs, audit_logs }) {
   return {
     settings: {
       includeUnassignedForSupervisors: true,
@@ -918,11 +1159,19 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
     },
     users: (users || []).map((u) => ({
       id: u.id,
-      name: u.name,
-      role: normalizeRole(u.role ?? u.dashboard_role) || "supervisor",
-      pin: u.pin,
+      name: getUserDisplayName(u, "Unknown User"),
+      role: getUserRoleValue(u),
+      pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
     })),
-    staff: (staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
+    staff: (staff || []).map((s) => ({
+      id: s.id,
+      name: s.name,
+      active: s.active !== false,
+      notes: s.notes || "",
+      restrictions: s.restrictions || "",
+      unavailableDates: (() => { try { return JSON.parse(s.unavailable_dates || "[]"); } catch { return []; } })(),
+      trainingExpiration: s.training_expiration || null,
+    })),
     clients: (clients || []).map((c) => ({
       id: c.id,
       name: c.name,
@@ -933,13 +1182,15 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
       ),
       coverageEnd: normalizeTimeValue(c.coverage_end ?? c.coverageEnd, "23:00"),
       is24Hour: !!(c.is_24_hour ?? c.is24Hour),
-      // Read canonical hours_allotted first; fall back to legacy weekly_hours if present.
       weeklyHours:
         typeof c.hours_allotted === "number"
           ? c.hours_allotted
           : Number(c.hours_allotted ?? c.weekly_hours) || 40,
+      biweeklyHours: c.biweekly_hours != null ? Number(c.biweekly_hours) : null,
       assignedStaffIds: parseAssignedStaffIds(c.assigned_staff_ids ?? c.assignedStaffIds),
       active: c.active !== false,
+      serviceNotes: c.service_notes || "",
+      criticalFlags: c.critical_flags || "",
     })),
 
     shifts: (shifts || [])
@@ -956,9 +1207,25 @@ function normalizeFromDB({ users, staff, clients, shifts }) {
           createdBy: sh.created_by || sh.createdBy,
           isShared: !!(sh.is_shared || sh.isShared),
           sharedGroupId: sh.shared_group_id || sh.sharedGroupId || "",
+          isCallOut: !!(sh.is_call_out || sh.isCallOut),
+          callOutReason: sh.call_out_reason || sh.callOutReason || "",
+          replacementStaffId: sh.replacement_staff_id || sh.replacementStaffId || "",
         };
       })
       .filter(Boolean),
+
+    callOuts: (call_outs || []).map((co) => ({
+      id: co.id,
+      shiftId: co.shift_id || co.shiftId || "",
+      clientId: co.client_id || co.clientId || "",
+      originalStaffId: co.original_staff_id || co.originalStaffId || "",
+      replacementStaffId: co.replacement_staff_id || co.replacementStaffId || "",
+      date: co.date || "",
+      reason: co.reason || "",
+      status: co.status || "open",
+      createdBy: co.created_by || co.createdBy || "",
+      createdAt: co.created_at || co.createdAt || "",
+    })),
   };
 }
 
@@ -966,11 +1233,17 @@ function toDB(state) {
   return {
     users: (state.users || []).map((u) => ({
       id: u.id,
-      name: u.name,
-      role: normalizeRole(u.role) || "supervisor",
+      name: getUserDisplayName(u, "Unknown User"),
+      role: getUserRoleValue(u),
       pin: u.pin,
     })),
-    staff: (state.staff || []).map((s) => ({ id: s.id, name: s.name, active: s.active !== false })),
+    staff: (state.staff || []).map((s) => ({
+      id: s.id, name: s.name, active: s.active !== false,
+      notes: s.notes || "",
+      restrictions: s.restrictions || "",
+      unavailable_dates: JSON.stringify(s.unavailableDates || []),
+      training_expiration: s.trainingExpiration || "",
+    })),
     clients: (state.clients || []).map((c) => ({
       id: c.id,
       name: c.name,
@@ -980,6 +1253,9 @@ function toDB(state) {
       is_24_hour: !!c.is24Hour,
       // Canonical DB column for client weekly hours
       hours_allotted: Number(c.weeklyHours) || 40,
+      biweekly_hours: Number(c.biweeklyHours) || 0,
+      service_notes: c.serviceNotes || "",
+      critical_flags: c.criticalFlags || "",
       assigned_staff_ids: serializeAssignedStaffIds(c.assignedStaffIds ?? []),
       active: c.active !== false,
     })),
@@ -993,24 +1269,56 @@ function toDB(state) {
       created_by: sh.createdBy || "unknown",
       is_shared: !!sh.isShared,
       shared_group_id: sh.sharedGroupId || "",
+      is_call_out: !!sh.isCallOut,
+      call_out_reason: sh.callOutReason || "",
+      replacement_staff_id: sh.replacementStaffId || "",
+    })),
+
+    call_outs: (state.callOuts || []).map((co) => ({
+      id: co.id,
+      shift_id: co.shift_id,
+      client_id: co.client_id,
+      original_staff_id: co.original_staff_id,
+      replacement_staff_id: co.replacement_staff_id || "",
+      date: co.date,
+      reason: co.reason || "",
+      status: co.status || "open",
+      created_by: co.created_by || "unknown",
+      created_at: co.created_at || new Date().toISOString(),
     })),
   };
 }
 
 // Refresh in-memory state from DB or localStorage
-async function refreshState(setStateLocal) {
+async function refreshState(setStateLocal, setIssuesLocal) {
   try {
-    const [users, staff, clients, shifts] = await Promise.all([
-      sbSelect("users"),
-      sbSelect("staff"),
-      sbSelect("clients"),
-      sbSelect("shifts"),
-    ]);
-    const normalized = normalizeFromDB({ users, staff, clients, shifts });
+    let { source, snapshot, tableSources } = await fetchAllDataSnapshot();
+
+    if (source === "supabase" && (!snapshot.users || snapshot.users.length === 0)) {
+      console.warn("Users table returned zero rows from Supabase.", {
+        source,
+        supabaseConfigured: SUPABASE_CONFIGURED,
+        tableSources,
+      });
+    }
+
+    if (!SUPABASE_CONFIGURED && source === "local" && (!snapshot.users || snapshot.users.length === 0)) {
+      console.warn("No users found in local mode; seeding default users.");
+      snapshot = { ...snapshot, users: DEFAULT_DB.users };
+      await sbUpsert("users", DEFAULT_DB.users);
+    }
+
+    const issues = collectProfileDataIssues(snapshot);
+    if (issues.length) {
+      console.warn("Profile data diagnostics", issues);
+    }
+
+    const normalized = normalizeFromDB(snapshot);
     if (typeof setStateLocal === "function") setStateLocal((p) => ({ ...p, ...normalized }));
+    if (typeof setIssuesLocal === "function") setIssuesLocal(issues);
     return normalized;
   } catch (e) {
-    console.error(e);
+    console.error("refreshState failed", e);
     return null;
   }
 }
@@ -1576,7 +1884,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
             <select style={styles.select} value={picked} onChange={(e) => setPicked(e.target.value)}>
               {users.map((u) => (
                 <option key={u.id} value={u.id}>
-                  {u.name} ({u.role})
+                  {formatUserOptionLabel(u)}
                 </option>
               ))}
             </select>
@@ -1878,6 +2186,18 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
                         >
                           Delete
                         </button>
+                        {sh.staffId && !sh.isCallOut && typeof markCallOut === "function" && (
+                          <button
+                            type="button"
+                            style={{ fontSize: 11, padding: "3px 8px", background: "#e67e22", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+                            onClick={() => {
+                              markCallOut(sh);
+                              setDayDetail(null);
+                            }}
+                          >
+                            Call-Out
+                          </button>
+                        )}
                       </div>
                     ) : null}
                   </div>
@@ -2100,6 +2420,19 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts,
                         >
                           Delete
                         </button>
+                        {sh.staffId && !sh.isCallOut && typeof markCallOut === "function" && (
+                          <button
+                            type="button"
+                            style={{ fontSize: 11, padding: "3px 8px", background: "#e67e22", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", position: "relative", zIndex: 2 }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              markCallOut(sh);
+                              setDayDetail(null);
+                            }}
+                          >
+                            Call-Out
+                          </button>
+                        )}
                       </div>
                     ) : null}
                   </div>
@@ -2269,6 +2602,7 @@ export default function Page() {
     staff: [],
     clients: [],
     shifts: [],
+    callOuts: [],
   });
 
   // session login (local session only)
@@ -2277,9 +2611,23 @@ export default function Page() {
 
   // Supabase error state (used to show a warning banner when auth/RLS fails)
   const [supabaseError, setSupabaseError] = useState(null);
+  const [profileDataIssues, setProfileDataIssues] = useState([]);
 
   // UI
-  const [tab, setTab] = useState("schedule");
+  const [tab, setTab] = useState("dashboard");
+
+  // Call-out replacement modal state
+  const [callOutModal, setCallOutModal] = useState(null);
+  const [callOutReason, setCallOutReason] = useState("");
+  const [replacementCandidates, setReplacementCandidates] = useState([]);
+
+  // Audit log state
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditFilter, setAuditFilter] = useState("all");
+
+  // Calendar filter state
+  const [calendarFilter, setCalendarFilter] = useState("all");
+  const [calendarFilterValue, setCalendarFilterValue] = useState("");
 
   // Payroll period selection
   const [payrollStartDate, setPayrollStartDate] = useState(() => getPayrollCycleRangeForReferenceDate(new Date()).startDate);
@@ -2357,22 +2705,14 @@ export default function Page() {
     let alive = true;
 
     async function loadAll() {
-      let [users, staff, clients, shifts] = await Promise.all([
-        sbSelect("users"),
-        sbSelect("staff"),
-        sbSelect("clients"),
-        sbSelect("shifts"),
-      ]);
-
-      // If the DB has never been seeded (e.g. fresh localStorage), ensure the default login user exists.
-      if (!users || users.length === 0) {
-        console.warn("No users found in DB — seeding default users for local dev.");
-        users = DEFAULT_DB.users;
-        await sbUpsert("users", users);
-      }
-
-      if (!alive) return;
-      setState((prev) => ({ ...prev, ...normalizeFromDB({ users, staff, clients, shifts }) }));
+      await refreshState(
+        (updater) => {
+          if (alive) setState(updater);
+        },
+        (issues) => {
+          if (alive) setProfileDataIssues(issues);
+        }
+      );
     }
 
     loadAll().catch((e) => console.error(e));
@@ -2422,11 +2762,21 @@ export default function Page() {
     setSessionUserSnapshot(null);
   }
 
+  function showDataActionError(action, error) {
+    console.error(`${action} failed`, error);
+    const message = error?.message || "Check the console for details.";
+    alert(`${action} failed.\n\n${message}`);
+  }
+
   async function createAdminUser({ id, name, pin }) {
-    const row = { id, name, role: "admin", pin };
-    await sbUpsert("users", [row]);
-    await refreshState(setState);
-    loginAs(id);
+    try {
+      const row = { id, name, role: "admin", pin };
+      await sbUpsert("users", [row]);
+      await refreshState(setState, setProfileDataIssues);
+      loginAs(id);
+    } catch (error) {
+      showDataActionError("Create admin", error);
+    }
   }
 
   const visibleClients = useMemo(() => {
@@ -2903,7 +3253,7 @@ export default function Page() {
         const sup = (state.users || []).find((u) => u.id === (conflictClient?.supervisorId || ""));
         const message =
           `${rowLabel}: conflict with ${conflictClient?.name || "Unknown"}` +
-          ` (${sup ? sup.name : "Unassigned"})` +
+          ` (${sup ? getUserDisplayName(sup) : "Unknown Supervisor"})` +
           ` at ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}.`;
         if (state.settings?.hardStopConflicts) {
           return { errors: [message], rows: [], planned };
@@ -3003,9 +3353,12 @@ export default function Page() {
     }
 
     await sbUpsert("shifts", rowsToSave);
-    await refreshState(setState);
-
-    if (!nextErrors.primary) {
+    // Audit: log each created shift
+    for (const row of rowsToSave) {
+      logShiftCreate(row, currentUser?.id, currentUser?.name).catch(() => {});
+    }
+    await refreshState(setState, setProfileDataIssues);
+    if (!keepSavedFailures) {
       resetPrimaryShiftDraft();
     }
 
@@ -3027,59 +3380,62 @@ export default function Page() {
   }
 
   async function runBuilder() {
-    if (!builderClientId) return alert("Pick a client for the builder.");
-    if (!canManageClientId(builderClientId)) {
-      return alert("You can only manage schedules for your assigned clients.");
+    try {
+      if (!builderClientId) return alert("Pick a client for the builder.");
+      if (!canManageClientId(builderClientId)) {
+        return alert("You can only manage schedules for your assigned clients.");
+      }
+      const client = (state.clients || []).find((c) => c.id === builderClientId);
+      if (!client) return alert("Selected client was not found.");
+
+      const shiftsDef = builderShiftInfo.shifts;
+      if (builderShiftInfo.error) return alert(builderShiftInfo.error);
+      if (!shiftsDef.length) return alert("No shift blocks found for the selected schedule source.");
+
+      const { rows, generatedShifts } = createShiftRowsFromTemplate({
+        clientId: client.id,
+        rangeStartDate: payrollStartDate,
+        rangeFinishDate: payrollFinishDate,
+        shiftsDef,
+        assignments: builderBlockAssignments,
+        createdBy: currentUser?.id || "builder",
+      });
+
+      if (!rows.length) return alert("No shifts were generated from the selected template.");
+
+      await sbUpsert("shifts", rows);
+      await refreshState(setState, setProfileDataIssues);
+
+      const summary = analyzeWeeklyStaffingNeeds({
+        existingShifts: state.shifts || [],
+        generatedShifts,
+        staffList: activeStaff,
+        payrollStartDate,
+        payrollFinishDate,
+      });
+
+      setBuilderSummary(summary);
+      setBuilderOpen(false);
+
+      const summaryText = [
+        `Created ${summary.totalShiftsCreated} shifts.`,
+        `Total scheduled hours: ${fmtHoursFromMin(summary.totalScheduledMinutes)}.`,
+        `Assigned staff hours: ${fmtHoursFromMin(summary.assignedScheduledMinutes)}.`,
+        `Open hours: ${fmtHoursFromMin(summary.unassignedHours)}.`,
+        `Minimum staff required at 40h max: ${summary.minimumStaffRequired}.`,
+        `Current usable staff: ${summary.currentUsableStaff}.`,
+        `Assigned: ${summary.assignedShifts}.`,
+        `Unassigned: ${summary.unassignedShifts}.`,
+        `Staff at 40h: ${summary.staffAt40Count}.`,
+        `Staff over 40h: ${summary.staffOver40Count}.`,
+        `${summary.currentStaffingEnough ? "Current staffing is enough." : "Current staffing is not enough."}`,
+        `Additional staff needed: ${summary.additionalStaffNeeded}.`,
+      ].join(" ");
+
+      alert(summaryText);
+    } catch (error) {
+      showDataActionError("Run 24-hour builder", error);
     }
-    const client = (state.clients || []).find((c) => c.id === builderClientId);
-    if (!client) return alert("Selected client was not found.");
-
-    // Determine shift definitions based on selected source
-    const shiftsDef = builderShiftInfo.shifts;
-    if (builderShiftInfo.error) return alert(builderShiftInfo.error);
-    if (!shiftsDef.length) return alert("No shift blocks found for the selected schedule source.");
-
-    const { rows, generatedShifts } = createShiftRowsFromTemplate({
-      clientId: client.id,
-      rangeStartDate: payrollStartDate,
-      rangeFinishDate: payrollFinishDate,
-      shiftsDef,
-      assignments: builderBlockAssignments,
-      createdBy: currentUser?.id || "builder",
-    });
-
-    if (!rows.length) return alert("No shifts were generated from the selected template.");
-
-    await sbUpsert("shifts", rows);
-    await refreshState(setState);
-
-    const summary = analyzeWeeklyStaffingNeeds({
-      existingShifts: state.shifts || [],
-      generatedShifts,
-      staffList: activeStaff,
-      payrollStartDate,
-      payrollFinishDate,
-    });
-
-    setBuilderSummary(summary);
-    setBuilderOpen(false);
-
-    const summaryText = [
-      `Created ${summary.totalShiftsCreated} shifts.`,
-      `Total scheduled hours: ${fmtHoursFromMin(summary.totalScheduledMinutes)}.`,
-      `Assigned staff hours: ${fmtHoursFromMin(summary.assignedScheduledMinutes)}.`,
-      `Open hours: ${fmtHoursFromMin(summary.unassignedHours)}.`,
-      `Minimum staff required at 40h max: ${summary.minimumStaffRequired}.`,
-      `Current usable staff: ${summary.currentUsableStaff}.`,
-      `Assigned: ${summary.assignedShifts}.`,
-      `Unassigned: ${summary.unassignedShifts}.`,
-      `Staff at 40h: ${summary.staffAt40Count}.`,
-      `Staff over 40h: ${summary.staffOver40Count}.`,
-      `${summary.currentStaffingEnough ? "Current staffing is enough." : "Current staffing is not enough."}`,
-      `Additional staff needed: ${summary.additionalStaffNeeded}.`,
-    ].join(" ");
-
-    alert(summaryText);
   }
 
   function getBuilderAssignmentValue(slotKey) {
@@ -3128,66 +3484,79 @@ export default function Page() {
   }
 
   async function addShift() {
-    clearShiftRowError("primary");
-    const result = await saveShiftDraftEntries([
-      { key: "primary", draft: shiftDraft, label: "Shift row 1" },
-    ]);
-    if (result.saved === 0 && result.errors.primary?.length) {
-      alert(result.errors.primary.join("\n"));
+    try {
+      clearShiftRowError("primary");
+      const result = await saveShiftDraftEntries([
+        { key: "primary", draft: shiftDraft, label: "Shift row 1" },
+      ]);
+      if (result.saved === 0 && result.errors.primary?.length) {
+        alert(result.errors.primary.join("\n"));
+      }
+    } catch (error) {
+      showDataActionError("Save shift", error);
     }
   }
 
   async function saveAllShifts() {
-    clearShiftRowError("primary");
-    const entries = [
-      { key: "primary", draft: shiftDraft, label: "Shift row 1" },
-      ...extraShiftRows.map((row, index) => ({
-        key: `extra_${index}`,
-        draft: row,
-        label: `Shift row ${index + 2}`,
-      })),
-    ];
-    const result = await saveShiftDraftEntries(entries, { keepSavedFailures: true });
-    if (result.saved > 0 && Object.keys(result.errors).length > 0) {
-      alert(`Saved ${result.saved} shift record(s). Some rows still need attention.`);
-      return;
+    try {
+      clearShiftRowError("primary");
+      const entries = [
+        { key: "primary", draft: shiftDraft, label: "Shift row 1" },
+        ...extraShiftRows.map((row, index) => ({
+          key: `extra_${index}`,
+          draft: row,
+          label: `Shift row ${index + 2}`,
+        })),
+      ];
+      const result = await saveShiftDraftEntries(entries, { keepSavedFailures: true });
+      if (result.saved > 0 && Object.keys(result.errors).length > 0) {
+        alert(`Saved ${result.saved} shift record(s). Some rows still need attention.`);
+        return;
+      }
+      if (result.saved > 0) {
+        alert(`Saved ${result.saved} shift record(s).`);
+        return;
+      }
+      alert("No shifts were saved. Check the row errors and try again.");
+    } catch (error) {
+      showDataActionError("Save shifts", error);
     }
-    if (result.saved > 0) {
-      alert(`Saved ${result.saved} shift record(s).`);
-      return;
-    }
-    alert("No shifts were saved. Check the row errors and try again.");
   }
 
   async function deleteShift(id) {
-    const allShifts = await sbSelect("shifts");
-    const target = (allShifts || []).find((sh) => sh.id === id);
-    const targetClientId = target?.client_id || target?.clientId || "";
-    if (!canManageClientId(targetClientId)) {
-      return alert("You can only delete shifts for your assigned clients.");
-    }
-    const sharedGroupId = target?.shared_group_id || target?.sharedGroupId || "";
-    const idsToDelete = sharedGroupId
-      ? (allShifts || [])
-          .filter((sh) => (sh.shared_group_id || sh.sharedGroupId || "") === sharedGroupId)
-          .map((sh) => sh.id)
-      : [id];
+    try {
+      const allShifts = await sbSelect("shifts");
+      const target = (allShifts || []).find((sh) => sh.id === id);
+      const targetClientId = target?.client_id || target?.clientId || "";
+      if (!canManageClientId(targetClientId)) {
+        return alert("You can only delete shifts for your assigned clients.");
+      }
+      const sharedGroupId = target?.shared_group_id || target?.sharedGroupId || "";
+      const idsToDelete = sharedGroupId
+        ? (allShifts || [])
+            .filter((sh) => (sh.shared_group_id || sh.sharedGroupId || "") === sharedGroupId)
+            .map((sh) => sh.id)
+        : [id];
 
-    const uniqueIds = Array.from(new Set(idsToDelete.length ? idsToDelete : [id]));
-    if (
-      !confirm(
-        uniqueIds.length > 1
-          ? `Delete this shared shift group (${uniqueIds.length} linked shifts)?`
-          : "Delete this shift?"
-      )
-    ) {
-      return;
-    }
+      const uniqueIds = Array.from(new Set(idsToDelete.length ? idsToDelete : [id]));
+      if (
+        !confirm(
+          uniqueIds.length > 1
+            ? `Delete this shared shift group (${uniqueIds.length} linked shifts)?`
+            : "Delete this shift?"
+        )
+      ) {
+        return;
+      }
 
-    for (const shiftId of uniqueIds) {
-      await sbDelete("shifts", shiftId);
+      for (const shiftId of uniqueIds) {
+        await sbDelete("shifts", shiftId);
+        logShiftDelete({ id: shiftId, ...target }, currentUser?.id, currentUser?.name).catch(() => {});
+      }
+      await refreshState(setState, setProfileDataIssues);
+    } catch (error) {
+      showDataActionError("Delete shift", error);
     }
-    await refreshState(setState);
   }
 
   // Admin: drafts
@@ -3224,7 +3593,7 @@ export default function Page() {
 
     try {
       await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
-      await refreshState(setState);
+      await refreshState(setState, setProfileDataIssues);
       setStaffDraftName("");
     } catch (err) {
       console.error("addStaff error", err);
@@ -3233,14 +3602,22 @@ export default function Page() {
   }
 
   async function toggleStaff(id, active) {
-    await sbUpsert("staff", [{ id, active: !active }]);
-    await refreshState(setState);
+    try {
+      await sbUpsert("staff", [{ id, active: !active }]);
+      await refreshState(setState, setProfileDataIssues);
+    } catch (error) {
+      showDataActionError("Update staff", error);
+    }
   }
 
   async function removeStaff(id) {
-    if (!confirm("Remove staff? (This does not delete their shifts automatically.)")) return;
-    await sbDelete("staff", id);
-    await refreshState(setState);
+    try {
+      if (!confirm("Remove staff? (This does not delete their shifts automatically.)")) return;
+      await sbDelete("staff", id);
+      await refreshState(setState, setProfileDataIssues);
+    } catch (error) {
+      showDataActionError("Remove staff", error);
+    }
   }
 
   async function saveClient() {
@@ -3249,23 +3626,26 @@ export default function Page() {
     const name = clientDraft.name.trim();
     if (!name) return alert("Client name required.");
     const isEditingExisting = !!clientDraft.id;
-    const row = {
-      id: clientDraft.id || uid("cl"),
-      name,
-      supervisor_id: clientDraft.supervisorId || null,
-      coverage_start: clientDraft.coverageStart || "07:00",
-      coverage_end: clientDraft.coverageEnd || "23:00",
-      // Canonical DB column for client weekly hours
-      hours_allotted: Number(clientDraft.weeklyHours) || 40,
-      assigned_staff_ids: serializeAssignedStaffIds(clientDraft.assignedStaffIds || []),
-      is_24_hour: !!clientDraft.is24Hour,
-      active: clientDraft.active !== false,
-    };
+    const existingClient = (state.clients || []).find((client) => client.id === clientDraft.id) || null;
+    const row = buildClientUpsertRow(
+      {
+        id: clientDraft.id || uid("cl"),
+        name,
+        supervisorId: clientDraft.supervisorId || "",
+        coverageStart: clientDraft.coverageStart || "07:00",
+        coverageEnd: clientDraft.coverageEnd || "23:00",
+        weeklyHours: Number(clientDraft.weeklyHours) || 40,
+        assignedStaffIds: parseAssignedStaffIds(clientDraft.assignedStaffIds || []),
+        is24Hour: !!clientDraft.is24Hour,
+        active: clientDraft.active !== false,
+      },
+      existingClient
+    );
     try {
       setIsSavingClient(true);
       if (isEditingExisting) lastEditedClientIdRef.current = row.id;
       await sbUpsert("clients", [row]);
-      await refreshState(setState);
+      await refreshState(setState, setProfileDataIssues);
       resetClientDraft();
 
       // UX: after editing, jump back to that client row in the list.
@@ -3289,53 +3669,67 @@ export default function Page() {
   }
 
   async function deleteClient(id) {
-    if (!canSeeAdminUI) return alert("Only admins can delete clients.");
-    if (!confirm("Delete this client?")) return;
-    // remove shifts for that client first
-    const shifts = await sbSelect("shifts");
-    const toRemove = (shifts || []).filter((s) => (s.client_id || s.clientId) === id).map((s) => s.id);
-    for (const sid of toRemove) {
-      await sbDelete("shifts", sid);
+    try {
+      if (!canSeeAdminUI) return alert("Only admins can delete clients.");
+      if (!confirm("Delete this client?")) return;
+      const shifts = await sbSelect("shifts");
+      const toRemove = (shifts || []).filter((s) => (s.client_id || s.clientId) === id).map((s) => s.id);
+      for (const sid of toRemove) {
+        await sbDelete("shifts", sid);
+      }
+      await sbDelete("clients", id);
+      await refreshState(setState, setProfileDataIssues);
+    } catch (error) {
+      showDataActionError("Delete client", error);
     }
-    await sbDelete("clients", id);
-    await refreshState(setState);
   }
 
   async function saveUser() {
-    if (!canSeeAdminUI) return alert("Only admins can manage users.");
-    if (!userDraft.id.trim() || !userDraft.name.trim() || !userDraft.pin.trim()) {
-      return alert("User id, name, and PIN required.");
+    try {
+      if (!canSeeAdminUI) return alert("Only admins can manage users.");
+      if (!userDraft.id.trim() || !userDraft.name.trim() || !userDraft.pin.trim()) {
+        return alert("User id, name, and PIN required.");
+      }
+      const row = {
+        id: userDraft.id.trim(),
+        name: userDraft.name.trim(),
+        role: normalizeRole(userDraft.role) || "supervisor",
+        pin: userDraft.pin.trim(),
+      };
+      await sbUpsert("users", [row]);
+      await refreshState(setState, setProfileDataIssues);
+      setUserDraft({ id: "", name: "", role: "supervisor", pin: "" });
+    } catch (error) {
+      showDataActionError("Save user", error);
     }
-    const row = {
-      id: userDraft.id.trim(),
-      name: userDraft.name.trim(),
-      role: normalizeRole(userDraft.role) || "supervisor",
-      pin: userDraft.pin.trim(),
-    };
-    await sbUpsert("users", [row]);
-    await refreshState(setState);
-    setUserDraft({ id: "", name: "", role: "supervisor", pin: "" });
   }
 
   async function deleteUser(id) {
-    if (!canSeeAdminUI) return alert("Only admins can manage users.");
-    if (!confirm("Delete this user?")) return;
-    await sbDelete("users", id);
-    await refreshState(setState);
+    try {
+      if (!canSeeAdminUI) return alert("Only admins can manage users.");
+      if (!confirm("Delete this user?")) return;
+      await sbDelete("users", id);
+      await refreshState(setState, setProfileDataIssues);
+    } catch (error) {
+      showDataActionError("Delete user", error);
+    }
   }
 
   // Tabs
   const tabs = [
+    { value: "dashboard", label: "Dashboard" },
     { value: "schedule", label: "Schedule" },
     { value: "calendar", label: "Weekly Calendar" },
     ...(visibleClients.length > 0 ? [{ value: "printCalendar", label: "Client Print Calendar" }] : []),
     { value: "month", label: "Monthly Calendar" },
     { value: "staffSchedule", label: "Staff Schedule" },
     { value: "hours", label: "Hours & OT" },
-    // --- Client Profiles tab for users who can see clients ---
+    { value: "payroll", label: "Payroll" },
     ...(visibleClients.length > 0 ? [
       { value: "clientProfiles", label: "Client Profiles" },
     ] : []),
+    { value: "callOuts", label: "Call-Outs" },
+    { value: "auditLog", label: "Audit Log" },
     ...(canSeeAdminUI
       ? [
           { value: "staff", label: "Staff" },
@@ -3482,6 +3876,242 @@ export default function Page() {
     return { staffWorking, staffInOt, totalSharedSupportMin, clientsWithHours, totalClientMin };
   }, [state.staff, staffPeriodMinutesMap, staffOtMinutesByPeriod, staffSharedSupportMinutesMap, visibleClients, periodClientHours]);
 
+  // ─── Dashboard computations ───
+  const dashboardData = useMemo(() => {
+    if (!selectedPeriodWindow) return null;
+    return computeDashboardSummary({
+      shifts: state.shifts || [],
+      staffList: state.staff || [],
+      clients: visibleClients || [],
+      callOuts: state.callOuts || [],
+      windowStartISO: selectedPeriodWindow.startISO,
+      windowEndISO: selectedPeriodWindow.endExclusiveISO,
+      windowDays: selectedPeriodDayCount,
+      todayISO: formatDateOnlyLocal(new Date()),
+    });
+  }, [state.shifts, state.staff, visibleClients, state.callOuts, selectedPeriodWindow, selectedPeriodDayCount]);
+
+  // ─── Payroll summary ───
+  const payrollSummary = useMemo(() => {
+    if (!selectedPeriodWindow) return null;
+    const buckets = payrollBucketKeys.map((key) => {
+      const startDate = parseDateOnlyLocal(key);
+      const endDate = startDate ? addDays(startDate, PAYROLL_BUCKET_DAYS) : null;
+      return {
+        startDate: key,
+        startISO: `${key}T00:00:00`,
+        endISO: endDate ? `${formatDateOnlyLocal(endDate)}T00:00:00` : selectedPeriodWindow.endExclusiveISO,
+      };
+    });
+    return computePayrollSummary({
+      shifts: shiftsInSelectedPeriod,
+      staffList: state.staff || [],
+      windowStartISO: selectedPeriodWindow.startISO,
+      windowEndISO: selectedPeriodWindow.endExclusiveISO,
+      weekBuckets: buckets,
+    });
+  }, [shiftsInSelectedPeriod, state.staff, selectedPeriodWindow, payrollBucketKeys]);
+
+  // ─── Conflicts ───
+  const allConflicts = useMemo(() => {
+    return findAllConflicts(shiftsInSelectedPeriod);
+  }, [shiftsInSelectedPeriod]);
+
+  // ─── Call-out functions ───
+  async function markCallOut(shift) {
+    setCallOutModal(shift);
+    setCallOutReason("");
+    // Compute replacement candidates
+    const weekWin = getWeekWindow(shift.startISO?.slice(0, 10) || payrollStartDate);
+    const unavailMap = {};
+    for (const st of state.staff || []) {
+      unavailMap[st.id] = st.unavailableDates || [];
+    }
+    const candidates = findReplacementCandidates({
+      shifts: state.shifts || [],
+      staffList: (state.staff || []).filter((s) => s.active !== false),
+      shiftStartISO: shift.startISO,
+      shiftEndISO: shift.endISO,
+      excludeStaffId: shift.staffId,
+      unavailableDates: unavailMap,
+      windowStartISO: weekWin?.startISO || selectedPeriodWindow?.startISO,
+      windowEndISO: weekWin?.endISO || selectedPeriodWindow?.endExclusiveISO,
+    });
+    setReplacementCandidates(candidates);
+  }
+
+  async function confirmCallOut(replacementStaffId) {
+    if (!callOutModal) return;
+    const shift = callOutModal;
+    try {
+      // Mark shift as call-out
+      const updatedShift = {
+        id: shift.id,
+        client_id: shift.clientId,
+        staff_id: shift.staffId,
+        start_iso: shift.startISO,
+        end_iso: shift.endISO,
+        created_by: shift.createdBy || "unknown",
+        is_shared: !!shift.isShared,
+        shared_group_id: shift.sharedGroupId || "",
+        is_call_out: true,
+        call_out_reason: callOutReason,
+        replacement_staff_id: replacementStaffId || "",
+      };
+      await sbUpsert("shifts", [updatedShift]);
+
+      // Create call_out record
+      const callOutRecord = {
+        id: uid("co"),
+        shift_id: shift.id,
+        client_id: shift.clientId,
+        original_staff_id: shift.staffId,
+        replacement_staff_id: replacementStaffId || "",
+        date: shift.startISO?.slice(0, 10) || "",
+        reason: callOutReason,
+        status: replacementStaffId ? "filled" : "open",
+        created_by: currentUser?.id || "unknown",
+        created_at: new Date().toISOString(),
+      };
+      await sbUpsert("call_outs", [callOutRecord]);
+
+      // If replacement assigned, create new shift
+      if (replacementStaffId) {
+        const newShift = {
+          id: uid("sh"),
+          client_id: shift.clientId,
+          staff_id: replacementStaffId,
+          start_iso: shift.startISO,
+          end_iso: shift.endISO,
+          created_by: currentUser?.id || "unknown",
+          is_shared: !!shift.isShared,
+          shared_group_id: shift.sharedGroupId || "",
+        };
+        await sbUpsert("shifts", [newShift]);
+        await logReassignment(shift, shift.staffId, replacementStaffId, currentUser?.id, currentUser?.name);
+      }
+
+      await logCallOut(shift, currentUser?.id, currentUser?.name, callOutReason);
+      await refreshState(setState, setProfileDataIssues);
+      setCallOutModal(null);
+    } catch (error) {
+      showDataActionError("Mark call-out", error);
+    }
+  }
+
+  // ─── Audit log loading ───
+  async function loadAuditLogs() {
+    try {
+      const logs = await fetchAuditLogs({ limit: 200 });
+      setAuditLogs(logs);
+    } catch (e) {
+      console.warn("Failed to load audit logs", e);
+    }
+  }
+
+  // Load audit logs when audit tab is selected
+  useEffect(() => {
+    if (tab === "auditLog") loadAuditLogs();
+  }, [tab]);
+
+  // ─── Duplicate previous week ───
+  async function duplicatePreviousWeek() {
+    if (!selectedPeriodWindow) return;
+    const prevStart = addDays(parseDateOnlyLocal(payrollStartDate), -7);
+    const prevEnd = addDays(parseDateOnlyLocal(payrollStartDate), -1);
+    const prevWindow = getDateRangeWindow(formatDateOnlyLocal(prevStart), formatDateOnlyLocal(prevEnd));
+    if (!prevWindow) return alert("Cannot compute previous week window.");
+
+    const prevShifts = (state.shifts || []).filter((sh) =>
+      overlapsWindow(sh.startISO, sh.endISO, prevWindow.startISO, prevWindow.endExclusiveISO)
+    );
+    if (!prevShifts.length) return alert("No shifts found in the previous week to duplicate.");
+    if (!confirm(`Duplicate ${prevShifts.length} shifts from previous week?`)) return;
+
+    const newRows = prevShifts.map((sh) => {
+      const startDate = parseDateOnlyLocal(sh.startISO.slice(0, 10));
+      const endDate = parseDateOnlyLocal(sh.endISO.slice(0, 10));
+      const newStart = startDate ? addDays(startDate, 7) : null;
+      const newEnd = endDate ? addDays(endDate, 7) : null;
+      if (!newStart || !newEnd) return null;
+      return {
+        id: uid("sh"),
+        client_id: sh.clientId,
+        staff_id: sh.staffId,
+        start_iso: sh.startISO.replace(sh.startISO.slice(0, 10), formatDateOnlyLocal(newStart)),
+        end_iso: sh.endISO.replace(sh.endISO.slice(0, 10), formatDateOnlyLocal(newEnd)),
+        created_by: currentUser?.id || "unknown",
+        is_shared: !!sh.isShared,
+        shared_group_id: sh.sharedGroupId ? `${sh.sharedGroupId}-dup` : "",
+      };
+    }).filter(Boolean);
+
+    if (!newRows.length) return alert("No valid shifts to duplicate.");
+    try {
+      await sbUpsert("shifts", newRows);
+      for (const row of newRows) {
+        await logShiftCreate(row, currentUser?.id, currentUser?.name);
+      }
+      await refreshState(setState, setProfileDataIssues);
+      alert(`Duplicated ${newRows.length} shifts to current week.`);
+    } catch (error) {
+      showDataActionError("Duplicate week", error);
+    }
+  }
+
+  // ─── CSV import ───
+  function handleCSVImport(event, type) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const text = e.target.result;
+        const lines = text.split(/\r?\n/).filter((l) => l.trim());
+        if (lines.length < 2) return alert("CSV must have a header row and at least one data row.");
+        const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
+        const rows = lines.slice(1).map((line) => {
+          const values = line.split(",").map((v) => v.trim());
+          const obj = {};
+          headers.forEach((h, i) => { obj[h] = values[i] || ""; });
+          return obj;
+        });
+
+        if (type === "staff") {
+          const staffRows = rows.map((r) => ({
+            id: r.id || uid("st"),
+            name: r.name || r.first_name && r.last_name ? `${r.last_name}, ${r.first_name}` : r.name || "",
+            active: r.active !== "false",
+          })).filter((r) => r.name);
+          if (!staffRows.length) return alert("No valid staff rows found.");
+          if (!confirm(`Import ${staffRows.length} staff members?`)) return;
+          await sbUpsert("staff", staffRows);
+          await refreshState(setState, setProfileDataIssues);
+          alert(`Imported ${staffRows.length} staff members.`);
+        } else if (type === "clients") {
+          const clientRows = rows.map((r) => ({
+            id: r.id || uid("cl"),
+            name: r.name || "",
+            supervisor_id: r.supervisor_id || "",
+            coverage_start: r.coverage_start || "07:00",
+            coverage_end: r.coverage_end || "23:00",
+            hours_allotted: Number(r.hours_allotted || r.weekly_hours) || 40,
+            active: r.active !== "false",
+          })).filter((r) => r.name);
+          if (!clientRows.length) return alert("No valid client rows found.");
+          if (!confirm(`Import ${clientRows.length} clients?`)) return;
+          await sbUpsert("clients", clientRows);
+          await refreshState(setState, setProfileDataIssues);
+          alert(`Imported ${clientRows.length} clients.`);
+        }
+      } catch (err) {
+        showDataActionError("CSV import", err);
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  }
+
   if (!mounted) return null;
 
   // If Supabase isn't configured we'll show a banner inside the UI and
@@ -3505,17 +4135,30 @@ export default function Page() {
           </div>
         ) : supabaseError ? (
           <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
-            <strong>Warning:</strong> Supabase requests are failing. The app is using localStorage fallback.
+            <strong>Warning:</strong> Supabase requests are failing. The app kept the last successful snapshot and stopped writing browser-local fallback data.
             <div style={{ marginTop: 6, opacity: 0.85, fontSize: 12 }}>
               {supabaseError.message || supabaseError.code || "Unknown error"} (check your anon key & table policies)
             </div>
+          </div>
+        ) : null}
+        {profileDataIssues.length > 0 ? (
+          <div style={{ ...styles.card, marginBottom: 12 }} className="no-print">
+            <strong>Data diagnostics:</strong> {profileDataIssues.length} potential profile data issue(s) detected.
+            <details style={{ marginTop: 8 }}>
+              <summary>Show issue details</summary>
+              <div style={{ marginTop: 8, display: "grid", gap: 6, fontSize: 12, opacity: 0.9 }}>
+                {profileDataIssues.map((issue, index) => (
+                  <div key={`${index}_${issue}`}>{issue}</div>
+                ))}
+              </div>
+            </details>
           </div>
         ) : null}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 2 }}>
           <div>
             <div style={{ fontSize: 22, fontWeight: 980, lineHeight: 1.12, letterSpacing: "0.01em" }}>DSW Scheduler</div>
             <div style={styles.tiny}>
-              Logged in as <b>{currentUser.name}</b> ({currentUser.role})
+              Logged in as <b>{getUserDisplayName(currentUser)}</b> ({currentUser.role})
             </div>
             <div style={{ ...styles.tiny, marginTop: 2 }}>
               <b>Access:</b> {accessSummary}
@@ -3551,6 +4194,168 @@ export default function Page() {
             </div>
           </div>
         </div>
+
+        {/* ================= Dashboard ================= */}
+        {tab === "dashboard" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Dashboard</h3>
+            {!dashboardData ? (
+              <div style={styles.tiny}>Select a payroll period to view the dashboard.</div>
+            ) : (
+              <>
+                {/* Summary Cards */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 18 }}>
+                  {[
+                    { label: "Open Shifts", val: dashboardData.openShiftsCount, color: dashboardData.openShiftsCount > 0 ? "#e67e22" : "#27ae60" },
+                    { label: "Staff Near 40h", val: dashboardData.staffNear40Count, color: dashboardData.staffNear40Count > 0 ? "#e67e22" : "#27ae60" },
+                    { label: "Staff In OT", val: dashboardData.staffInOTCount, color: dashboardData.staffInOTCount > 0 ? "#c0392b" : "#27ae60" },
+                    { label: "Today's Call-Outs", val: dashboardData.todayCallOutsCount, color: dashboardData.todayCallOutsCount > 0 ? "#c0392b" : "#27ae60" },
+                    { label: "Conflicts", val: dashboardData.conflictsCount, color: dashboardData.conflictsCount > 0 ? "#c0392b" : "#27ae60" },
+                    { label: "Clients Under Auth", val: dashboardData.clientsUnderAuthCount, color: dashboardData.clientsUnderAuthCount > 0 ? "#e67e22" : "#27ae60" },
+                  ].map((card, idx) => (
+                    <div key={idx} style={{ background: "#1e293b", border: `2px solid ${card.color}`, borderRadius: 10, padding: "14px 16px", textAlign: "center" }}>
+                      <div style={{ fontSize: 28, fontWeight: 700, color: card.color }}>{card.val}</div>
+                      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>{card.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Quick Actions */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+                  <button style={styles.btn} onClick={duplicatePreviousWeek}>Duplicate Previous Week</button>
+                  <button style={styles.btn} onClick={() => setTab("schedule")}>Go to Schedule</button>
+                  <button style={styles.btn} onClick={() => setTab("hours")}>View Hours &amp; OT</button>
+                </div>
+
+                {/* Staff Near OT */}
+                {dashboardData.staffNear40.length > 0 && (
+                  <details open style={{ marginBottom: 14 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600, color: "#e67e22", marginBottom: 6 }}>Staff Near 40h ({dashboardData.staffNear40.length})</summary>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={styles.tableCompact}>
+                        <thead>
+                          <tr>
+                            <th style={styles.thCompact}>Staff</th>
+                            <th style={styles.thCompact}>Hours</th>
+                            <th style={styles.thCompact}>OT %</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dashboardData.staffNear40.map((s) => (
+                            <tr key={s.staffId}>
+                              <td style={styles.tdCompact}>{s.name}</td>
+                              <td style={styles.tdCompact}>{(s.totalMinutes / 60).toFixed(1)}h</td>
+                              <td style={styles.tdCompact}>{s.otPercent.toFixed(0)}%</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+
+                {/* Staff In OT */}
+                {dashboardData.staffInOT.length > 0 && (
+                  <details open style={{ marginBottom: 14 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600, color: "#c0392b", marginBottom: 6 }}>Staff In Overtime ({dashboardData.staffInOT.length})</summary>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={styles.tableCompact}>
+                        <thead>
+                          <tr>
+                            <th style={styles.thCompact}>Staff</th>
+                            <th style={styles.thCompact}>Hours</th>
+                            <th style={styles.thCompact}>OT Hours</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dashboardData.staffInOT.map((s) => (
+                            <tr key={s.staffId}>
+                              <td style={styles.tdCompact}>{s.name}</td>
+                              <td style={styles.tdCompact}>{(s.totalMinutes / 60).toFixed(1)}h</td>
+                              <td style={{ ...styles.tdCompact, color: "#c0392b" }}>{(s.otMinutes / 60).toFixed(1)}h</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+
+                {/* Unfilled Hours by Client */}
+                {dashboardData.unfilledByClient.length > 0 && (
+                  <details style={{ marginBottom: 14 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600, color: "#e67e22", marginBottom: 6 }}>Unfilled Client Hours ({dashboardData.unfilledByClient.length})</summary>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={styles.tableCompact}>
+                        <thead>
+                          <tr>
+                            <th style={styles.thCompact}>Client</th>
+                            <th style={styles.thCompact}>Authorized</th>
+                            <th style={styles.thCompact}>Scheduled</th>
+                            <th style={styles.thCompact}>Remaining</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dashboardData.unfilledByClient.map((c) => (
+                            <tr key={c.clientId}>
+                              <td style={styles.tdCompact}>{c.clientName}</td>
+                              <td style={styles.tdCompact}>{(c.authorizedMinutes / 60).toFixed(1)}h</td>
+                              <td style={styles.tdCompact}>{(c.scheduledMinutes / 60).toFixed(1)}h</td>
+                              <td style={{ ...styles.tdCompact, color: "#e67e22" }}>{(c.remainingMinutes / 60).toFixed(1)}h</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+
+                {/* Conflicts */}
+                {dashboardData.conflicts.length > 0 && (
+                  <details style={{ marginBottom: 14 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600, color: "#c0392b", marginBottom: 6 }}>Conflicts ({dashboardData.conflicts.length})</summary>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={styles.tableCompact}>
+                        <thead>
+                          <tr>
+                            <th style={styles.thCompact}>Type</th>
+                            <th style={styles.thCompact}>Details</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dashboardData.conflicts.map((c, i) => (
+                            <tr key={i}>
+                              <td style={styles.tdCompact}>{c.type}</td>
+                              <td style={styles.tdCompact}>{c.message}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+
+                {/* Today's Call-Outs */}
+                {dashboardData.todayCallOuts.length > 0 && (
+                  <details open style={{ marginBottom: 14 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600, color: "#c0392b", marginBottom: 6 }}>Today's Call-Outs ({dashboardData.todayCallOuts.length})</summary>
+                    <ul style={{ margin: 0, paddingLeft: 20 }}>
+                      {dashboardData.todayCallOuts.map((co, i) => {
+                        const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || co.original_staff_id;
+                        const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || co.client_id;
+                        return <li key={i} style={{ fontSize: 13, marginBottom: 4 }}>{staffName} — {clientName} ({co.reason || "No reason"}) — {co.status || "open"}</li>;
+                      })}
+                    </ul>
+                  </details>
+                )}
+
+                {dashboardData.openShiftsCount === 0 && dashboardData.staffNear40Count === 0 && dashboardData.staffInOTCount === 0 && dashboardData.conflictsCount === 0 && dashboardData.todayCallOutsCount === 0 && (
+                  <div style={{ padding: 24, textAlign: "center", color: "#27ae60", fontWeight: 600 }}>All clear — no issues this period.</div>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
               {/* ================= Schedule ================= */}
 {tab === "schedule" && (
@@ -4534,12 +5339,12 @@ export default function Page() {
             {!selectedClient ? (
               <div style={{ ...styles.tiny, marginTop: 24 }}>Select a client to view profile.</div>
             ) : (
-              <div style={{ ...styles.card, background: "rgba(255,255,255,0.02)", marginTop: 0 }}>
+              <div style={{ ...styles.card, background: UI.panel, marginTop: 0 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                   <div>
                     <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{selectedClient.name}</div>
                     <div style={styles.tiny}>
-                      Supervisor: <b>{(state.users || []).find((u) => u.id === selectedClient.supervisorId)?.name || "Unassigned"}</b> &nbsp;|&nbsp;
+                      Supervisor: <b>{getSupervisorNameById(state.users, selectedClient.supervisorId)}</b> &nbsp;|&nbsp;
                       Status: <b>{selectedClient.active !== false ? "Active" : "Inactive"}</b> &nbsp;|&nbsp;
                       24-hour: <b>{selectedClient.is24Hour ? "Yes" : "No"}</b>
                     </div>
@@ -4579,7 +5384,7 @@ export default function Page() {
                   <div style={styles.tiny}>Payroll Period Hours Summary</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ height: 10, width: "100%", background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ height: 10, width: "100%", background: UI.tableHeader, borderRadius: 4, overflow: "hidden" }}>
                         <div
                           style={{
                             height: "100%",
@@ -4612,13 +5417,8 @@ export default function Page() {
                         alert("You can only edit assigned staff for your own clients.");
                         return;
                       }
-                      sbUpsert("clients", [
-                        {
-                          id: selectedClient.id,
-                          assigned_staff_ids: serializeAssignedStaffIds(next),
-                        },
-                      ])
-                        .then(() => refreshState(setState))
+                      sbUpsert("clients", [buildClientUpsertRow({ id: selectedClient.id, assignedStaffIds: next }, selectedClient)])
+                        .then(() => refreshState(setState, setProfileDataIssues))
                         .catch((err) => {
                           console.error("save assigned staff failed", err);
                           alert("Unable to save assigned staff.");
@@ -4701,6 +5501,338 @@ export default function Page() {
             )}
           </div>
         )}
+        {/* ================= Call-Outs ================= */}
+        {tab === "callOuts" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Call-Out Tracker</h3>
+
+            {/* Open Call-Outs */}
+            {(() => {
+              const allCallOuts = state.callOuts || [];
+              const openCallOuts = allCallOuts.filter((co) => co.status === "open");
+              const filledCallOuts = allCallOuts.filter((co) => co.status === "filled");
+              const todayISO = formatDateOnlyLocal(new Date());
+              const todayCallOuts = allCallOuts.filter((co) => (co.date || "").slice(0, 10) === todayISO);
+
+              return (
+                <>
+                  {openCallOuts.length > 0 && (
+                    <details open style={{ marginBottom: 14 }}>
+                      <summary style={{ cursor: "pointer", fontWeight: 600, color: "#c0392b", marginBottom: 6 }}>Open Call-Outs ({openCallOuts.length})</summary>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={styles.tableCompact}>
+                          <thead>
+                            <tr>
+                              <th style={styles.thCompact}>Date</th>
+                              <th style={styles.thCompact}>Staff</th>
+                              <th style={styles.thCompact}>Client</th>
+                              <th style={styles.thCompact}>Reason</th>
+                              <th style={styles.thCompact}>Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {openCallOuts.map((co) => {
+                              const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || "?";
+                              const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || "?";
+                              const matchedShift = (state.shifts || []).find((sh) => sh.id === co.shift_id);
+                              return (
+                                <tr key={co.id}>
+                                  <td style={styles.tdCompact}>{co.date}</td>
+                                  <td style={styles.tdCompact}>{staffName}</td>
+                                  <td style={styles.tdCompact}>{clientName}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
+                                  <td style={styles.tdCompact}>
+                                    {matchedShift && (
+                                      <button style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px" }} onClick={() => markCallOut(matchedShift)}>Find Replacement</button>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                  )}
+
+                  {todayCallOuts.length > 0 && (
+                    <details open style={{ marginBottom: 14 }}>
+                      <summary style={{ cursor: "pointer", fontWeight: 600, marginBottom: 6 }}>Today's Call-Outs ({todayCallOuts.length})</summary>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={styles.tableCompact}>
+                          <thead>
+                            <tr>
+                              <th style={styles.thCompact}>Staff</th>
+                              <th style={styles.thCompact}>Client</th>
+                              <th style={styles.thCompact}>Reason</th>
+                              <th style={styles.thCompact}>Status</th>
+                              <th style={styles.thCompact}>Replacement</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {todayCallOuts.map((co) => {
+                              const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || "?";
+                              const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || "?";
+                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "—";
+                              return (
+                                <tr key={co.id}>
+                                  <td style={styles.tdCompact}>{staffName}</td>
+                                  <td style={styles.tdCompact}>{clientName}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
+                                  <td style={{ ...styles.tdCompact, color: co.status === "open" ? "#c0392b" : "#27ae60" }}>{co.status}</td>
+                                  <td style={styles.tdCompact}>{repName}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                  )}
+
+                  <details style={{ marginBottom: 14 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600, marginBottom: 6 }}>All Call-Outs ({allCallOuts.length})</summary>
+                    {allCallOuts.length === 0 ? (
+                      <div style={styles.tiny}>No call-outs recorded yet.</div>
+                    ) : (
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={styles.tableCompact}>
+                          <thead>
+                            <tr>
+                              <th style={styles.thCompact}>Date</th>
+                              <th style={styles.thCompact}>Staff</th>
+                              <th style={styles.thCompact}>Client</th>
+                              <th style={styles.thCompact}>Reason</th>
+                              <th style={styles.thCompact}>Status</th>
+                              <th style={styles.thCompact}>Replacement</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {allCallOuts.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((co) => {
+                              const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || "?";
+                              const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || "?";
+                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "—";
+                              return (
+                                <tr key={co.id}>
+                                  <td style={styles.tdCompact}>{co.date}</td>
+                                  <td style={styles.tdCompact}>{staffName}</td>
+                                  <td style={styles.tdCompact}>{clientName}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
+                                  <td style={{ ...styles.tdCompact, color: co.status === "open" ? "#c0392b" : "#27ae60" }}>{co.status}</td>
+                                  <td style={styles.tdCompact}>{repName}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </details>
+                </>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ================= Payroll Summary ================= */}
+        {tab === "payroll" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Payroll Summary</h3>
+            {!payrollSummary ? (
+              <div style={styles.tiny}>Select a payroll period to view payroll summary.</div>
+            ) : (
+              <>
+                <div style={{ marginBottom: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={styles.tiny}>
+                    Period: <b>{payrollStartDate}</b> to <b>{payrollFinishDate}</b>
+                  </div>
+                  <button style={styles.btn2} onClick={() => window.print()}>Print Payroll</button>
+                </div>
+
+                <div className="printable-payroll" style={{ overflowX: "auto" }}>
+                  <table style={styles.tableCompact}>
+                    <thead>
+                      <tr>
+                        <th style={styles.thCompact}>Staff</th>
+                        <th style={styles.thCompact}>Total Hours</th>
+                        <th style={styles.thCompact}>Regular</th>
+                        <th style={styles.thCompact}>OT Hours</th>
+                        <th style={styles.thCompact}>OT %</th>
+                        {payrollSummary.staffRows?.[0]?.weeklyBreakdown?.map((wb, wi) => (
+                          <th key={wi} style={styles.thCompact}>Wk {wb.weekStart}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(payrollSummary.staffRows || []).map((row) => (
+                        <tr key={row.staffId}>
+                          <td style={styles.tdCompact}>{row.name}</td>
+                          <td style={styles.tdCompact}>{(row.totalMinutes / 60).toFixed(2)}</td>
+                          <td style={styles.tdCompact}>{((row.totalMinutes - row.otMinutes) / 60).toFixed(2)}</td>
+                          <td style={{ ...styles.tdCompact, color: row.otMinutes > 0 ? "#c0392b" : "inherit", fontWeight: row.otMinutes > 0 ? 600 : 400 }}>
+                            {(row.otMinutes / 60).toFixed(2)}
+                          </td>
+                          <td style={{ ...styles.tdCompact, color: row.otPercent > 0 ? "#c0392b" : "inherit" }}>
+                            {row.otPercent.toFixed(1)}%
+                          </td>
+                          {(row.weeklyBreakdown || []).map((wb, wi) => (
+                            <td key={wi} style={{ ...styles.tdCompact, color: wb.otMinutes > 0 ? "#c0392b" : "inherit" }}>
+                              {(wb.minutes / 60).toFixed(1)}h
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                      {(payrollSummary.staffRows || []).length === 0 && (
+                        <tr><td style={styles.tdCompactEmpty} colSpan={20}>No staff hours in this period.</td></tr>
+                      )}
+                    </tbody>
+                    {(payrollSummary.staffRows || []).length > 0 && (
+                      <tfoot>
+                        <tr style={{ fontWeight: 700 }}>
+                          <td style={styles.tdCompact}>Totals</td>
+                          <td style={styles.tdCompact}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.totalMinutes, 0) / 60).toFixed(2)}</td>
+                          <td style={styles.tdCompact}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.totalMinutes - r.otMinutes, 0) / 60).toFixed(2)}</td>
+                          <td style={{ ...styles.tdCompact, color: "#c0392b" }}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.otMinutes, 0) / 60).toFixed(2)}</td>
+                          <td style={styles.tdCompact}>—</td>
+                          {payrollSummary.staffRows?.[0]?.weeklyBreakdown?.map((_, wi) => (
+                            <td key={wi} style={styles.tdCompact}>
+                              {((payrollSummary.staffRows || []).reduce((s, r) => s + (r.weeklyBreakdown?.[wi]?.minutes || 0), 0) / 60).toFixed(1)}h
+                            </td>
+                          ))}
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ================= Audit Log ================= */}
+        {tab === "auditLog" && (
+          <div style={{ marginTop: 12, ...styles.card }}>
+            <h3 style={{ marginTop: 0 }}>Audit Log</h3>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+              <select style={{ ...styles.select, maxWidth: 180 }} value={auditFilter} onChange={(e) => setAuditFilter(e.target.value)}>
+                <option value="all">All Actions</option>
+                <option value="shift_create">Shift Created</option>
+                <option value="shift_edit">Shift Edited</option>
+                <option value="shift_delete">Shift Deleted</option>
+                <option value="call_out">Call-Out</option>
+                <option value="reassignment">Reassignment</option>
+              </select>
+              <button style={styles.btn2} onClick={loadAuditLogs}>Refresh</button>
+            </div>
+
+            {auditLogs.length === 0 ? (
+              <div style={styles.tiny}>No audit logs found. Actions are logged when shifts are created, edited, or deleted.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={styles.tableCompact}>
+                  <thead>
+                    <tr>
+                      <th style={styles.thCompact}>Time</th>
+                      <th style={styles.thCompact}>Action</th>
+                      <th style={styles.thCompact}>User</th>
+                      <th style={styles.thCompact}>Details</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogs
+                      .filter((log) => auditFilter === "all" || log.action === auditFilter)
+                      .map((log, idx) => {
+                        const ts = log.created_at || log.timestamp || "";
+                        const displayTime = ts ? new Date(ts).toLocaleString() : "—";
+                        const details = [];
+                        if (log.new_values) {
+                          const nv = typeof log.new_values === "string" ? (() => { try { return JSON.parse(log.new_values); } catch { return null; } })() : log.new_values;
+                          if (nv) {
+                            if (nv.client_name) details.push(`Client: ${nv.client_name}`);
+                            if (nv.staff_name) details.push(`Staff: ${nv.staff_name}`);
+                            if (nv.start_iso) details.push(`Start: ${nv.start_iso}`);
+                            if (nv.reason) details.push(`Reason: ${nv.reason}`);
+                          }
+                        }
+                        return (
+                          <tr key={idx}>
+                            <td style={{ ...styles.tdCompact, whiteSpace: "nowrap" }}>{displayTime}</td>
+                            <td style={styles.tdCompact}>{(log.action || "").replace(/_/g, " ")}</td>
+                            <td style={styles.tdCompact}>{log.user_name || log.user_id || "—"}</td>
+                            <td style={{ ...styles.tdCompact, fontSize: 11, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {details.length > 0 ? details.join(" | ") : log.record_id || "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ================= Call-Out Replacement Modal ================= */}
+        {callOutModal && (
+          <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.65)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center" }}
+            onClick={() => setCallOutModal(null)}>
+            <div style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 12, padding: 24, maxWidth: 520, width: "95%", maxHeight: "80vh", overflowY: "auto" }}
+              onClick={(e) => e.stopPropagation()}>
+              <h3 style={{ margin: "0 0 12px 0" }}>Mark Call-Out</h3>
+              <div style={styles.tiny}>
+                Staff: <b>{(state.staff || []).find((s) => s.id === callOutModal.staffId)?.name || "?"}</b><br />
+                Client: <b>{visibleClients.find((c) => c.id === callOutModal.clientId)?.name || "?"}</b><br />
+                Shift: <b>{callOutModal.startISO?.slice(0, 16).replace("T", " ")} — {callOutModal.endISO?.slice(11, 16)}</b>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <label style={styles.tiny}>Reason:</label>
+                <input style={{ ...styles.input, width: "100%", marginTop: 4 }} value={callOutReason} onChange={(e) => setCallOutReason(e.target.value)} placeholder="Sick, no-show, personal…" />
+              </div>
+
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Replacement Candidates:</div>
+                {replacementCandidates.length === 0 ? (
+                  <div style={styles.tiny}>No available replacement candidates found for this time slot.</div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={styles.tableCompact}>
+                      <thead>
+                        <tr>
+                          <th style={styles.thCompact}>Staff</th>
+                          <th style={styles.thCompact}>Week Hours</th>
+                          <th style={styles.thCompact}>Would OT?</th>
+                          <th style={styles.thCompact}>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {replacementCandidates.map((cand) => (
+                          <tr key={cand.staffId}>
+                            <td style={styles.tdCompact}>{cand.name}</td>
+                            <td style={styles.tdCompact}>{(cand.currentMinutes / 60).toFixed(1)}h</td>
+                            <td style={{ ...styles.tdCompact, color: cand.wouldCauseOT ? "#c0392b" : "#27ae60" }}>
+                              {cand.wouldCauseOT ? "Yes" : "No"}
+                            </td>
+                            <td style={styles.tdCompact}>
+                              <button style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px" }} onClick={() => confirmCallOut(cand.staffId)}>
+                                Assign
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+                <button style={styles.btn2} onClick={() => confirmCallOut("")}>Mark Call-Out (No Replacement)</button>
+                <button style={styles.btn} onClick={() => setCallOutModal(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ================= Staff (Admin) ================= */}
         {tab === "staff" && canSeeAdminUI && (
           <div style={{ marginTop: 12, ...styles.card }}>
@@ -4750,7 +5882,7 @@ export default function Page() {
                 <select style={styles.select} value={clientDraft.supervisorId || ""} onChange={(e) => setClientDraft((p) => ({ ...p, supervisorId: e.target.value }))}>
                   <option value="">Unassigned</option>
                   {(state.users || []).filter((u) => isSupervisorRole(u.role)).map((u) => (
-                    <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
+                    <option key={u.id} value={u.id}>{formatUserOptionLabel(u)}</option>
                   ))}
                 </select>
               </div>
@@ -4811,7 +5943,7 @@ export default function Page() {
                           {c.name} {c.is24Hour ? <span style={{ opacity: 0.8 }}>(24h)</span> : null}
                         </div>
                         <div style={styles.shiftMeta}>
-                          Supervisor: <b>{sup ? sup.name : "Unassigned"}</b>
+                          Supervisor: <b>{sup ? getUserDisplayName(sup) : getSupervisorNameById(state.users, c.supervisorId)}</b>
                           <br />
                           Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
                           <br />
@@ -4822,17 +5954,7 @@ export default function Page() {
                         <button
                           style={styles.btn2}
                           onClick={() =>
-                            setClientDraft({
-                              id: c.id,
-                              name: c.name,
-                              supervisorId: c.supervisorId || "",
-                              coverageStart: c.coverageStart || "07:00",
-                              coverageEnd: c.coverageEnd || "23:00",
-                              weeklyHours: Number(c.weeklyHours ?? c.hours_allotted ?? c.weekly_hours) || 40,
-                              assignedStaffIds: parseAssignedStaffIds(c.assignedStaffIds ?? c.assigned_staff_ids),
-                              is24Hour: !!c.is24Hour,
-                              active: c.active !== false,
-                            })
+                            setClientDraft(toClientCamelCaseRow(c))
                           }
                         >
                           Edit
@@ -4896,7 +6018,7 @@ export default function Page() {
                 <div key={u.id} style={styles.shift}>
                   <div style={styles.shiftTop}>
                     <div>
-                      <div style={styles.shiftTitle}>{u.name}</div>
+                      <div style={styles.shiftTitle}>{getUserDisplayName(u)}</div>
                       <div style={styles.shiftMeta}>ID: <b>{u.id}</b> • Role: <b>{u.role}</b></div>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -5101,6 +6223,28 @@ export default function Page() {
           .print-calendar-legend {
             gap: 6px !important;
           }
+
+          .printable-payroll {
+            break-inside: avoid;
+          }
+
+          .printable-payroll table {
+            font-size: 11px !important;
+            border-collapse: collapse !important;
+          }
+
+          .printable-payroll th,
+          .printable-payroll td {
+            border: 1px solid #d5dbe2 !important;
+            padding: 3px 6px !important;
+            color: #1f2933 !important;
+            background: #fff !important;
+          }
+
+          .printable-payroll th {
+            background: #eef1f4 !important;
+            font-weight: 700 !important;
+          }
         }
       `}</style>
     </div>
@@ -5112,13 +6256,13 @@ export default function Page() {
 ========================= */
 
 const UI = {
-  bg: "#EEF1F4",
-  panel: "#F8FAFB",
-  panelAlt: "#F2F4F7",
-  nav: "#F2F4F7",
-  tableHeader: "#F1F4F7",
-  rowHover: "#E9EEF3",
-  field: "#F8FAFB",
+  bg: "#F4F6F8",
+  panel: "#FAFAFA",
+  panelAlt: "#F5F7F9",
+  nav: "#F1F3F5",
+  tableHeader: "#EEF1F4",
+  rowHover: "#E7ECF1",
+  field: "#FAFAFA",
   border: "#D9DEE5",
   borderSoft: "#E4E9EF",
   text: "#2F3742",
