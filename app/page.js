@@ -12,6 +12,7 @@ import {
   findShiftCausingOT, allStaffOTSummary,
   clientAuthorizedVsScheduled, findOpenShifts, openShiftMinutes,
   findAllConflicts, validateShiftSave, findReplacementCandidates,
+  shiftDedupKey, rangesOverlap,
   computeDashboardSummary, computePayrollSummary,
   OT_THRESHOLD_MIN as CALC_OT_THRESHOLD_MIN,
 } from "../lib/calculations";
@@ -42,7 +43,7 @@ function reportSupabaseError(error) {
 
 const DAY_START_MIN = 7 * 60;  // 07:00
 const DAY_END_MIN = 23 * 60;   // 23:00
-const OT_THRESHOLD_MIN = 40 * 60;
+const OT_THRESHOLD_MIN = CALC_OT_THRESHOLD_MIN;
 const MAX_HOURS_PER_24_MIN = 16 * 60;
 const PAYROLL_CYCLE_DAYS = 14;
 const PAYROLL_BUCKET_DAYS = 7;
@@ -296,7 +297,7 @@ function getDateRangeWindow(startDateValue, finishDateValue) {
 }
 
 function overlapsWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
-  return splitShiftIntoWindowMinutes(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) > 0;
+  return rangesOverlap(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO);
 }
 
 function clipShiftToWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
@@ -336,6 +337,9 @@ function calculateShiftHoursInWindow(shifts, windowStartISO, windowEndISO) {
 }
 
 function staffMinutesDedupInWindow(shifts, staffId, windowStartISO, windowEndISO, sharedOnly = false) {
+  if (!sharedOnly) {
+    return calcStaffMin(shifts, staffId, windowStartISO, windowEndISO);
+  }
   const seen = new Set();
   let total = 0;
   for (const sh of shifts || []) {
@@ -373,7 +377,7 @@ function addMinutes(date, minutes) {
 }
 
 function overlaps(aStart, aEnd, bStart, bEnd) {
-  return new Date(aStart) < new Date(bEnd) && new Date(bStart) < new Date(aEnd);
+  return rangesOverlap(aStart, aEnd, bStart, bEnd);
 }
 
 function hasTrueTimeOverlap(aStartInput, aEndInput, bStartInput, bEndInput) {
@@ -1328,11 +1332,14 @@ async function refreshState(setStateLocal, setIssuesLocal) {
 ========================= */
 
 function staffShiftUniqueKey(sh) {
-  // Shared support: linked client rows (2:1 or 3:1) count once for staff OT
-  if (sh.isShared && sh.sharedGroupId) {
-    return `SS|${sh.staffId}|${sh.startISO}|${sh.endISO}|${sh.sharedGroupId}`;
-  }
-  return `N|${sh.id}`;
+  return shiftDedupKey({
+    id: sh?.id,
+    staffId: sh?.staffId ?? sh?.staff_id,
+    startISO: sh?.startISO ?? sh?.start_iso,
+    endISO: sh?.endISO ?? sh?.end_iso,
+    isShared: sh?.isShared ?? sh?.is_shared,
+    sharedGroupId: sh?.sharedGroupId ?? sh?.shared_group_id,
+  });
 }
 
 function staffWeekMinutesDedup(shifts, staffId) {
@@ -1577,13 +1584,11 @@ function getStaffWeeklyMinutes(staffId, staffMinutesMap) {
 }
 
 function isNearOvertime(totalMinutes) {
-  const minutes = Number(totalMinutes) || 0;
-  return minutes >= 36 * 60 && minutes < OT_THRESHOLD_MIN;
+  return isNearOT(totalMinutes);
 }
 
 function isOvertime(totalMinutes) {
-  const minutes = Number(totalMinutes) || 0;
-  return minutes >= OT_THRESHOLD_MIN;
+  return isInOT(totalMinutes);
 }
 
 function isSharedSupport(shift) {
