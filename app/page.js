@@ -12,7 +12,7 @@ import {
   findShiftCausingOT, allStaffOTSummary,
   clientAuthorizedVsScheduled, findOpenShifts, openShiftMinutes,
   findAllConflicts, validateShiftSave, findReplacementCandidates,
-  shiftDedupKey, rangesOverlap,
+  shiftDedupKey, rangesOverlap as calcRangesOverlap,
   computeDashboardSummary, computePayrollSummary,
   OT_THRESHOLD_MIN as CALC_OT_THRESHOLD_MIN,
 } from "../lib/calculations";
@@ -23,6 +23,7 @@ import {
 
 const LOCAL_DB_STORAGE_KEY = "dsw_local_db";
 const DATA_TABLES = ["users", "staff", "clients", "shifts", "call_outs", "audit_logs"];
+const OPTIONAL_SUPABASE_TABLES = new Set(["audit_logs"]);
 
 let supabaseErrorHandler = null;
 function setSupabaseErrorHandler(fn) {
@@ -164,6 +165,19 @@ function normalizeTimeValue(value, fallback) {
   return `${String(hour24).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
 }
 
+function safeRangesOverlap(startA, endA, startB, endB) {
+  if (typeof calcRangesOverlap === "function") {
+    return calcRangesOverlap(startA, endA, startB, endB);
+  }
+
+  const aStart = new Date(startA);
+  const aEnd = new Date(endA);
+  const bStart = new Date(startB);
+  const bEnd = new Date(endB);
+  if ([aStart, aEnd, bStart, bEnd].some((value) => isNaN(value))) return false;
+  return aStart < bEnd && bStart < aEnd;
+}
+
 function formatTime12(value) {
   const normalized = normalizeTimeValue(value, null);
   if (!normalized) return String(value || "");
@@ -297,7 +311,7 @@ function getDateRangeWindow(startDateValue, finishDateValue) {
 }
 
 function overlapsWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
-  return rangesOverlap(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO);
+  return safeRangesOverlap(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO);
 }
 
 function clipShiftToWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
@@ -377,7 +391,7 @@ function addMinutes(date, minutes) {
 }
 
 function overlaps(aStart, aEnd, bStart, bEnd) {
-  return rangesOverlap(aStart, aEnd, bStart, bEnd);
+  return safeRangesOverlap(aStart, aEnd, bStart, bEnd);
 }
 
 function hasTrueTimeOverlap(aStartInput, aEndInput, bStartInput, bEndInput) {
@@ -933,7 +947,11 @@ async function fetchAllDataSnapshot() {
 
       const error = result.reason;
       const table = error?.table || "unknown";
-      reportSupabaseError(error);
+      if (OPTIONAL_SUPABASE_TABLES.has(table)) {
+        console.warn(`Optional Supabase table fallback: ${table}`, error);
+      } else {
+        reportSupabaseError(error);
+      }
       tableSources[table] = "local";
       snapshot[table] = getLocalDbSnapshot()[table] || [];
     }
