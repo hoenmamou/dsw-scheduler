@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { SUPABASE_CONFIGURED, supabase } from "../lib/supabaseClient";
@@ -12,6 +12,7 @@ import {
   findShiftCausingOT, allStaffOTSummary,
   clientAuthorizedVsScheduled, findOpenShifts, openShiftMinutes,
   findAllConflicts, validateShiftSave, findReplacementCandidates,
+  shiftDedupKey, rangesOverlap as calcRangesOverlap,
   computeDashboardSummary, computePayrollSummary,
   OT_THRESHOLD_MIN as CALC_OT_THRESHOLD_MIN,
 } from "../lib/calculations";
@@ -22,6 +23,7 @@ import {
 
 const LOCAL_DB_STORAGE_KEY = "dsw_local_db";
 const DATA_TABLES = ["users", "staff", "clients", "shifts", "call_outs", "audit_logs"];
+const OPTIONAL_SUPABASE_TABLES = new Set(["audit_logs"]);
 
 let supabaseErrorHandler = null;
 function setSupabaseErrorHandler(fn) {
@@ -42,7 +44,7 @@ function reportSupabaseError(error) {
 
 const DAY_START_MIN = 7 * 60;  // 07:00
 const DAY_END_MIN = 23 * 60;   // 23:00
-const OT_THRESHOLD_MIN = 40 * 60;
+const OT_THRESHOLD_MIN = CALC_OT_THRESHOLD_MIN;
 const MAX_HOURS_PER_24_MIN = 16 * 60;
 const PAYROLL_CYCLE_DAYS = 14;
 const PAYROLL_BUCKET_DAYS = 7;
@@ -161,6 +163,19 @@ function normalizeTimeValue(value, fallback) {
   }
 
   return `${String(hour24).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+function safeRangesOverlap(startA, endA, startB, endB) {
+  if (typeof calcRangesOverlap === "function") {
+    return calcRangesOverlap(startA, endA, startB, endB);
+  }
+
+  const aStart = new Date(startA);
+  const aEnd = new Date(endA);
+  const bStart = new Date(startB);
+  const bEnd = new Date(endB);
+  if ([aStart, aEnd, bStart, bEnd].some((value) => isNaN(value))) return false;
+  return aStart < bEnd && bStart < aEnd;
 }
 
 function formatTime12(value) {
@@ -296,7 +311,7 @@ function getDateRangeWindow(startDateValue, finishDateValue) {
 }
 
 function overlapsWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
-  return splitShiftIntoWindowMinutes(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) > 0;
+  return safeRangesOverlap(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO);
 }
 
 function clipShiftToWindow(shiftStartISO, shiftEndISO, windowStartISO, windowEndISO) {
@@ -336,6 +351,9 @@ function calculateShiftHoursInWindow(shifts, windowStartISO, windowEndISO) {
 }
 
 function staffMinutesDedupInWindow(shifts, staffId, windowStartISO, windowEndISO, sharedOnly = false) {
+  if (!sharedOnly) {
+    return calcStaffMin(shifts, staffId, windowStartISO, windowEndISO);
+  }
   const seen = new Set();
   let total = 0;
   for (const sh of shifts || []) {
@@ -373,7 +391,7 @@ function addMinutes(date, minutes) {
 }
 
 function overlaps(aStart, aEnd, bStart, bEnd) {
-  return new Date(aStart) < new Date(bEnd) && new Date(bStart) < new Date(aEnd);
+  return safeRangesOverlap(aStart, aEnd, bStart, bEnd);
 }
 
 function hasTrueTimeOverlap(aStartInput, aEndInput, bStartInput, bEndInput) {
@@ -392,7 +410,7 @@ function hasTrueTimeOverlap(aStartInput, aEndInput, bStartInput, bEndInput) {
   return aStart < bEnd && bStart < aEnd;
 }
 
-/** Day: 07:00–23:00, Night: 23:00–07:00 */
+/** Day: 07:00â€“23:00, Night: 23:00â€“07:00 */
 function splitDayNightMinutes(startISO, endISO) {
   const start = new Date(startISO);
   const end = new Date(endISO);
@@ -534,7 +552,7 @@ function shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime) {
   // If end is before start, invalid range
   if (end < start) return false;
 
-  // If end equals start (same day), do NOT split—single day shift
+  // If end equals start (same day), do NOT splitâ€”single day shift
   if (end.getTime() === start.getTime()) return false;
 
   const overnight = String(endTime || "") <= String(startTime || "");
@@ -929,7 +947,11 @@ async function fetchAllDataSnapshot() {
 
       const error = result.reason;
       const table = error?.table || "unknown";
-      reportSupabaseError(error);
+      if (OPTIONAL_SUPABASE_TABLES.has(table)) {
+        console.warn(`Optional Supabase table fallback: ${table}`, error);
+      } else {
+        reportSupabaseError(error);
+      }
       tableSources[table] = "local";
       snapshot[table] = getLocalDbSnapshot()[table] || [];
     }
@@ -1328,11 +1350,14 @@ async function refreshState(setStateLocal, setIssuesLocal) {
 ========================= */
 
 function staffShiftUniqueKey(sh) {
-  // Shared support: linked client rows (2:1 or 3:1) count once for staff OT
-  if (sh.isShared && sh.sharedGroupId) {
-    return `SS|${sh.staffId}|${sh.startISO}|${sh.endISO}|${sh.sharedGroupId}`;
-  }
-  return `N|${sh.id}`;
+  return shiftDedupKey({
+    id: sh?.id,
+    staffId: sh?.staffId ?? sh?.staff_id,
+    startISO: sh?.startISO ?? sh?.start_iso,
+    endISO: sh?.endISO ?? sh?.end_iso,
+    isShared: sh?.isShared ?? sh?.is_shared,
+    sharedGroupId: sh?.sharedGroupId ?? sh?.shared_group_id,
+  });
 }
 
 function staffWeekMinutesDedup(shifts, staffId) {
@@ -1577,13 +1602,11 @@ function getStaffWeeklyMinutes(staffId, staffMinutesMap) {
 }
 
 function isNearOvertime(totalMinutes) {
-  const minutes = Number(totalMinutes) || 0;
-  return minutes >= 36 * 60 && minutes < OT_THRESHOLD_MIN;
+  return isNearOT(totalMinutes);
 }
 
 function isOvertime(totalMinutes) {
-  const minutes = Number(totalMinutes) || 0;
-  return minutes >= OT_THRESHOLD_MIN;
+  return isInOT(totalMinutes);
 }
 
 function isSharedSupport(shift) {
@@ -1836,7 +1859,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
     return (
       <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 16 }}>
         <div style={{ maxWidth: 520, margin: "28px auto", ...styles.card }}>
-          <h2 style={{ marginTop: 0 }}>DSW Scheduler — Create Admin</h2>
+          <h2 style={{ marginTop: 0 }}>DSW Scheduler â€” Create Admin</h2>
 
           <div style={{ ...styles.twoCol, marginTop: 10 }}>
             <div>
@@ -1918,7 +1941,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
         </div>
 
         <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
-          Tip: PIN login is a simple MVP. For real security later, we’ll swap to Supabase Auth + roles.
+          Tip: PIN login is a simple MVP. For real security later, weâ€™ll swap to Supabase Auth + roles.
         </div>
       </div>
     </div>
@@ -2018,7 +2041,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 980 }}>Weekly Calendar</div>
-            <div style={styles.tiny}>Week of {start.toLocaleDateString()} • Click any shift row for edit/delete details.</div>
+            <div style={styles.tiny}>Week of {start.toLocaleDateString()} â€¢ Click any shift row for edit/delete details.</div>
           </div>
           <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
             Print / Save PDF
@@ -2140,7 +2163,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
                 return (
                   <div key={sh.id} style={{ border: `1px solid ${colors.border}`, borderLeft: `4px solid ${status.sharedSupport ? colors.sharedRail : colors.border}`, borderRadius: 10, padding: 10, background: colors.background }}>
                     <div style={{ fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
-                      {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
+                      {compactShiftRange(sh.startISO, sh.endISO)} â€¢ {clientName(sh.clientId)} â€¢ {staffName(sh.staffId)}
                     </div>
                     <div style={{ ...styles.tiny, marginTop: 3 }}>
                       {formatShiftDateTimeFromISO(sh.startISO)} to {formatShiftDateTimeFromISO(sh.endISO)}
@@ -2391,11 +2414,11 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts,
                 return (
                   <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 10, padding: 10, background: UI.panelAlt }}>
                     <div style={{ fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
-                      {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
+                      {compactShiftRange(sh.startISO, sh.endISO)} â€¢ {clientName(sh.clientId)} â€¢ {staffName(sh.staffId)}
                     </div>
                     <div style={{ ...styles.tiny, marginTop: 3 }}>
                       {formatShiftDateTimeFromISO(sh.startISO)} to {formatShiftDateTimeFromISO(sh.endISO)}
-                      {sh.isShared ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                      {sh.isShared ? ` â€¢ ${getShiftStaffingLabel(shifts, sh)}` : ""}
                     </div>
                     {canManageShift ? (
                       <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
@@ -2569,7 +2592,7 @@ function PrintableClientCalendar({ state, weekStartDate, visibleClients, selecte
                       ) : null}
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: UI.textSecondary }}>
                         {staffName(sh.staffId)}
-                        {status.sharedSupport ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                        {status.sharedSupport ? ` â€¢ ${getShiftStaffingLabel(shifts, sh)}` : ""}
                       </span>
                     </div>
                   );
@@ -2590,7 +2613,7 @@ function PrintableClientCalendar({ state, weekStartDate, visibleClients, selecte
 export default function Page() {
   const [mounted, setMounted] = useState(false);
 
-  // “DB state”
+  // â€œDB stateâ€
   const [state, setState] = useState({
     settings: {
       includeUnassignedForSupervisors: true,
@@ -3254,7 +3277,7 @@ export default function Page() {
         const message =
           `${rowLabel}: conflict with ${conflictClient?.name || "Unknown"}` +
           ` (${sup ? getUserDisplayName(sup) : "Unknown Supervisor"})` +
-          ` at ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}.`;
+          ` at ${formatShiftDateTimeFromISO(first.startISO)} â†’ ${formatShiftDateTimeFromISO(first.endISO)}.`;
         if (state.settings?.hardStopConflicts) {
           return { errors: [message], rows: [], planned };
         }
@@ -3279,7 +3302,7 @@ export default function Page() {
       if (workedDaysStreak > maxConsecutiveDays) {
         const message =
           `${rowLabel}: projected consecutive days would be ${workedDaysStreak} ` +
-          `(max ${maxConsecutiveDays}) for ${formatShiftDateTimeFromISO(startISO)} → ${formatShiftDateTimeFromISO(endISO)}.`;
+          `(max ${maxConsecutiveDays}) for ${formatShiftDateTimeFromISO(startISO)} â†’ ${formatShiftDateTimeFromISO(endISO)}.`;
         if (state.settings?.hardStopConflicts) {
           return { errors: [message], rows: [], planned };
         }
@@ -3876,7 +3899,7 @@ export default function Page() {
     return { staffWorking, staffInOt, totalSharedSupportMin, clientsWithHours, totalClientMin };
   }, [state.staff, staffPeriodMinutesMap, staffOtMinutesByPeriod, staffSharedSupportMinutesMap, visibleClients, periodClientHours]);
 
-  // ─── Dashboard computations ───
+  // â”€â”€â”€ Dashboard computations â”€â”€â”€
   const dashboardData = useMemo(() => {
     if (!selectedPeriodWindow) return null;
     return computeDashboardSummary({
@@ -3891,7 +3914,7 @@ export default function Page() {
     });
   }, [state.shifts, state.staff, visibleClients, state.callOuts, selectedPeriodWindow, selectedPeriodDayCount]);
 
-  // ─── Payroll summary ───
+  // â”€â”€â”€ Payroll summary â”€â”€â”€
   const payrollSummary = useMemo(() => {
     if (!selectedPeriodWindow) return null;
     const buckets = payrollBucketKeys.map((key) => {
@@ -3912,12 +3935,12 @@ export default function Page() {
     });
   }, [shiftsInSelectedPeriod, state.staff, selectedPeriodWindow, payrollBucketKeys]);
 
-  // ─── Conflicts ───
+  // â”€â”€â”€ Conflicts â”€â”€â”€
   const allConflicts = useMemo(() => {
     return findAllConflicts(shiftsInSelectedPeriod);
   }, [shiftsInSelectedPeriod]);
 
-  // ─── Call-out functions ───
+  // â”€â”€â”€ Call-out functions â”€â”€â”€
   async function markCallOut(shift) {
     setCallOutModal(shift);
     setCallOutReason("");
@@ -3999,7 +4022,7 @@ export default function Page() {
     }
   }
 
-  // ─── Audit log loading ───
+  // â”€â”€â”€ Audit log loading â”€â”€â”€
   async function loadAuditLogs() {
     try {
       const logs = await fetchAuditLogs({ limit: 200 });
@@ -4014,7 +4037,7 @@ export default function Page() {
     if (tab === "auditLog") loadAuditLogs();
   }, [tab]);
 
-  // ─── Duplicate previous week ───
+  // â”€â”€â”€ Duplicate previous week â”€â”€â”€
   async function duplicatePreviousWeek() {
     if (!selectedPeriodWindow) return;
     const prevStart = addDays(parseDateOnlyLocal(payrollStartDate), -7);
@@ -4059,7 +4082,7 @@ export default function Page() {
     }
   }
 
-  // ─── CSV import ───
+  // â”€â”€â”€ CSV import â”€â”€â”€
   function handleCSVImport(event, type) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -4343,14 +4366,14 @@ export default function Page() {
                       {dashboardData.todayCallOuts.map((co, i) => {
                         const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || co.original_staff_id;
                         const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || co.client_id;
-                        return <li key={i} style={{ fontSize: 13, marginBottom: 4 }}>{staffName} — {clientName} ({co.reason || "No reason"}) — {co.status || "open"}</li>;
+                        return <li key={i} style={{ fontSize: 13, marginBottom: 4 }}>{staffName} â€” {clientName} ({co.reason || "No reason"}) â€” {co.status || "open"}</li>;
                       })}
                     </ul>
                   </details>
                 )}
 
                 {dashboardData.openShiftsCount === 0 && dashboardData.staffNear40Count === 0 && dashboardData.staffInOTCount === 0 && dashboardData.conflictsCount === 0 && dashboardData.todayCallOutsCount === 0 && (
-                  <div style={{ padding: 24, textAlign: "center", color: "#27ae60", fontWeight: 600 }}>All clear — no issues this period.</div>
+                  <div style={{ padding: 24, textAlign: "center", color: "#27ae60", fontWeight: 600 }}>All clear â€” no issues this period.</div>
                 )}
               </>
             )}
@@ -4393,7 +4416,7 @@ export default function Page() {
               }));
             }}
           >
-            <option value="">Select…</option>
+            <option value="">Selectâ€¦</option>
             {visibleClients.map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
@@ -4468,9 +4491,9 @@ export default function Page() {
                       }
                     }}
                   >
-                    <option value="">Select…</option>
+                    <option value="">Selectâ€¦</option>
                     {entry.isPrimary && suggestedStaff ? (
-                      <option value={suggestedStaff.id}>⭐ Suggested: {suggestedStaff.name}</option>
+                      <option value={suggestedStaff.id}>â­ Suggested: {suggestedStaff.name}</option>
                     ) : null}
                     {(state.staff || []).filter((s) => !entry.isPrimary || !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
                       <option key={s.id} value={s.id}>{s.name}</option>
@@ -4581,7 +4604,7 @@ export default function Page() {
                       }
                     }}
                   >
-                    <option value="">Select…</option>
+                    <option value="">Selectâ€¦</option>
                     {visibleClients
                       .filter((c) => c.id !== shiftDraft.clientId && c.id !== rowDraft.clientId3)
                       .map((c) => (
@@ -4605,7 +4628,7 @@ export default function Page() {
                         }
                       }}
                     >
-                      <option value="">Select…</option>
+                      <option value="">Selectâ€¦</option>
                       {visibleClients
                         .filter((c) => c.id !== shiftDraft.clientId && c.id !== rowDraft.clientId2)
                         .map((c) => (
@@ -4668,7 +4691,7 @@ export default function Page() {
             <div>
               <div style={styles.tiny}>Client</div>
               <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
-                <option value="">Select…</option>
+                <option value="">Selectâ€¦</option>
                 {visibleClients.map((c) => (
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
@@ -4723,8 +4746,8 @@ export default function Page() {
               <div>
                 <div style={styles.tiny}>Template</div>
                 <select style={styles.select} value={builderTemplate} onChange={(e) => setBuilderTemplate(e.target.value)}>
-                  <option value="2x12">2 × 12-hour</option>
-                  <option value="3x8">3 × 8-hour</option>
+                  <option value="2x12">2 Ã— 12-hour</option>
+                  <option value="3x8">3 Ã— 8-hour</option>
                 </select>
               </div>
             ) : null}
@@ -4907,7 +4930,7 @@ export default function Page() {
                       </div>
                       <div style={{ ...styles.tiny, marginTop: 6 }}>
                         Unassigned shifts: {week.unassignedShifts.length
-                          ? week.unassignedShifts.map((sh) => `${formatShiftDateTimeFromISO(sh.startISO)} → ${formatShiftDateTimeFromISO(sh.endISO)}`).join(" | ")
+                          ? week.unassignedShifts.map((sh) => `${formatShiftDateTimeFromISO(sh.startISO)} â†’ ${formatShiftDateTimeFromISO(sh.endISO)}`).join(" | ")
                           : "None"}
                       </div>
                     </div>
@@ -5162,7 +5185,7 @@ export default function Page() {
                             </td>
                           ) : null}
                           <td style={styles.td}>
-                            {formatShiftDateTimeFromISO(sh.startISO)} → {formatShiftDateTimeFromISO(sh.endISO)}
+                            {formatShiftDateTimeFromISO(sh.startISO)} â†’ {formatShiftDateTimeFromISO(sh.endISO)}
                           </td>
                           <td style={styles.td}>{client?.name || "(unknown)"}</td>
                         </tr>
@@ -5540,7 +5563,7 @@ export default function Page() {
                                   <td style={styles.tdCompact}>{co.date}</td>
                                   <td style={styles.tdCompact}>{staffName}</td>
                                   <td style={styles.tdCompact}>{clientName}</td>
-                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "â€”"}</td>
                                   <td style={styles.tdCompact}>
                                     {matchedShift && (
                                       <button style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px" }} onClick={() => markCallOut(matchedShift)}>Find Replacement</button>
@@ -5573,12 +5596,12 @@ export default function Page() {
                             {todayCallOuts.map((co) => {
                               const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || "?";
                               const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || "?";
-                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "—";
+                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "â€”";
                               return (
                                 <tr key={co.id}>
                                   <td style={styles.tdCompact}>{staffName}</td>
                                   <td style={styles.tdCompact}>{clientName}</td>
-                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "â€”"}</td>
                                   <td style={{ ...styles.tdCompact, color: co.status === "open" ? "#c0392b" : "#27ae60" }}>{co.status}</td>
                                   <td style={styles.tdCompact}>{repName}</td>
                                 </tr>
@@ -5611,13 +5634,13 @@ export default function Page() {
                             {allCallOuts.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((co) => {
                               const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || "?";
                               const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || "?";
-                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "—";
+                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "â€”";
                               return (
                                 <tr key={co.id}>
                                   <td style={styles.tdCompact}>{co.date}</td>
                                   <td style={styles.tdCompact}>{staffName}</td>
                                   <td style={styles.tdCompact}>{clientName}</td>
-                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "â€”"}</td>
                                   <td style={{ ...styles.tdCompact, color: co.status === "open" ? "#c0392b" : "#27ae60" }}>{co.status}</td>
                                   <td style={styles.tdCompact}>{repName}</td>
                                 </tr>
@@ -5693,7 +5716,7 @@ export default function Page() {
                           <td style={styles.tdCompact}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.totalMinutes, 0) / 60).toFixed(2)}</td>
                           <td style={styles.tdCompact}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.totalMinutes - r.otMinutes, 0) / 60).toFixed(2)}</td>
                           <td style={{ ...styles.tdCompact, color: "#c0392b" }}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.otMinutes, 0) / 60).toFixed(2)}</td>
-                          <td style={styles.tdCompact}>—</td>
+                          <td style={styles.tdCompact}>â€”</td>
                           {payrollSummary.staffRows?.[0]?.weeklyBreakdown?.map((_, wi) => (
                             <td key={wi} style={styles.tdCompact}>
                               {((payrollSummary.staffRows || []).reduce((s, r) => s + (r.weeklyBreakdown?.[wi]?.minutes || 0), 0) / 60).toFixed(1)}h
@@ -5743,7 +5766,7 @@ export default function Page() {
                       .filter((log) => auditFilter === "all" || log.action === auditFilter)
                       .map((log, idx) => {
                         const ts = log.created_at || log.timestamp || "";
-                        const displayTime = ts ? new Date(ts).toLocaleString() : "—";
+                        const displayTime = ts ? new Date(ts).toLocaleString() : "â€”";
                         const details = [];
                         if (log.new_values) {
                           const nv = typeof log.new_values === "string" ? (() => { try { return JSON.parse(log.new_values); } catch { return null; } })() : log.new_values;
@@ -5758,9 +5781,9 @@ export default function Page() {
                           <tr key={idx}>
                             <td style={{ ...styles.tdCompact, whiteSpace: "nowrap" }}>{displayTime}</td>
                             <td style={styles.tdCompact}>{(log.action || "").replace(/_/g, " ")}</td>
-                            <td style={styles.tdCompact}>{log.user_name || log.user_id || "—"}</td>
+                            <td style={styles.tdCompact}>{log.user_name || log.user_id || "â€”"}</td>
                             <td style={{ ...styles.tdCompact, fontSize: 11, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {details.length > 0 ? details.join(" | ") : log.record_id || "—"}
+                              {details.length > 0 ? details.join(" | ") : log.record_id || "â€”"}
                             </td>
                           </tr>
                         );
@@ -5782,11 +5805,11 @@ export default function Page() {
               <div style={styles.tiny}>
                 Staff: <b>{(state.staff || []).find((s) => s.id === callOutModal.staffId)?.name || "?"}</b><br />
                 Client: <b>{visibleClients.find((c) => c.id === callOutModal.clientId)?.name || "?"}</b><br />
-                Shift: <b>{callOutModal.startISO?.slice(0, 16).replace("T", " ")} — {callOutModal.endISO?.slice(11, 16)}</b>
+                Shift: <b>{callOutModal.startISO?.slice(0, 16).replace("T", " ")} â€” {callOutModal.endISO?.slice(11, 16)}</b>
               </div>
               <div style={{ marginTop: 12 }}>
                 <label style={styles.tiny}>Reason:</label>
-                <input style={{ ...styles.input, width: "100%", marginTop: 4 }} value={callOutReason} onChange={(e) => setCallOutReason(e.target.value)} placeholder="Sick, no-show, personal…" />
+                <input style={{ ...styles.input, width: "100%", marginTop: 4 }} value={callOutReason} onChange={(e) => setCallOutReason(e.target.value)} placeholder="Sick, no-show, personalâ€¦" />
               </div>
 
               <div style={{ marginTop: 16 }}>
@@ -5839,7 +5862,7 @@ export default function Page() {
             <h3 style={{ marginTop: 0 }}>Staff</h3>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <input style={{ ...styles.input, maxWidth: 360 }} value={staffDraftName} onChange={(e) => setStaffDraftName(e.target.value)} placeholder="Add staff name…" />
+              <input style={{ ...styles.input, maxWidth: 360 }} value={staffDraftName} onChange={(e) => setStaffDraftName(e.target.value)} placeholder="Add staff nameâ€¦" />
               <button style={styles.btn} onClick={addStaff}>Add Staff</button>
             </div>
 
@@ -5945,7 +5968,7 @@ export default function Page() {
                         <div style={styles.shiftMeta}>
                           Supervisor: <b>{sup ? getUserDisplayName(sup) : getSupervisorNameById(state.users, c.supervisorId)}</b>
                           <br />
-                          Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
+                          Coverage: {c.coverageStart || "07:00"} â†’ {c.coverageEnd || "23:00"}
                           <br />
                           Weekly allotment: <b>{Number(c.weeklyHours) || 0}h</b>
                         </div>
@@ -6019,7 +6042,7 @@ export default function Page() {
                   <div style={styles.shiftTop}>
                     <div>
                       <div style={styles.shiftTitle}>{getUserDisplayName(u)}</div>
-                      <div style={styles.shiftMeta}>ID: <b>{u.id}</b> • Role: <b>{u.role}</b></div>
+                      <div style={styles.shiftMeta}>ID: <b>{u.id}</b> â€¢ Role: <b>{u.role}</b></div>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
                       <button style={styles.btn2} onClick={() => setUserDraft({ ...u })}>Edit</button>
@@ -6532,3 +6555,4 @@ const styles = {
     color: UI.textMuted,
   },
 };
+
