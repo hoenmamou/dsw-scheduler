@@ -957,8 +957,7 @@ async function fetchAllDataSnapshot() {
     }
 
     if (tableSources.users === "local" && hasOnlyDefaultUsers(snapshot.users)) {
-      console.warn("Users query fell back to local placeholder users; suppressing demo users while Supabase is configured.");
-      snapshot.users = [];
+      console.warn("Users query fell back to local default users; keeping them available for login.");
     }
 
     writeLocalDb({ ...localDb, ...snapshot });
@@ -4085,7 +4084,8 @@ export default function Page() {
   // fall back to localStorage for data persistence.
 
   if (!currentUser) {
-    return <LoginScreen users={state.users} onLogin={loginAs} />;
+    const loginUsers = (state.users && state.users.length > 0) ? state.users : DEFAULT_DB.users;
+    return <LoginScreen users={loginUsers} onLogin={loginAs} />;
   }
 
   const canSeeAllShifts = isAdmin || isSupervisor;
