@@ -1845,56 +1845,12 @@ function analyzeWeeklyStaffingNeeds({ existingShifts, generatedShifts, staffList
    Login
 ========================= */
 
-function LoginScreen({ users, onLogin, onCreateAdmin }) {
-  const [picked, setPicked] = useState(users?.[0]?.id || "");
+function LoginScreen({ users, onLogin }) {
+  const effectiveUsers = (users && users.length > 0) ? users : DEFAULT_DB.users;
+  const [picked, setPicked] = useState(effectiveUsers[0]?.id || "");
   const [pin, setPin] = useState("");
 
-  const [newId, setNewId] = useState("admin");
-  const [newName, setNewName] = useState("Admin");
-  const [newPin, setNewPin] = useState("1234");
-
-  const user = users.find((u) => u.id === picked);
-
-  if (!users || users.length === 0) {
-    return (
-      <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 16 }}>
-        <div style={{ maxWidth: 520, margin: "28px auto", ...styles.card }}>
-          <h2 style={{ marginTop: 0 }}>DSW Scheduler â€” Create Admin</h2>
-
-          <div style={{ ...styles.twoCol, marginTop: 10 }}>
-            <div>
-              <div style={styles.tiny}>ID</div>
-              <input style={styles.input} value={newId} onChange={(e) => setNewId(e.target.value)} placeholder="admin" />
-            </div>
-            <div>
-              <div style={styles.tiny}>Name</div>
-              <input style={styles.input} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Admin" />
-            </div>
-            <div>
-              <div style={styles.tiny}>PIN</div>
-              <input style={styles.input} value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="1234" type="password" />
-            </div>
-          </div>
-
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-            <button
-              style={styles.btn}
-              onClick={() => {
-                if (!newId.trim() || !newName.trim() || !newPin.trim()) return alert("All fields are required.");
-                onCreateAdmin({ id: newId.trim(), name: newName.trim(), pin: newPin.trim() });
-              }}
-            >
-              Create Admin
-            </button>
-          </div>
-
-          <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
-            Tip: This will create the first user so you can log in and manage staff/clients.
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const user = effectiveUsers.find((u) => u.id === picked);
 
   return (
     <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 16 }}>
@@ -1905,7 +1861,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
           <div>
             <div style={styles.tiny}>User</div>
             <select style={styles.select} value={picked} onChange={(e) => setPicked(e.target.value)}>
-              {users.map((u) => (
+              {effectiveUsers.map((u) => (
                 <option key={u.id} value={u.id}>
                   {formatUserOptionLabel(u)}
                 </option>
@@ -1923,10 +1879,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
           <button
             style={styles.btn}
             onClick={() => {
-              console.log("Login attempt", { picked, pin, user });
               if (!user) return alert("Pick a user before logging in.");
-
-              // If the stored user does not have a pin, allow logging in (for existing Supabase rows without pin).
               const pinMatches = !user.pin || String(pin || "") === String(user.pin || "");
               if (!pinMatches) {
                 alert("Incorrect PIN.");
@@ -1941,7 +1894,7 @@ function LoginScreen({ users, onLogin, onCreateAdmin }) {
         </div>
 
         <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
-          Tip: PIN login is a simple MVP. For real security later, weâ€™ll swap to Supabase Auth + roles.
+          Select your supervisor/admin account and enter your PIN to log in.
         </div>
       </div>
     </div>
@@ -2791,16 +2744,7 @@ export default function Page() {
     alert(`${action} failed.\n\n${message}`);
   }
 
-  async function createAdminUser({ id, name, pin }) {
-    try {
-      const row = { id, name, role: "admin", pin };
-      await sbUpsert("users", [row]);
-      await refreshState(setState, setProfileDataIssues);
-      loginAs(id);
-    } catch (error) {
-      showDataActionError("Create admin", error);
-    }
-  }
+
 
   const visibleClients = useMemo(() => {
     const all = (state.clients || []).filter((c) => c.active !== false);
@@ -4141,7 +4085,7 @@ export default function Page() {
   // fall back to localStorage for data persistence.
 
   if (!currentUser) {
-    return <LoginScreen users={state.users} onLogin={loginAs} onCreateAdmin={createAdminUser} />;
+    return <LoginScreen users={state.users} onLogin={loginAs} />;
   }
 
   const canSeeAllShifts = isAdmin || isSupervisor;
