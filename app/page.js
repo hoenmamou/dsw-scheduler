@@ -1871,46 +1871,58 @@ function LoginScreen({ users, onLogin }) {
 
   const user = effectiveUsers.find((u) => u.id === picked);
 
+  // Keep picked in sync if the current selection no longer exists
+  useEffect(() => {
+    if (effectiveUsers.length > 0 && !effectiveUsers.find((u) => u.id === picked)) {
+      setPicked(effectiveUsers[0].id);
+    }
+  }, [effectiveUsers, picked]);
+
+  const handleLoginSubmit = useCallback((e) => {
+    e.preventDefault();
+    if (!user) return alert("Pick a user before logging in.");
+    const pinMatches = !user.pin || String(pin || "") === String(user.pin || "");
+    if (!pinMatches) {
+      alert("Incorrect PIN.");
+      return;
+    }
+    onLogin(user.id);
+  }, [user, pin, onLogin]);
+
   return (
     <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, padding: 16 }}>
       <div style={{ maxWidth: 520, margin: "28px auto", ...styles.card }}>
         <h2 style={{ marginTop: 0 }}>DSW Scheduler Login</h2>
 
-        <div style={{ ...styles.twoCol, marginTop: 10 }}>
-          <div>
-            <div style={styles.tiny}>User</div>
-            <select style={styles.select} value={picked} onChange={(e) => setPicked(e.target.value)}>
-              {effectiveUsers.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {formatUserOptionLabel(u)}
-                </option>
-              ))}
-            </select>
+        <form onSubmit={handleLoginSubmit}>
+          <div style={{ ...styles.twoCol, marginTop: 10 }}>
+            <div>
+              <div style={styles.tiny}>User</div>
+              <select style={styles.select} value={picked} onChange={(e) => setPicked(e.target.value)}>
+                {effectiveUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {formatUserOptionLabel(u)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div style={styles.tiny}>PIN</div>
+              <input style={styles.input} value={pin} onChange={(e) => setPin(e.target.value)} placeholder="Enter PIN" type="password" autoFocus />
+            </div>
           </div>
 
-          <div>
-            <div style={styles.tiny}>PIN</div>
-            <input style={styles.input} value={pin} onChange={(e) => setPin(e.target.value)} placeholder="Enter PIN" type="password" />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+            <button
+              style={styles.btn}
+              type="submit"
+              disabled={!user}
+            >
+              Login
+            </button>
           </div>
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-          <button
-            style={styles.btn}
-            onClick={() => {
-              if (!user) return alert("Pick a user before logging in.");
-              const pinMatches = !user.pin || String(pin || "") === String(user.pin || "");
-              if (!pinMatches) {
-                alert("Incorrect PIN.");
-                return;
-              }
-              onLogin(user.id);
-            }}
-            disabled={!user}
-          >
-            Login
-          </button>
-        </div>
+        </form>
 
         <div style={{ marginTop: 10, ...styles.tiny, opacity: 0.85 }}>
           Select your supervisor/admin account and enter your PIN to log in.
