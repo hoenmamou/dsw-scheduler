@@ -61,6 +61,13 @@ function readUserNameParts(user) {
 }
 
 function readUserNameValue(user) {
+  // Prefer explicit display name fields first
+  const displayName = String(user?.display_name ?? user?.displayName ?? "").trim();
+  if (displayName) return displayName;
+
+  const fullName = String(user?.full_name ?? user?.fullName ?? "").trim();
+  if (fullName) return fullName;
+
   const name = String(user?.name || "").trim();
   if (name) return name;
 
@@ -1178,12 +1185,23 @@ function normalizeFromDB({ users, staff, clients, shifts, call_outs, audit_logs 
       crossWeekConsecutiveProtection: false,
       maxConsecutiveDays: 6,
     },
-    users: (users || []).map((u) => ({
-      id: u.id,
-      name: getUserDisplayName(u, "Unknown User"),
-      role: getUserRoleValue(u),
-      pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
-    })),
+    users: (users || []).map((u) => {
+      const resolved = getUserDisplayName(u, "");
+      if (!resolved) {
+        console.warn(`User "${u.id}" has no resolvable name. Raw fields:`, {
+          display_name: u.display_name, full_name: u.full_name, name: u.name,
+          username: u.username, first_name: u.first_name, last_name: u.last_name,
+        });
+      }
+      return {
+        id: u.id,
+        name: resolved || "Unknown User",
+        display_name: String(u.display_name ?? u.displayName ?? "").trim(),
+        full_name: String(u.full_name ?? u.fullName ?? "").trim(),
+        role: getUserRoleValue(u),
+        pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
+      };
+    }),
     staff: (staff || []).map((s) => ({
       id: s.id,
       name: s.name,
@@ -1255,6 +1273,8 @@ function toDB(state) {
     users: (state.users || []).map((u) => ({
       id: u.id,
       name: getUserDisplayName(u, "Unknown User"),
+      display_name: u.display_name || "",
+      full_name: u.full_name || "",
       role: getUserRoleValue(u),
       pin: u.pin,
     })),
@@ -2667,7 +2687,7 @@ export default function Page() {
     if (!sessionUserId) return;
     const user = state.users.find((u) => u.id === sessionUserId);
     if (!user) return;
-    const snapshot = { id: user.id, name: user.name, role: user.role };
+    const snapshot = { id: user.id, name: user.name, display_name: user.display_name || "", full_name: user.full_name || "", role: user.role };
     setSessionUserSnapshot(snapshot);
     try {
       sessionStorage.setItem("dsw_user_snapshot", JSON.stringify(snapshot));
@@ -2720,7 +2740,7 @@ export default function Page() {
     try {
       sessionStorage.setItem("dsw_user_id", userId);
       if (user) {
-        const snapshot = { id: user.id, name: user.name, role: user.role };
+        const snapshot = { id: user.id, name: user.name, display_name: user.display_name || "", full_name: user.full_name || "", role: user.role };
         sessionStorage.setItem("dsw_user_snapshot", JSON.stringify(snapshot));
         setSessionUserSnapshot(snapshot);
       }
@@ -3659,6 +3679,8 @@ export default function Page() {
       const row = {
         id: userDraft.id.trim(),
         name: userDraft.name.trim(),
+        display_name: (userDraft.display_name || "").trim(),
+        full_name: (userDraft.full_name || "").trim(),
         role: normalizeRole(userDraft.role) || "supervisor",
         pin: userDraft.pin.trim(),
       };
