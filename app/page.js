@@ -417,7 +417,7 @@ function hasTrueTimeOverlap(aStartInput, aEndInput, bStartInput, bEndInput) {
   return aStart < bEnd && bStart < aEnd;
 }
 
-/** Day: 07:00â€“23:00, Night: 23:00â€“07:00 */
+/** Day: 07:00–23:00, Night: 23:00–07:00 */
 function splitDayNightMinutes(startISO, endISO) {
   const start = new Date(startISO);
   const end = new Date(endISO);
@@ -559,7 +559,7 @@ function shouldSplitIntoDailyShifts(startDate, endDate, startTime, endTime) {
   // If end is before start, invalid range
   if (end < start) return false;
 
-  // If end equals start (same day), do NOT splitâ€”single day shift
+  // If end equals start (same day), do NOT split—single day shift
   if (end.getTime() === start.getTime()) return false;
 
   const overnight = String(endTime || "") <= String(startTime || "");
@@ -2013,7 +2013,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 980 }}>Weekly Calendar</div>
-            <div style={styles.tiny}>Week of {start.toLocaleDateString()} â€¢ Click any shift row for edit/delete details.</div>
+            <div style={styles.tiny}>Week of {start.toLocaleDateString()} • Click any shift row for edit/delete details.</div>
           </div>
           <button className="no-print" style={styles.btn2} onClick={() => window.print()}>
             Print / Save PDF
@@ -2135,7 +2135,7 @@ function CalendarWeek({ state, weekStartDate, visibleClients, canSeeAllShifts, c
                 return (
                   <div key={sh.id} style={{ border: `1px solid ${colors.border}`, borderLeft: `4px solid ${status.sharedSupport ? colors.sharedRail : colors.border}`, borderRadius: 10, padding: 10, background: colors.background }}>
                     <div style={{ fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
-                      {compactShiftRange(sh.startISO, sh.endISO)} â€¢ {clientName(sh.clientId)} â€¢ {staffName(sh.staffId)}
+                      {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
                     </div>
                     <div style={{ ...styles.tiny, marginTop: 3 }}>
                       {formatShiftDateTimeFromISO(sh.startISO)} to {formatShiftDateTimeFromISO(sh.endISO)}
@@ -2386,11 +2386,11 @@ function CalendarMonth({ state, monthStartDate, visibleClients, canSeeAllShifts,
                 return (
                   <div key={sh.id} style={{ border: `1px solid ${UI.borderSoft}`, borderRadius: 10, padding: 10, background: UI.panelAlt }}>
                     <div style={{ fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
-                      {compactShiftRange(sh.startISO, sh.endISO)} â€¢ {clientName(sh.clientId)} â€¢ {staffName(sh.staffId)}
+                      {compactShiftRange(sh.startISO, sh.endISO)} • {clientName(sh.clientId)} • {staffName(sh.staffId)}
                     </div>
                     <div style={{ ...styles.tiny, marginTop: 3 }}>
                       {formatShiftDateTimeFromISO(sh.startISO)} to {formatShiftDateTimeFromISO(sh.endISO)}
-                      {sh.isShared ? ` â€¢ ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                      {sh.isShared ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
                     </div>
                     {canManageShift ? (
                       <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
@@ -2564,7 +2564,7 @@ function PrintableClientCalendar({ state, weekStartDate, visibleClients, selecte
                       ) : null}
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: UI.textSecondary }}>
                         {staffName(sh.staffId)}
-                        {status.sharedSupport ? ` â€¢ ${getShiftStaffingLabel(shifts, sh)}` : ""}
+                        {status.sharedSupport ? ` • ${getShiftStaffingLabel(shifts, sh)}` : ""}
                       </span>
                     </div>
                   );
@@ -2585,7 +2585,7 @@ function PrintableClientCalendar({ state, weekStartDate, visibleClients, selecte
 export default function Page() {
   const [mounted, setMounted] = useState(false);
 
-  // â€œDB stateâ€
+  // "DB state"
   const [state, setState] = useState({
     settings: {
       includeUnassignedForSupervisors: true,
@@ -3240,7 +3240,7 @@ export default function Page() {
         const message =
           `${rowLabel}: conflict with ${conflictClient?.name || "Unknown"}` +
           ` (${sup ? getUserDisplayName(sup) : "Unknown Supervisor"})` +
-          ` at ${formatShiftDateTimeFromISO(first.startISO)} â†’ ${formatShiftDateTimeFromISO(first.endISO)}.`;
+          ` at ${formatShiftDateTimeFromISO(first.startISO)} → ${formatShiftDateTimeFromISO(first.endISO)}.`;
         if (state.settings?.hardStopConflicts) {
           return { errors: [message], rows: [], planned };
         }
@@ -3265,7 +3265,7 @@ export default function Page() {
       if (workedDaysStreak > maxConsecutiveDays) {
         const message =
           `${rowLabel}: projected consecutive days would be ${workedDaysStreak} ` +
-          `(max ${maxConsecutiveDays}) for ${formatShiftDateTimeFromISO(startISO)} â†’ ${formatShiftDateTimeFromISO(endISO)}.`;
+          `(max ${maxConsecutiveDays}) for ${formatShiftDateTimeFromISO(startISO)} → ${formatShiftDateTimeFromISO(endISO)}.`;
         if (state.settings?.hardStopConflicts) {
           return { errors: [message], rows: [], planned };
         }
@@ -3864,7 +3864,7 @@ export default function Page() {
     return { staffWorking, staffInOt, totalSharedSupportMin, clientsWithHours, totalClientMin };
   }, [state.staff, staffPeriodMinutesMap, staffOtMinutesByPeriod, staffSharedSupportMinutesMap, visibleClients, periodClientHours]);
 
-  // â”€â”€â”€ Dashboard computations â”€â”€â”€
+  // ─── Dashboard computations ───
   const dashboardData = useMemo(() => {
     if (!selectedPeriodWindow) return null;
     return computeDashboardSummary({
@@ -3879,7 +3879,7 @@ export default function Page() {
     });
   }, [state.shifts, state.staff, visibleClients, state.callOuts, selectedPeriodWindow, selectedPeriodDayCount]);
 
-  // â”€â”€â”€ Payroll summary â”€â”€â”€
+  // ─── Payroll summary ───
   const payrollSummary = useMemo(() => {
     if (!selectedPeriodWindow) return null;
     const buckets = payrollBucketKeys.map((key) => {
@@ -3900,12 +3900,12 @@ export default function Page() {
     });
   }, [shiftsInSelectedPeriod, state.staff, selectedPeriodWindow, payrollBucketKeys]);
 
-  // â”€â”€â”€ Conflicts â”€â”€â”€
+  // ─── Conflicts ───
   const allConflicts = useMemo(() => {
     return findAllConflicts(shiftsInSelectedPeriod);
   }, [shiftsInSelectedPeriod]);
 
-  // â”€â”€â”€ Call-out functions â”€â”€â”€
+  // ─── Call-out functions ───
   async function markCallOut(shift) {
     setCallOutModal(shift);
     setCallOutReason("");
@@ -3987,7 +3987,7 @@ export default function Page() {
     }
   }
 
-  // â”€â”€â”€ Audit log loading â”€â”€â”€
+  // ─── Audit log loading ───
   async function loadAuditLogs() {
     try {
       const logs = await fetchAuditLogs({ limit: 200 });
@@ -4002,7 +4002,7 @@ export default function Page() {
     if (tab === "auditLog") loadAuditLogs();
   }, [tab]);
 
-  // â”€â”€â”€ Duplicate previous week â”€â”€â”€
+  // ─── Duplicate previous week ───
   async function duplicatePreviousWeek() {
     if (!selectedPeriodWindow) return;
     const prevStart = addDays(parseDateOnlyLocal(payrollStartDate), -7);
@@ -4047,7 +4047,7 @@ export default function Page() {
     }
   }
 
-  // â”€â”€â”€ CSV import â”€â”€â”€
+  // ─── CSV import ───
   function handleCSVImport(event, type) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -4332,14 +4332,14 @@ export default function Page() {
                       {dashboardData.todayCallOuts.map((co, i) => {
                         const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || co.original_staff_id;
                         const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || co.client_id;
-                        return <li key={i} style={{ fontSize: 13, marginBottom: 4 }}>{staffName} â€” {clientName} ({co.reason || "No reason"}) â€” {co.status || "open"}</li>;
+                        return <li key={i} style={{ fontSize: 13, marginBottom: 4 }}>{staffName} — {clientName} ({co.reason || "No reason"}) — {co.status || "open"}</li>;
                       })}
                     </ul>
                   </details>
                 )}
 
                 {dashboardData.openShiftsCount === 0 && dashboardData.staffNear40Count === 0 && dashboardData.staffInOTCount === 0 && dashboardData.conflictsCount === 0 && dashboardData.todayCallOutsCount === 0 && (
-                  <div style={{ padding: 24, textAlign: "center", color: "#27ae60", fontWeight: 600 }}>All clear â€” no issues this period.</div>
+                  <div style={{ padding: 24, textAlign: "center", color: "#27ae60", fontWeight: 600 }}>All clear — no issues this period.</div>
                 )}
               </>
             )}
@@ -4382,7 +4382,7 @@ export default function Page() {
               }));
             }}
           >
-            <option value="">Selectâ€¦</option>
+            <option value="">Select…</option>
             {visibleClients.map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
@@ -4457,9 +4457,9 @@ export default function Page() {
                       }
                     }}
                   >
-                    <option value="">Selectâ€¦</option>
+                    <option value="">Select…</option>
                     {entry.isPrimary && suggestedStaff ? (
-                      <option value={suggestedStaff.id}>â­ Suggested: {suggestedStaff.name}</option>
+                      <option value={suggestedStaff.id}>⭐ Suggested: {suggestedStaff.name}</option>
                     ) : null}
                     {(state.staff || []).filter((s) => !entry.isPrimary || !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
                       <option key={s.id} value={s.id}>{s.name}</option>
@@ -4570,7 +4570,7 @@ export default function Page() {
                       }
                     }}
                   >
-                    <option value="">Selectâ€¦</option>
+                    <option value="">Select…</option>
                     {visibleClients
                       .filter((c) => c.id !== shiftDraft.clientId && c.id !== rowDraft.clientId3)
                       .map((c) => (
@@ -4594,7 +4594,7 @@ export default function Page() {
                         }
                       }}
                     >
-                      <option value="">Selectâ€¦</option>
+                      <option value="">Select…</option>
                       {visibleClients
                         .filter((c) => c.id !== shiftDraft.clientId && c.id !== rowDraft.clientId2)
                         .map((c) => (
@@ -4657,7 +4657,7 @@ export default function Page() {
             <div>
               <div style={styles.tiny}>Client</div>
               <select style={styles.select} value={builderClientId} onChange={(e) => setBuilderClientId(e.target.value)}>
-                <option value="">Selectâ€¦</option>
+                <option value="">Select…</option>
                 {visibleClients.map((c) => (
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
@@ -4896,7 +4896,7 @@ export default function Page() {
                       </div>
                       <div style={{ ...styles.tiny, marginTop: 6 }}>
                         Unassigned shifts: {week.unassignedShifts.length
-                          ? week.unassignedShifts.map((sh) => `${formatShiftDateTimeFromISO(sh.startISO)} â†’ ${formatShiftDateTimeFromISO(sh.endISO)}`).join(" | ")
+                          ? week.unassignedShifts.map((sh) => `${formatShiftDateTimeFromISO(sh.startISO)} → ${formatShiftDateTimeFromISO(sh.endISO)}`).join(" | ")
                           : "None"}
                       </div>
                     </div>
@@ -5151,7 +5151,7 @@ export default function Page() {
                             </td>
                           ) : null}
                           <td style={styles.td}>
-                            {formatShiftDateTimeFromISO(sh.startISO)} â†’ {formatShiftDateTimeFromISO(sh.endISO)}
+                            {formatShiftDateTimeFromISO(sh.startISO)} → {formatShiftDateTimeFromISO(sh.endISO)}
                           </td>
                           <td style={styles.td}>{client?.name || "(unknown)"}</td>
                         </tr>
@@ -5529,7 +5529,7 @@ export default function Page() {
                                   <td style={styles.tdCompact}>{co.date}</td>
                                   <td style={styles.tdCompact}>{staffName}</td>
                                   <td style={styles.tdCompact}>{clientName}</td>
-                                  <td style={styles.tdCompact}>{co.reason || "â€”"}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
                                   <td style={styles.tdCompact}>
                                     {matchedShift && (
                                       <button style={{ ...styles.btn2, fontSize: 11, padding: "2px 8px" }} onClick={() => markCallOut(matchedShift)}>Find Replacement</button>
@@ -5562,12 +5562,12 @@ export default function Page() {
                             {todayCallOuts.map((co) => {
                               const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || "?";
                               const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || "?";
-                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "â€”";
+                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "—";
                               return (
                                 <tr key={co.id}>
                                   <td style={styles.tdCompact}>{staffName}</td>
                                   <td style={styles.tdCompact}>{clientName}</td>
-                                  <td style={styles.tdCompact}>{co.reason || "â€”"}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
                                   <td style={{ ...styles.tdCompact, color: co.status === "open" ? "#c0392b" : "#27ae60" }}>{co.status}</td>
                                   <td style={styles.tdCompact}>{repName}</td>
                                 </tr>
@@ -5600,13 +5600,13 @@ export default function Page() {
                             {allCallOuts.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((co) => {
                               const staffName = (state.staff || []).find((s) => s.id === co.original_staff_id)?.name || "?";
                               const clientName = visibleClients.find((c) => c.id === co.client_id)?.name || "?";
-                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "â€”";
+                              const repName = co.replacement_staff_id ? ((state.staff || []).find((s) => s.id === co.replacement_staff_id)?.name || "?") : "—";
                               return (
                                 <tr key={co.id}>
                                   <td style={styles.tdCompact}>{co.date}</td>
                                   <td style={styles.tdCompact}>{staffName}</td>
                                   <td style={styles.tdCompact}>{clientName}</td>
-                                  <td style={styles.tdCompact}>{co.reason || "â€”"}</td>
+                                  <td style={styles.tdCompact}>{co.reason || "—"}</td>
                                   <td style={{ ...styles.tdCompact, color: co.status === "open" ? "#c0392b" : "#27ae60" }}>{co.status}</td>
                                   <td style={styles.tdCompact}>{repName}</td>
                                 </tr>
@@ -5682,7 +5682,7 @@ export default function Page() {
                           <td style={styles.tdCompact}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.totalMinutes, 0) / 60).toFixed(2)}</td>
                           <td style={styles.tdCompact}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.totalMinutes - r.otMinutes, 0) / 60).toFixed(2)}</td>
                           <td style={{ ...styles.tdCompact, color: "#c0392b" }}>{((payrollSummary.staffRows || []).reduce((s, r) => s + r.otMinutes, 0) / 60).toFixed(2)}</td>
-                          <td style={styles.tdCompact}>â€”</td>
+                          <td style={styles.tdCompact}>—</td>
                           {payrollSummary.staffRows?.[0]?.weeklyBreakdown?.map((_, wi) => (
                             <td key={wi} style={styles.tdCompact}>
                               {((payrollSummary.staffRows || []).reduce((s, r) => s + (r.weeklyBreakdown?.[wi]?.minutes || 0), 0) / 60).toFixed(1)}h
@@ -5732,7 +5732,7 @@ export default function Page() {
                       .filter((log) => auditFilter === "all" || log.action === auditFilter)
                       .map((log, idx) => {
                         const ts = log.created_at || log.timestamp || "";
-                        const displayTime = ts ? new Date(ts).toLocaleString() : "â€”";
+                        const displayTime = ts ? new Date(ts).toLocaleString() : "—";
                         const details = [];
                         if (log.new_values) {
                           const nv = typeof log.new_values === "string" ? (() => { try { return JSON.parse(log.new_values); } catch { return null; } })() : log.new_values;
@@ -5747,9 +5747,9 @@ export default function Page() {
                           <tr key={idx}>
                             <td style={{ ...styles.tdCompact, whiteSpace: "nowrap" }}>{displayTime}</td>
                             <td style={styles.tdCompact}>{(log.action || "").replace(/_/g, " ")}</td>
-                            <td style={styles.tdCompact}>{log.user_name || log.user_id || "â€”"}</td>
+                            <td style={styles.tdCompact}>{log.user_name || log.user_id || "—"}</td>
                             <td style={{ ...styles.tdCompact, fontSize: 11, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {details.length > 0 ? details.join(" | ") : log.record_id || "â€”"}
+                              {details.length > 0 ? details.join(" | ") : log.record_id || "—"}
                             </td>
                           </tr>
                         );
@@ -5771,11 +5771,11 @@ export default function Page() {
               <div style={styles.tiny}>
                 Staff: <b>{(state.staff || []).find((s) => s.id === callOutModal.staffId)?.name || "?"}</b><br />
                 Client: <b>{visibleClients.find((c) => c.id === callOutModal.clientId)?.name || "?"}</b><br />
-                Shift: <b>{callOutModal.startISO?.slice(0, 16).replace("T", " ")} â€” {callOutModal.endISO?.slice(11, 16)}</b>
+                Shift: <b>{callOutModal.startISO?.slice(0, 16).replace("T", " ")} — {callOutModal.endISO?.slice(11, 16)}</b>
               </div>
               <div style={{ marginTop: 12 }}>
                 <label style={styles.tiny}>Reason:</label>
-                <input style={{ ...styles.input, width: "100%", marginTop: 4 }} value={callOutReason} onChange={(e) => setCallOutReason(e.target.value)} placeholder="Sick, no-show, personalâ€¦" />
+                <input style={{ ...styles.input, width: "100%", marginTop: 4 }} value={callOutReason} onChange={(e) => setCallOutReason(e.target.value)} placeholder="Sick, no-show, personal…" />
               </div>
 
               <div style={{ marginTop: 16 }}>
@@ -5828,7 +5828,7 @@ export default function Page() {
             <h3 style={{ marginTop: 0 }}>Staff</h3>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <input style={{ ...styles.input, maxWidth: 360 }} value={staffDraftName} onChange={(e) => setStaffDraftName(e.target.value)} placeholder="Add staff nameâ€¦" />
+              <input style={{ ...styles.input, maxWidth: 360 }} value={staffDraftName} onChange={(e) => setStaffDraftName(e.target.value)} placeholder="Add staff name…" />
               <button style={styles.btn} onClick={addStaff}>Add Staff</button>
             </div>
 
@@ -5934,7 +5934,7 @@ export default function Page() {
                         <div style={styles.shiftMeta}>
                           Supervisor: <b>{sup ? getUserDisplayName(sup) : getSupervisorNameById(state.users, c.supervisorId)}</b>
                           <br />
-                          Coverage: {c.coverageStart || "07:00"} â†’ {c.coverageEnd || "23:00"}
+                          Coverage: {c.coverageStart || "07:00"} → {c.coverageEnd || "23:00"}
                           <br />
                           Weekly allotment: <b>{Number(c.weeklyHours) || 0}h</b>
                         </div>
@@ -6008,7 +6008,7 @@ export default function Page() {
                   <div style={styles.shiftTop}>
                     <div>
                       <div style={styles.shiftTitle}>{getUserDisplayName(u)}</div>
-                      <div style={styles.shiftMeta}>ID: <b>{u.id}</b> â€¢ Role: <b>{u.role}</b></div>
+                      <div style={styles.shiftMeta}>ID: <b>{u.id}</b> • Role: <b>{u.role}</b></div>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
                       <button style={styles.btn2} onClick={() => setUserDraft({ ...u })}>Edit</button>
