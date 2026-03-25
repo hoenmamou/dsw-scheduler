@@ -946,6 +946,19 @@ async function fetchAllDataSnapshot() {
     for (const result of results) {
       if (result.status === "fulfilled") {
         const { table, data } = result.value;
+        const localRows = snapshot[table] || [];
+
+        // Guard: if Supabase returned 0 rows but local storage has data,
+        // this is likely an RLS / policy issue — preserve local data instead of wiping it.
+        if (data.length === 0 && localRows.length > 0) {
+          console.warn(
+            `Supabase returned 0 rows for "${table}" but local storage has ${localRows.length}. ` +
+            `Possible RLS / SELECT policy issue — keeping local data.`
+          );
+          tableSources[table] = "local-preserved";
+          continue;
+        }
+
         snapshot[table] = data;
         replaceLocalTable(table, data);
         tableSources[table] = "supabase";
@@ -972,6 +985,12 @@ async function fetchAllDataSnapshot() {
       count: snapshot.users?.length || 0,
       ids: (snapshot.users || []).map((user) => user.id),
       displayNames: (snapshot.users || []).map((user) => readUserNameValue(user) || "Unknown User"),
+    });
+    console.info(`Staff loaded from ${tableSources.staff || "unknown"}.`, {
+      count: snapshot.staff?.length || 0,
+      ids: (snapshot.staff || []).map((s) => s.id),
+      names: (snapshot.staff || []).map((s) => s.name),
+      sampleRow: snapshot.staff?.[0] || null,
     });
     return { source: tableSources.users === "supabase" ? "supabase" : "local", snapshot, tableSources };
   }
@@ -1202,15 +1221,27 @@ function normalizeFromDB({ users, staff, clients, shifts, call_outs, audit_logs 
         pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
       };
     }),
-    staff: (staff || []).map((s) => ({
-      id: s.id,
-      name: s.name,
-      active: s.active !== false,
-      notes: s.notes || "",
-      restrictions: s.restrictions || "",
-      unavailableDates: (() => { try { return JSON.parse(s.unavailable_dates || "[]"); } catch { return []; } })(),
-      trainingExpiration: s.training_expiration || null,
-    })),
+    staff: (staff || []).filter((s) => {
+      if (!s || !s.id) {
+        console.warn("Skipping staff row with missing id:", s);
+        return false;
+      }
+      return true;
+    }).map((s) => {
+      const name = s.name || s.staff_name || s.display_name || s.full_name;
+      if (!name) {
+        console.warn(`Staff "${s.id}" has no resolvable name. Raw fields:`, s);
+      }
+      return {
+        id: s.id,
+        name: name || "(unnamed staff)",
+        active: s.active !== false,
+        notes: s.notes || "",
+        restrictions: s.restrictions || "",
+        unavailableDates: (() => { try { return JSON.parse(s.unavailable_dates || "[]"); } catch { return []; } })(),
+        trainingExpiration: s.training_expiration || null,
+      };
+    }),
     clients: (clients || []).map((c) => ({
       id: c.id,
       name: c.name,
@@ -1317,15 +1348,15 @@ function toDB(state) {
 
     call_outs: (state.callOuts || []).map((co) => ({
       id: co.id,
-      shift_id: co.shift_id,
-      client_id: co.client_id,
-      original_staff_id: co.original_staff_id,
-      replacement_staff_id: co.replacement_staff_id || "",
+      shift_id: co.shiftId || co.shift_id,
+      client_id: co.clientId || co.client_id,
+      original_staff_id: co.originalStaffId || co.original_staff_id,
+      replacement_staff_id: co.replacementStaffId || co.replacement_staff_id || "",
       date: co.date,
       reason: co.reason || "",
       status: co.status || "open",
-      created_by: co.created_by || "unknown",
-      created_at: co.created_at || new Date().toISOString(),
+      created_by: co.createdBy || co.created_by || "unknown",
+      created_at: co.createdAt || co.created_at || new Date().toISOString(),
     })),
   };
 }
@@ -1341,6 +1372,14 @@ async function refreshState(setStateLocal, setIssuesLocal) {
         supabaseConfigured: SUPABASE_CONFIGURED,
         tableSources,
       });
+    }
+
+    if (SUPABASE_CONFIGURED && tableSources?.staff && (!snapshot.staff || snapshot.staff.length === 0)) {
+      console.warn(
+        `Staff table returned zero rows (source: ${tableSources.staff}).`,
+        "If you have staff in Supabase, check that RLS policies allow SELECT for the anon role.",
+        { tableSources }
+      );
     }
 
     if (!SUPABASE_CONFIGURED && source === "local" && (!snapshot.users || snapshot.users.length === 0)) {
@@ -3601,7 +3640,16 @@ export default function Page() {
 
   async function toggleStaff(id, active) {
     try {
-      await sbUpsert("staff", [{ id, active: !active }]);
+      const existing = (state.staff || []).find((s) => s.id === id);
+      await sbUpsert("staff", [{
+        id,
+        name: existing?.name || "(unnamed staff)",
+        active: !active,
+        notes: existing?.notes || "",
+        restrictions: existing?.restrictions || "",
+        unavailable_dates: JSON.stringify(existing?.unavailableDates || []),
+        training_expiration: existing?.trainingExpiration || "",
+      }]);
       await refreshState(setState, setProfileDataIssues);
     } catch (error) {
       showDataActionError("Update staff", error);
