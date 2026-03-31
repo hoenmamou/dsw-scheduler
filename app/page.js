@@ -1138,6 +1138,9 @@ async function sbSelect(table) {
 }
 
 async function sbUpsert(table, rows) {
+  if (table === "staff") {
+    console.warn("sbUpsert called for staff table — use insertStaff / insertStaffBulk / updateStaffRow instead.");
+  }
   if (SUPABASE_CONFIGURED && supabase) {
     let { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
     if (error && table === "clients") {
@@ -1176,6 +1179,76 @@ async function sbDelete(table, id) {
   }
 
   removeLocalTableRow(table, id);
+}
+
+async function insertStaff(row) {
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { data, error } = await supabase
+      .from("staff")
+      .insert([row])
+      .select();
+
+    if (error) {
+      console.error("insertStaff failed", { table: "staff", operation: "insert", row, error });
+      const wrappedError = createDataRequestError("insert", "staff", error);
+      reportSupabaseError(wrappedError);
+      throw wrappedError;
+    }
+
+    console.info("insertStaff: inserted row(s):", data);
+    replaceLocalTable("staff", await sbSelect("staff"));
+    return data;
+  }
+
+  mergeLocalTableRows("staff", [row]);
+  return [row];
+}
+
+async function insertStaffBulk(rows) {
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { data, error } = await supabase
+      .from("staff")
+      .upsert(rows, { onConflict: "id" })
+      .select();
+
+    if (error) {
+      console.error("insertStaffBulk failed", { table: "staff", operation: "bulk-upsert", rowCount: rows.length, error });
+      const wrappedError = createDataRequestError("bulk-upsert", "staff", error);
+      reportSupabaseError(wrappedError);
+      throw wrappedError;
+    }
+
+    console.info("insertStaffBulk: upserted row(s):", data?.length);
+    replaceLocalTable("staff", await sbSelect("staff"));
+    return data;
+  }
+
+  mergeLocalTableRows("staff", rows);
+  return rows;
+}
+
+async function updateStaffRow(id, patch) {
+  if (SUPABASE_CONFIGURED && supabase) {
+    const { data, error } = await supabase
+      .from("staff")
+      .update(patch)
+      .eq("id", id)
+      .select();
+
+    if (error) {
+      console.error("updateStaffRow failed", { table: "staff", operation: "update", id, patch, error });
+      const wrappedError = createDataRequestError("update", "staff", error);
+      reportSupabaseError(wrappedError);
+      throw wrappedError;
+    }
+
+    console.info("updateStaffRow: updated row(s):", data);
+    replaceLocalTable("staff", await sbSelect("staff"));
+    return data;
+  }
+
+  mergeLocalTableRows("staff", [{ id, ...patch }]);
+  return [{ id, ...patch }];
 }
 
 // Local data fallback default seed
@@ -1221,27 +1294,24 @@ function normalizeFromDB({ users, staff, clients, shifts, call_outs, audit_logs 
         pin: u.pin ?? u.user_pin ?? u.passcode ?? "",
       };
     }),
-    staff: (staff || []).filter((s) => {
-      if (!s || !s.id) {
-        console.warn("Skipping staff row with missing id:", s);
-        return false;
-      }
-      return true;
-    }).map((s) => {
-      const name = s.name || s.staff_name || s.display_name || s.full_name;
-      if (!name) {
-        console.warn(`Staff "${s.id}" has no resolvable name. Raw fields:`, s);
-      }
-      return {
-        id: s.id,
-        name: name || "(unnamed staff)",
+    staff: (staff || [])
+      .map((s) => ({
+        id: String(s.id || "").trim(),
+        name: String(s.name || s.staff_name || s.display_name || s.full_name || "").trim(),
         active: s.active !== false,
         notes: s.notes || "",
         restrictions: s.restrictions || "",
-        unavailableDates: (() => { try { return JSON.parse(s.unavailable_dates || "[]"); } catch { return []; } })(),
+        unavailableDates: (() => {
+          try { return JSON.parse(s.unavailable_dates || "[]"); }
+          catch { return []; }
+        })(),
         trainingExpiration: s.training_expiration || null,
-      };
-    }),
+      }))
+      .filter((s) => {
+        const valid = !!s.id && !!s.name;
+        if (!valid) console.warn("normalizeFromDB: invalid staff row dropped:", s);
+        return valid;
+      }),
     clients: (clients || []).map((c) => ({
       id: c.id,
       name: c.name,
@@ -1394,6 +1464,13 @@ async function refreshState(setStateLocal, setIssuesLocal) {
     }
 
     const normalized = normalizeFromDB(snapshot);
+    console.info("refreshState: staff normalization result", {
+      rawCount: snapshot.staff?.length || 0,
+      normalizedCount: normalized.staff?.length || 0,
+      staffIds: (normalized.staff || []).map((s) => s.id),
+      staffNames: (normalized.staff || []).map((s) => s.name),
+      usedFallback: source === "local",
+    });
     if (typeof setStateLocal === "function") setStateLocal((p) => ({ ...p, ...normalized }));
     if (typeof setIssuesLocal === "function") setIssuesLocal(issues);
     return normalized;
@@ -3628,8 +3705,18 @@ export default function Page() {
     console.debug("addStaff", { name, staffDraftName });
     if (!name) return alert("Staff name is required.");
 
+    const newRow = {
+      id: uid("st"),
+      name,
+      active: true,
+      notes: "",
+      restrictions: "",
+      unavailable_dates: "[]",
+      training_expiration: "",
+    };
+
     try {
-      await sbUpsert("staff", [{ id: uid("st"), name, active: true }]);
+      await insertStaff(newRow);
       await refreshState(setState, setProfileDataIssues);
       setStaffDraftName("");
     } catch (err) {
@@ -3640,16 +3727,7 @@ export default function Page() {
 
   async function toggleStaff(id, active) {
     try {
-      const existing = (state.staff || []).find((s) => s.id === id);
-      await sbUpsert("staff", [{
-        id,
-        name: existing?.name || "(unnamed staff)",
-        active: !active,
-        notes: existing?.notes || "",
-        restrictions: existing?.restrictions || "",
-        unavailable_dates: JSON.stringify(existing?.unavailableDates || []),
-        training_expiration: existing?.trainingExpiration || "",
-      }]);
+      await updateStaffRow(id, { active: !active });
       await refreshState(setState, setProfileDataIssues);
     } catch (error) {
       showDataActionError("Update staff", error);
@@ -4128,12 +4206,16 @@ export default function Page() {
         if (type === "staff") {
           const staffRows = rows.map((r) => ({
             id: r.id || uid("st"),
-            name: r.name || r.first_name && r.last_name ? `${r.last_name}, ${r.first_name}` : r.name || "",
+            name: r.name || (r.first_name && r.last_name ? `${r.last_name}, ${r.first_name}` : ""),
             active: r.active !== "false",
+            notes: r.notes || "",
+            restrictions: r.restrictions || "",
+            unavailable_dates: r.unavailable_dates || "[]",
+            training_expiration: r.training_expiration || "",
           })).filter((r) => r.name);
           if (!staffRows.length) return alert("No valid staff rows found.");
           if (!confirm(`Import ${staffRows.length} staff members?`)) return;
-          await sbUpsert("staff", staffRows);
+          await insertStaffBulk(staffRows);
           await refreshState(setState, setProfileDataIssues);
           alert(`Imported ${staffRows.length} staff members.`);
         } else if (type === "clients") {
