@@ -3169,7 +3169,9 @@ export default function Page() {
     [state.clients, builderClientId]
   );
   const activeStaff = useMemo(
-    () => (state.staff || []).filter((s) => s.active !== false),
+    () => (state.staff || [])
+      .filter((s) => s.active !== false)
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" })),
     [state.staff]
   );
 
@@ -4605,7 +4607,10 @@ export default function Page() {
                     {entry.isPrimary && suggestedStaff ? (
                       <option value={suggestedStaff.id}>⭐ Suggested: {suggestedStaff.name}</option>
                     ) : null}
-                    {(state.staff || []).filter((s) => !entry.isPrimary || !suggestedStaff || s.id !== suggestedStaff.id).map((s) => (
+                    {[...(state.staff || [])]
+                      .filter((s) => !entry.isPrimary || !suggestedStaff || s.id !== suggestedStaff.id)
+                      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" }))
+                      .map((s) => (
                       <option key={s.id} value={s.id}>{s.name}</option>
                     ))}
                   </select>
@@ -5266,7 +5271,8 @@ export default function Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(state.staff || [])
+                  {[...(state.staff || [])]
+                    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" }))
                     .filter((st) => staffScheduleFilter === "all" || st.id === staffScheduleFilter)
                     .map((st) => {
                     const shifts = shiftsInSelectedPeriod
@@ -5979,7 +5985,9 @@ export default function Page() {
             <div style={styles.hr} />
 
             <div style={{ display: "grid", gap: 10 }}>
-              {(state.staff || []).map((s) => (
+              {[...(state.staff || [])]
+                .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" }))
+                .map((s) => (
                 <div key={s.id} style={styles.shift}>
                   <div style={styles.shiftTop}>
                     <div>
