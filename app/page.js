@@ -1181,15 +1181,22 @@ async function sbDelete(table, id) {
   removeLocalTableRow(table, id);
 }
 
+// Only send columns that exist in public.staff: id, name, active
+function toStaffDbRow(row) {
+  return { id: row.id, name: row.name, active: row.active !== false };
+}
+
 async function insertStaff(row) {
+  const dbRow = toStaffDbRow(row);
+  console.info("insertStaff: sending row:", dbRow);
   if (SUPABASE_CONFIGURED && supabase) {
     const { data, error } = await supabase
       .from("staff")
-      .insert([row])
+      .insert([dbRow])
       .select();
 
     if (error) {
-      console.error("insertStaff failed", { table: "staff", operation: "insert", row, error });
+      console.error("insertStaff failed", { table: "staff", operation: "insert", dbRow, error });
       const wrappedError = createDataRequestError("insert", "staff", error);
       reportSupabaseError(wrappedError);
       throw wrappedError;
@@ -1200,19 +1207,21 @@ async function insertStaff(row) {
     return data;
   }
 
-  mergeLocalTableRows("staff", [row]);
-  return [row];
+  mergeLocalTableRows("staff", [dbRow]);
+  return [dbRow];
 }
 
 async function insertStaffBulk(rows) {
+  const dbRows = rows.map(toStaffDbRow);
+  console.info("insertStaffBulk: sending rows:", dbRows.length);
   if (SUPABASE_CONFIGURED && supabase) {
     const { data, error } = await supabase
       .from("staff")
-      .upsert(rows, { onConflict: "id" })
+      .upsert(dbRows, { onConflict: "id" })
       .select();
 
     if (error) {
-      console.error("insertStaffBulk failed", { table: "staff", operation: "bulk-upsert", rowCount: rows.length, error });
+      console.error("insertStaffBulk failed", { table: "staff", operation: "bulk-upsert", rowCount: dbRows.length, error });
       const wrappedError = createDataRequestError("bulk-upsert", "staff", error);
       reportSupabaseError(wrappedError);
       throw wrappedError;
@@ -1223,20 +1232,25 @@ async function insertStaffBulk(rows) {
     return data;
   }
 
-  mergeLocalTableRows("staff", rows);
-  return rows;
+  mergeLocalTableRows("staff", dbRows);
+  return dbRows;
 }
 
 async function updateStaffRow(id, patch) {
+  // Only allow schema-safe keys in the patch
+  const safePatch = {};
+  if ("name" in patch) safePatch.name = patch.name;
+  if ("active" in patch) safePatch.active = patch.active;
+  console.info("updateStaffRow: sending patch:", { id, safePatch });
   if (SUPABASE_CONFIGURED && supabase) {
     const { data, error } = await supabase
       .from("staff")
-      .update(patch)
+      .update(safePatch)
       .eq("id", id)
       .select();
 
     if (error) {
-      console.error("updateStaffRow failed", { table: "staff", operation: "update", id, patch, error });
+      console.error("updateStaffRow failed", { table: "staff", operation: "update", id, safePatch, error });
       const wrappedError = createDataRequestError("update", "staff", error);
       reportSupabaseError(wrappedError);
       throw wrappedError;
@@ -1247,8 +1261,8 @@ async function updateStaffRow(id, patch) {
     return data;
   }
 
-  mergeLocalTableRows("staff", [{ id, ...patch }]);
-  return [{ id, ...patch }];
+  mergeLocalTableRows("staff", [{ id, ...safePatch }]);
+  return [{ id, ...safePatch }];
 }
 
 // Local data fallback default seed
@@ -1381,10 +1395,6 @@ function toDB(state) {
     })),
     staff: (state.staff || []).map((s) => ({
       id: s.id, name: s.name, active: s.active !== false,
-      notes: s.notes || "",
-      restrictions: s.restrictions || "",
-      unavailable_dates: JSON.stringify(s.unavailableDates || []),
-      training_expiration: s.trainingExpiration || "",
     })),
     clients: (state.clients || []).map((c) => ({
       id: c.id,
@@ -3709,10 +3719,6 @@ export default function Page() {
       id: uid("st"),
       name,
       active: true,
-      notes: "",
-      restrictions: "",
-      unavailable_dates: "[]",
-      training_expiration: "",
     };
 
     try {
@@ -4208,10 +4214,6 @@ export default function Page() {
             id: r.id || uid("st"),
             name: r.name || (r.first_name && r.last_name ? `${r.last_name}, ${r.first_name}` : ""),
             active: r.active !== "false",
-            notes: r.notes || "",
-            restrictions: r.restrictions || "",
-            unavailable_dates: r.unavailable_dates || "[]",
-            training_expiration: r.training_expiration || "",
           })).filter((r) => r.name);
           if (!staffRows.length) return alert("No valid staff rows found.");
           if (!confirm(`Import ${staffRows.length} staff members?`)) return;
